@@ -407,7 +407,9 @@ function settingsWindowFor(url) {
     settingsWindow = null;
   });
   confineAppWindow(settingsWindow);
-  settingsWindow.webContents.on("console-message", (_e, _l, message) =>
+  // Electron 35+ passes one event object; the positional level/message/line
+  // arguments are deprecated (see the 35.0 breaking changes).
+  settingsWindow.webContents.on("console-message", ({ message }) =>
     console.log(`[settings] ${message}`),
   );
   void settingsWindow.loadURL(url);
@@ -578,7 +580,7 @@ async function createWindow() {
   mainWindow.webContents.on("did-fail-load", (_e, code, desc, url) =>
     console.log(`[desktop] load failed ${code} ${desc} ${url}`),
   );
-  mainWindow.webContents.on("console-message", (_e, _level, message) => {
+  mainWindow.webContents.on("console-message", ({ message }) => {
     console.log(`[renderer] ${message}`);
     // Probe mode ends the moment the renderer reports — no fixed timeout to wait out.
     if (process.env.BZ_SETTINGS_TEST && message.startsWith("SETTINGS_RESULT:")) {
