@@ -52,7 +52,7 @@
     "artifactName": "BeeZilla-Setup-${version}.${ext}"
   },
   "devDependencies": {
-    "electron": "^32.2.0",
-    "electron-builder": "^25.1.8"
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
   }
 }
