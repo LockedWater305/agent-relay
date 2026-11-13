@@ -22,6 +22,8 @@ import {
   allowAudioPermission, connectBaseUrl, createRuntimeAuth, isAppDownload, isAppPage,
   isConnectNavigation, isTrustedSender, retargetAppPage, safeExternalUrl, sameOrigin,
 } from "./security.mjs";
+import { createBroker } from "./capability-broker.mjs";
+import { folderActivityForwarder, registerFolderIpc } from "./folders-ipc.mjs";
 
 // FIRST, before anything that can throw. 0.2.0 died at module-link time and left
 // no trace anywhere; every launch now writes a session block to
@@ -74,6 +76,9 @@ const testPageUrl = !app.isPackaged && process.env.BZ_SETTINGS_TEST
   ? pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "test-settings.html")).href
   : null;
 const runtimeAuth = createRuntimeAuth({ getContents: trustedContents, testPageUrl });
+
+// One broker for the whole process. Folder grants live here in memory, so quitting forgets them.
+const folderBroker = createBroker({ onActivity: folderActivityForwarder(trustedContents) });
 
 function bindRuntime(rt, notifyWindows = false) {
   const previousBase = runtimeBase;
@@ -776,6 +781,16 @@ app.whenReady().then(async () => {
     await applyStoredInferenceToEnv();
     await applyStoredMusicToEnv();
     settingsHandlers = await registerSettingsIpc();
+    // Folder access: the channels exist before any window loads. Grants come only from the native
+    // folder dialog (pick); no channel takes a path from the page to grant.
+    registerFolderIpc({
+      ipcMain,
+      dialog,
+      broker: folderBroker,
+      isTrustedSender: (event) => isTrustedSender(event, { base: runtimeBase, contents: trustedContents(), testPageUrl }),
+      getWindow: (event) => BrowserWindow.fromWebContents(event.sender),
+      runtimeOrigin: () => runtimeBase,
+    });
     await createWindow();
   } catch (err) {
     const detail = err instanceof Error ? err.stack || err.message : String(err);

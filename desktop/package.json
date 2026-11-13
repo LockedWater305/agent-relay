@@ -30,7 +30,9 @@
       "connect.mjs",
       "paths.mjs",
       "logger.mjs",
-      "security.mjs"
+      "security.mjs",
+      "capability-broker.mjs",
+      "folders-ipc.mjs"
     ],
     "extraResources": [
       {
