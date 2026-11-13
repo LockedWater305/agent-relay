@@ -40,11 +40,13 @@ ipcRenderer.on("beezilla:runtime:changed", (_event, data) => {
     navigateWhenIdle();
   } catch { /* invalid event: remain on the current page */ }
 });
-const call = async (channel, payload) => {
+// Every page-to-main call is counted here, so a runtime navigation waits for its reply.
+const invoke = async (channel, payload) => {
   pendingCalls++;
-  try { return await ipcRenderer.invoke(`beezilla:${channel}`, payload); }
+  try { return await ipcRenderer.invoke(channel, payload); }
   finally { pendingCalls--; navigateWhenIdle(); }
 };
+const call = (channel, payload) => invoke(`beezilla:${channel}`, payload);
 
 // Even a same-origin subframe is not a privileged app window.
 if (process.isMainFrame) contextBridge.exposeInMainWorld("beezilla", {
@@ -65,5 +67,39 @@ if (process.isMainFrame) contextBridge.exposeInMainWorld("beezilla", {
     openLogs: () => call("app:openLogs"),
     /** write a line into main.log from the page — mic and transcriber diagnostics */
     log: (message) => call("app:log", message),
+  },
+});
+
+// Folder access (desktop/folders-ipc.mjs). The bridge is exposed only in the top frame of a window
+// whose origin is the runtime origin that main reports for that window right now. Main answers
+// synchronously because the runtime port can change on a restart, so a value fixed when the window
+// was created could be stale. Main checks the sender again on every call. The channel names are
+// repeated here because a sandboxed preload cannot import desktop/folders-ipc.mjs.
+function folderOrigin() {
+  try {
+    const origin = ipcRenderer.sendSync("bz-folders:origin");
+    return typeof origin === "string" && origin === window.location.origin ? origin : null;
+  } catch {
+    return null;
+  }
+}
+
+if (process.isMainFrame && folderOrigin() !== null) contextBridge.exposeInMainWorld("beezillaFolders", {
+  pick: () => invoke("bz-folders:pick"),
+  list: () => invoke("bz-folders:list"),
+  activate: (id) => invoke("bz-folders:activate", { id }),
+  pause: (id) => invoke("bz-folders:pause", { id }),
+  resume: (id) => invoke("bz-folders:resume", { id }),
+  revoke: (id) => invoke("bz-folders:revoke", { id }),
+  listDir: (id, path) => invoke("bz-folders:listDir", { id, path }),
+  readFile: (id, path, options) => invoke("bz-folders:readFile", { id, path, options }),
+  search: (id, query, options) => invoke("bz-folders:search", { id, query, options }),
+  activity: () => invoke("bz-folders:activity"),
+  /** Each broker entry as it happens. Returns the function that stops the callback. */
+  onActivity(callback) {
+    if (typeof callback !== "function") return () => {};
+    const listener = (_event, entry) => callback(entry);
+    ipcRenderer.on("bz-folders:activity-event", listener);
+    return () => { ipcRenderer.removeListener("bz-folders:activity-event", listener); };
   },
 });
