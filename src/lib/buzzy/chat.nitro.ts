@@ -73,7 +73,7 @@ import { RECIPES, UNIVERSAL_STATEMENTS, getRecipe, validateRecipe, boundaryViola
 import { resolveActingAccount, guard, canPerform, denialReason, TEAM_ACTIONS, DELEGATABLE, authorize, type MemberRole } from "./team";
 import { STATEMENT_IDS, DEEPENING_IDS } from "./questions";
 import { createHash } from "node:crypto";
-import { transcribeAudio, formatFromContentType, ASR_MAX_BYTES } from "./asr";
+import { transcribeAudio, formatFromContentType, ASR_MAX_BYTES, normalizeVocab } from "./asr";
 
 /**
  * Largest single file the bulk asset path will store. A skills corpus is
@@ -119,19 +119,21 @@ async function recordVoiceMetrics(
     spoken?: boolean;
     lane?: string | null;
     speechMs?: number | null;
+    preRollMs?: number | null;
   },
 ): Promise<void> {
   try {
     await sql`
       INSERT INTO buzzy_voice_metrics
         (user_id, job_id, session_id, source, mode, model, asr_ms, ttft_ms, ttfa_ms,
-         turn_ms, extract_ms, llm_ms, honcho_ms, reply_chars, audio_bytes, spoken, lane, speech_ms)
+         turn_ms, extract_ms, llm_ms, honcho_ms, reply_chars, audio_bytes, spoken, lane, speech_ms, pre_roll_ms)
       VALUES
         (${row.userId}, ${row.jobId ?? null}, ${row.sessionId ?? null}, ${row.source},
          ${row.mode ?? null}, ${row.model ?? null}, ${row.asrMs ?? null}, ${row.ttftMs ?? null},
          ${row.ttfaMs ?? null}, ${row.turnMs ?? null}, ${row.extractMs ?? null},
          ${row.llmMs ?? null}, ${row.honchoMs ?? null}, ${row.replyChars ?? null},
-         ${row.audioBytes ?? null}, ${row.spoken ?? false}, ${row.lane ?? null}, ${row.speechMs ?? null})
+         ${row.audioBytes ?? null}, ${row.spoken ?? false}, ${row.lane ?? null}, ${row.speechMs ?? null},
+         ${row.preRollMs ?? null})
     `;
   } catch (err) {
     // A lost metric must never break a turn.
@@ -505,8 +507,56 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 413);
       return { ok: false, error: "That recording is too long — keep it under a minute.", code: "audio_too_large" };
     }
+    // BZ-22 — proper nouns. The model joins and mis-spells names it has no
+    // reason to know ("Honey Crumb" → "Honeycrumb", measured 2/2). The fix is a
+    // post-hoc rewrite over a vocabulary built from names this owner actually
+    // uses, never a prompt glossary: a glossary primes the model into hearing
+    // the words on silence (asr.ts carries the measurement).
+    const vocab: string[] = [];
+    const addVocab = (raw: unknown, minSquash = 3) => {
+      for (const term of normalizeVocab(raw, minSquash)) {
+        if (!vocab.some((v) => v.toLowerCase() === term.toLowerCase())) vocab.push(term);
+      }
+    };
+    // Most specific first: what the page sent, then the job this turn is about.
+    addVocab(queryValue(fullPath, "vocab"));
+    const asrJobId = queryValue(fullPath, "jobId");
     try {
-      const r = await transcribeAudio(audio, format);
+      const vocabSql = await getSql();
+      if (asrJobId) {
+        const jobRows = (await vocabSql`
+          SELECT j.title, c.name AS company_name
+          FROM buzzy_jobs j
+          LEFT JOIN buzzy_companies c ON c.id = j.company_id AND c.user_id = j.user_id
+          WHERE j.id = ${asrJobId} AND j.user_id = ${user.id}
+          LIMIT 1
+        `) as Array<{ title?: string | null; company_name?: string | null }>;
+        addVocab(jobRows[0]?.company_name);
+        addVocab(jobRows[0]?.title);
+      }
+      // Then the owner's own recent names. 5-char floor: a one-word job title
+      // like "Test" is a common word, and canonicalising every "test" in a
+      // transcript is noise, not a correction.
+      const titleRows = (await vocabSql`
+        SELECT title AS term FROM buzzy_jobs
+        WHERE user_id = ${user.id} AND title IS NOT NULL AND length(title) >= 5
+        ORDER BY updated_at DESC LIMIT 20
+      `) as Array<{ term?: string | null }>;
+      for (const r of titleRows) addVocab(r.term, 5);
+      const companyRows = (await vocabSql`
+        SELECT name AS term FROM buzzy_companies
+        WHERE user_id = ${user.id} AND name IS NOT NULL AND length(name) >= 5
+        ORDER BY updated_at DESC LIMIT 10
+      `) as Array<{ term?: string | null }>;
+      for (const r of companyRows) addVocab(r.term, 5);
+    } catch {
+      // A vocabulary is an improvement, never a precondition: if the read
+      // fails, transcribe with what we have.
+    }
+    // The product's own coinages, which no owner can be expected to have typed.
+    addVocab(["Honey Drops"]);
+    try {
+      const r = await transcribeAudio(audio, format, vocab);
       // Time to transcript is a product number, not a log line. Recorded with
       // lane "asr" so ops can tell the browser recognizer apart from this path.
       const sql = await getSql();
@@ -738,15 +788,21 @@ export default defineEventHandler(async (event) => {
       FROM buzzy_assets WHERE user_id = ${user.id}
         AND (${prefix} = '' OR rel_path LIKE ${prefix + "%"})
     `;
+    // The Library must name the work, not the file. A list of "music-2026-11-07-
+    // 06-20-07.mp3" tells the owner nothing about which conversation produced it,
+    // so join the job and carry its title alongside the row (same defect class as
+    // the desktop issue where the column itself was missing).
     const rows = await sql<{
       id: number; filename: string; rel_path: string; content_type: string | null;
-      bytes: number; created_at: string;
+      bytes: number; created_at: string; job_id: string | null; job_title: string | null;
     }>`
-      SELECT id, filename, rel_path, content_type, bytes, created_at
-      FROM buzzy_assets
-      WHERE user_id = ${user.id}
-        AND (${prefix} = '' OR rel_path LIKE ${prefix + "%"})
-      ORDER BY rel_path ASC
+      SELECT a.id, a.filename, a.rel_path, a.content_type, a.bytes, a.created_at,
+             a.job_id, j.title AS job_title
+      FROM buzzy_assets a
+      LEFT JOIN buzzy_jobs j ON j.id = a.job_id
+      WHERE a.user_id = ${user.id}
+        AND (${prefix} = '' OR a.rel_path LIKE ${prefix + "%"})
+      ORDER BY a.rel_path ASC
       LIMIT ${want} OFFSET ${offset}
     `;
     return {
@@ -1383,6 +1439,7 @@ export default defineEventHandler(async (event) => {
       spoken: body.spoken === true,
       lane: typeof body.lane === "string" ? body.lane.slice(0, 8) : null,
       speechMs: num("speechMs"),
+      preRollMs: num("preRollMs"),
     });
     return { ok: true };
   }
@@ -1498,7 +1555,8 @@ export default defineEventHandler(async (event) => {
     `) as Array<Record<string, unknown>>;
     const recent = (await sql`
       SELECT created_at, source, mode, model, lane, asr_ms, ttft_ms, ttfa_ms, turn_ms,
-             extract_ms, llm_ms, reply_chars, spoken, session_id, user_id, speech_ms
+             extract_ms, llm_ms, reply_chars, spoken, session_id, user_id, speech_ms,
+             pre_roll_ms
       FROM buzzy_voice_metrics
       WHERE (${scopeAll} OR user_id = ${scopeUid})
       ORDER BY created_at DESC LIMIT 25
@@ -1537,6 +1595,7 @@ export default defineEventHandler(async (event) => {
         model: c.model ?? v.model ?? null,
         lane: c.lane ?? v.lane ?? null,
         speech_ms: c.speech_ms ?? v.speech_ms ?? null,
+        pre_roll_ms: c.pre_roll_ms ?? null,
         asr_ms: c.asr_ms ?? null,
         ttft_ms: c.ttft_ms ?? v.ttft_ms ?? null,
         ttfa_ms: c.ttfa_ms ?? v.ttfa_ms ?? null,
@@ -2409,6 +2468,49 @@ export default defineEventHandler(async (event) => {
         updatedAt: r.updated_at,
       })),
     };
+  }
+
+  // ── GET /api/buzzy/jobs/:id — one job, minus its artifact bytes ──────
+  // Talk can receive a bare job id (a ?job= link, or a recent-work row that
+  // knows only the id) and still owes the reader the same context opener the
+  // Library card gets from sessionStorage. The list endpoint carries
+  // data.artifact (a base64 .docx), so it is the wrong thing to fetch for one
+  // row; this returns the header fields the opener needs and drops the artifact.
+  if (method === "GET" && path.startsWith("/api/buzzy/jobs/")) {
+    const id = decodeURIComponent(path.slice("/api/buzzy/jobs/".length));
+    if (id && !id.includes("/")) {
+      const user = await getSessionUserFromHeaders(headersFromEvent(event));
+      if (!user) {
+        setResponseStatus(event, 401);
+        return { error: "Sign in required", code: "signed_out" };
+      }
+      const sql = await getSql();
+      const rows = await sql`
+        SELECT id, template, title, status, company_id, data, created_at, updated_at
+        FROM buzzy_jobs
+        WHERE id = ${id} AND user_id = ${user.id}
+        LIMIT 1
+      `;
+      if (!rows.length) {
+        setResponseStatus(event, 404);
+        return { error: "Job not found", code: "not_found" };
+      }
+      const r = rows[0];
+      const data = typeof r.data === "string" ? safeParseJson(r.data) : r.data;
+      if (data && typeof data === "object") delete (data as Record<string, unknown>).artifact;
+      return {
+        job: {
+          id: r.id,
+          template: r.template,
+          title: r.title,
+          status: r.status,
+          companyId: typeof r.company_id === "string" ? r.company_id : null,
+          data,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+        },
+      };
+    }
   }
 
   // ── GET /api/buzzy/search — work search across ALL of the user's companies
@@ -4332,8 +4434,34 @@ export default defineEventHandler(async (event) => {
         type: a.content_type,
       })),
     ];
-    const status = deliverables.length ? "Deliverable ready" : messages.length ? "In progress" : "Empty";
-    return { ok: true, project: { ...job, status }, deliverables, session: session[0] ?? null, turns, messages };
+    // A project is a pair: what went in, what came out. Inputs are listed next to the
+    // deliverables so a board or a brief cannot be separated from the thing it made.
+    const data = (job.data ?? {}) as Record<string, unknown>;
+    const recorded = Array.isArray(data.sources) ? (data.sources as Record<string, unknown>[]) : [];
+    const inputs: Record<string, unknown>[] = [...recorded];
+    if (data.board && !recorded.some((r) => r.kind === "board")) {
+      const b = data.board as { strokes?: unknown[]; images?: unknown[] };
+      inputs.push({
+        kind: "board",
+        label: `Sketch board — ${(b.strokes ?? []).length} marks, ${(b.images ?? []).length} images`,
+        url: `/buzzy/sketch?job=${job.id}`,
+      });
+    }
+    if (data.music && !recorded.some((r) => r.kind === "brief")) {
+      inputs.push({ kind: "brief", label: "Music brief, lyrics and instruments", url: `/buzzy/studio?job=${job.id}` });
+    }
+    // A reference image is an INPUT. It is stored as an asset so it can be shown and
+    // re-used, but listing it as a deliverable would let the project claim two outputs
+    // when it produced one.
+    const sourceIds = new Set(
+      inputs.filter((i) => i.kind === "reference").map((i) => String(i.url ?? "").split("/").pop() || ""),
+    );
+    const outputs = deliverables.filter((d) => !(d.kind === "image" && sourceIds.has(String(d.id))));
+    const status = outputs.length ? "Deliverable ready" : messages.length || inputs.length ? "In progress" : "Empty";
+    return {
+      ok: true, project: { ...job, status }, deliverables: outputs, sources: inputs,
+      session: session[0] ?? null, turns, messages,
+    };
   }
 
   // ── GET /api/buzzy/sessions — list the user's Talk sessions ──────────

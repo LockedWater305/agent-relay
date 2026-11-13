@@ -26,6 +26,12 @@
   button.primary { background:var(--bz-yellow); color:#111; font-weight:600; border-color:var(--bz-yellow); }
   button:disabled { opacity:0.5; cursor:default; }
   #stage { position:relative; flex:1; overflow:hidden; background:#141414; }
+  /* nav.js moves body's children into #bzPage on the first soft hop, so #stage stops
+     being a flex item of body and `flex:1` resolves against an auto-height block:
+     the canvas collapsed to its content height (~83px) while a hard load looked fine.
+     This rule travels with this page's stylesheet, which the shell enables only while
+     Sketch is the active page. */
+  #bzPage { display:flex; flex-direction:column; flex:1 1 auto; min-height:0; }
   #board { position:absolute; inset:0; touch-action:none; }
   #layers { position:absolute; inset:0; pointer-events:none; }
   .img-wrap { position:absolute; pointer-events:auto; cursor:move; border:1px solid transparent; }
@@ -35,12 +41,21 @@
                       border-radius:2px; cursor:nwse-resize; pointer-events:auto; }
   footer { border-top:1px solid var(--bz-line); padding:0.6rem 1rem; display:flex; gap:0.6rem; align-items:center; }
   #status { color:var(--bz-muted); font-size:0.8rem; }
+  /* The closing brace used to sit at the end of the first declaration, so every rule
+     after it (`position:absolute; … display:none`) was dropped: the panel rendered on
+     every visit, over the canvas, with no render behind it. */
   #result { position:absolute; right:12px; top:12px; width:210px; background:var(--bz-card); border:1px solid var(--bz-line);
             border-radius:12px; padding:0.6rem; display:none; }
   #result img { width:100%; border-radius:8px; display:block; }
   #result a { color:var(--bz-yellow); font-size:0.8rem; text-decoration:none; display:inline-block; margin-top:0.4rem; }
   .hint { color:var(--bz-muted); font-size:0.78rem; }
   .drop { outline:2px dashed var(--bz-yellow); outline-offset:-8px; }
+
+  #regionOverlay { position: absolute; inset: 0; cursor: crosshair; display: none; }
+  #regionOverlay.on { display: block; }
+  #regionRect { position: absolute; border: 2px dashed #ffd40d; background: rgba(255,212,13,0.16); display: none; }
+  #regionPanel { display: flex; gap: 0.45rem; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; }
+  #regionPanel input { flex: 1; min-width: 220px; }
 </style>
 </head>
 <body>
@@ -49,7 +64,7 @@
     <a href="/buzzy/talk" data-nav="talk">Talk</a>
     <a href="/buzzy/sketch" data-nav="sketch">Sketch</a>
     <a href="/buzzy/studio" data-nav="studio">Studio</a>
-    <a href="/buzzy/library" data-nav="library" target="_blank" rel="noopener">Library</a>
+    <a href="/buzzy/library" data-nav="library">Library</a>
     <a href="/buzzy/capabilities" data-nav="capabilities">Capabilities</a>
     <a href="/buzzy/memory" data-nav="memory">Memory</a>
     <a href="/buzzy/experts" data-nav="experts">Experts</a>
@@ -70,6 +85,7 @@
     <button id="redo" title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
     <button id="clear">Clear drawing</button>
     <button id="save">Save</button>
+    <span id="savedFlag" style="font-size:.76rem;align-self:center"></span>
     <button id="shot" title="Download a PNG of the board">Export PNG</button>
     <button id="svg" title="Download the drawing as vector SVG (images are not included)">Export SVG</button>
   </div>
@@ -78,7 +94,19 @@
 <div id="stage">
   <canvas id="board"></canvas>
   <div id="layers"></div>
-  <div id="result"><img id="resultImg" alt="" /><a id="resultLink" href="#" download>Download</a></div>
+  <div id="result">
+    <img id="resultImg" alt="" />
+    <!-- Region edit: drag a box on the picture, say what should change inside it.
+         The mask is drawn here, at the picture's own size, so the server never has
+         to guess which pixels the owner meant. -->
+    <div id="regionOverlay" title="Drag to mark the area to change"><div id="regionRect"></div></div>
+    <div id="regionPanel">
+      <input id="regionPrompt" type="text" placeholder="What should change inside the box? e.g. 'make the coat red'" />
+      <button class="primary" id="regionApply">Change this area</button>
+      <span class="hint" id="regionStatus">Drag a box on the picture, then describe the change.</span>
+    </div>
+    <a id="resultLink" href="#" download>Download</a>
+  </div>
 </div>
 
 <footer>
@@ -119,7 +147,44 @@
       undoStack.push(JSON.stringify({ strokes: strokes, images: images }));
       if (undoStack.length > 50) undoStack.shift();
       redoStack.length = 0;
+      // The first mark is the moment this board becomes a project; a page you
+      // merely looked at is not one.
+      ensureJob().then(autoSave, function () { /* a scratch board that cannot be saved is not an error toast */ });
     }
+
+    // The board IS the input of this project, so it is written back without being
+    // asked. Relying on the Save button meant a session of work could live only in
+    // the tab — /buzzy/sketch?job=… then opened an empty project.
+    var saveTimer = null, saving = false, saveAgain = false;
+    function autoSave() {
+      if (!jobId) return;
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(function () { flushSave(); }, 1200);
+    }
+    function flushSave() {
+      if (!jobId) return;
+      if (saving) { saveAgain = true; return; }
+      saving = true;
+      fetch("/api/buzzy/art", {
+        method: "POST", credentials: "same-origin", keepalive: true,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "save", jobId: jobId, board: boardJson() }),
+      }).then(function (r) { if (!r.ok) throw new Error("save failed"); setSaved(true); })
+        .catch(function () { setSaved(false); })
+        .then(function () {
+          saving = false;
+          if (saveAgain) { saveAgain = false; flushSave(); }
+        });
+    }
+    function setSaved(ok) {
+      var el = document.getElementById("savedFlag");
+      if (!el) return;
+      el.textContent = ok ? "Saved to project" : "Not saved — retrying";
+      el.style.color = ok ? "#6ee7a8" : "#ff6b6b";
+      if (ok) { clearTimeout(el._t); el._t = setTimeout(function () { el.textContent = ""; }, 2500); }
+    }
+    window.addEventListener("pagehide", function () { if (jobId) flushSave(); });
+    document.addEventListener("visibilitychange", function () { if (document.hidden) flushSave(); });
     function applySnapshot(json) {
       var d = JSON.parse(json);
       strokes = d.strokes || [];
@@ -146,10 +211,19 @@
     function resize() {
       var r = stage.getBoundingClientRect();
       var dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.round(r.width * dpr);
-      canvas.height = Math.round(r.height * dpr);
-      canvas.style.width = r.width + "px";
-      canvas.style.height = r.height + "px";
+      // The canvas BOX is CSS-owned (#board { inset:0 } inside #stage). Pinning
+      // style.width/height from a rect measured at parse time froze the box at whatever
+      // the stage measured before layout settled — 1034.6px against a 909.6px stage on a
+      // soft hop (this page's scripts run before #bzPage's flex applies), 979px against
+      // 910px on a hard load. #stage's overflow:hidden then clips the difference: the
+      // drawing surface is silently bigger than the board, its bottom cannot be reached,
+      // and the board's coordinate space depends on when the measurement ran (measure too
+      // early in the other direction and you get a dead strip below the canvas, which is
+      // BZ-26's collapse at its extreme). Only the backing store follows the measurement;
+      // ResizeObserver re-measures once layout settles (see the listener at the bottom).
+      var w = Math.max(1, Math.round(r.width * dpr));
+      var h = Math.max(1, Math.round(r.height * dpr));
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
       scale = dpr;
       redraw();
     }
@@ -489,11 +563,9 @@
 
     document.getElementById("save").addEventListener("click", function () {
       if (!jobId) { setStatus("This board is not attached to a project yet — Create once and it will be."); return; }
-      fetch("/api/buzzy/art", {
-        method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "save", jobId: jobId, board: boardJson() }),
-      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
-        .then(function (x) { setStatus(x.ok ? "Board saved." : (x.d.error || "Could not save.")); });
+      clearTimeout(saveTimer);
+      flushSave();
+      setStatus("Board saved.");
     });
 
     // The drawing is already vectors — {tool, colour, width, points} — so an SVG
@@ -566,18 +638,22 @@
       setStatus(iterate ? "Creating — using the last render as the reference…" : "Creating — flattening the board…");
       (iterate ? toDataUrl(lastRenderUrl) : flatten()).then(function (composite) {
         setStatus("Creating — the model is working…");
-        var body = {
-          action: "render",
-          prompt: prompt + (iterate
-            ? "\n\nThe attached image is the PREVIOUS render of this board. Change it as instructed and keep everything the instruction does not mention."
-            : "\n\nThe attached image is the owner's board: placed images plus hand-drawn marks, arrows and notes showing what belongs where and how it moves. Honour the layout, the connections and the annotations."),
-          refs: [composite],
-          jobId: jobId || undefined,
-        };
-        return fetch("/api/buzzy/art", {
-          method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, status: r.status, d: d }; }); });
+        // Create is the other moment a board becomes a project: without an id the
+        // render lands as an asset no job claims.
+        return ensureJob().then(function (id) {
+          var body = {
+            action: "render",
+            prompt: prompt + (iterate
+              ? "\n\nThe attached image is the PREVIOUS render of this board. Change it as instructed and keep everything the instruction does not mention."
+              : "\n\nThe attached image is the owner's board: placed images plus hand-drawn marks, arrows and notes showing what belongs where and how it moves. Honour the layout, the connections and the annotations."),
+            refs: [composite],
+            jobId: id,
+          };
+          return fetch("/api/buzzy/art", {
+            method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, status: r.status, d: d }; }); });
+        });
       }).then(function (res) {
         btn.disabled = false;
         if (!res.ok) {
@@ -597,6 +673,115 @@
         setStatus("Failed: " + e.message);
       });
     });
+
+    // ── region edit ───────────────────────────────────────────────────
+    // A change to one part of a finished picture. The mask is a PNG at the picture's
+    // natural size: black everywhere, white where the owner dragged. Sending the
+    // picture + mask + instruction is what keeps the rest of the frame from being
+    // re-rolled, which is the difference between an edit and a fresh guess.
+    (function initRegionEdit() {
+      var overlay = document.getElementById("regionOverlay");
+      var rectEl = document.getElementById("regionRect");
+      var img = document.getElementById("resultImg");
+      var box = document.getElementById("result");
+      var input = document.getElementById("regionPrompt");
+      var btn = document.getElementById("regionApply");
+      var note = document.getElementById("regionStatus");
+      var dragStart = null;
+      var picked = null;   // {x,y,w,h} in CSS pixels relative to the picture
+
+      function syncOverlay() {
+        if (!lastRenderUrl) { overlay.classList.remove("on"); return; }
+        var r = img.getBoundingClientRect();
+        var b = box.getBoundingClientRect();
+        overlay.style.left = (r.left - b.left) + "px";
+        overlay.style.top = (r.top - b.top) + "px";
+        overlay.style.width = r.width + "px";
+        overlay.style.height = r.height + "px";
+        overlay.classList.add("on");
+      }
+
+      overlay.addEventListener("mousedown", function (e) {
+        var r = overlay.getBoundingClientRect();
+        dragStart = { x: e.clientX - r.left, y: e.clientY - r.top };
+        rectEl.style.display = "block";
+        rectEl.style.left = dragStart.x + "px";
+        rectEl.style.top = dragStart.y + "px";
+        rectEl.style.width = "0px";
+        rectEl.style.height = "0px";
+        e.preventDefault();
+      });
+      overlay.addEventListener("mousemove", function (e) {
+        if (!dragStart) return;
+        var r = overlay.getBoundingClientRect();
+        var x = Math.max(0, Math.min(r.width, e.clientX - r.left));
+        var y = Math.max(0, Math.min(r.height, e.clientY - r.top));
+        var x0 = Math.min(x, dragStart.x), y0 = Math.min(y, dragStart.y);
+        rectEl.style.left = x0 + "px"; rectEl.style.top = y0 + "px";
+        rectEl.style.width = Math.abs(x - dragStart.x) + "px";
+        rectEl.style.height = Math.abs(y - dragStart.y) + "px";
+      });
+      overlay.addEventListener("mouseup", function (e) {
+        if (!dragStart) return;
+        var r = overlay.getBoundingClientRect();
+        var x = Math.max(0, Math.min(r.width, e.clientX - r.left));
+        var y = Math.max(0, Math.min(r.height, e.clientY - r.top));
+        picked = {
+          x: Math.min(x, dragStart.x), y: Math.min(y, dragStart.y),
+          w: Math.abs(x - dragStart.x), h: Math.abs(y - dragStart.y),
+          scaleX: img.naturalWidth / r.width, scaleY: img.naturalHeight / r.height,
+        };
+        dragStart = null;
+        if (picked.w < 8 || picked.h < 8) { picked = null; note.textContent = "That box is too small — drag a wider area."; return; }
+        note.textContent = Math.round(picked.w) + "×" + Math.round(picked.h) + " selected. Describe the change.";
+        input.focus();
+      });
+
+      window.addEventListener("resize", syncOverlay);
+      img.addEventListener("load", syncOverlay);
+
+      function maskDataUrl() {
+        var w = img.naturalWidth, h = img.naturalHeight;
+        var c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        var g = c.getContext("2d");
+        g.fillStyle = "#000"; g.fillRect(0, 0, w, h);
+        g.fillStyle = "#fff";
+        g.fillRect(picked.x * picked.scaleX, picked.y * picked.scaleY, picked.w * picked.scaleX, picked.h * picked.scaleY);
+        return c.toDataURL("image/png");
+      }
+
+      btn.addEventListener("click", function () {
+        var instruction = (input.value || "").trim();
+        if (!lastRenderUrl) { note.textContent = "Create a picture first, then change part of it."; return; }
+        if (!picked) { note.textContent = "Drag a box on the picture first."; return; }
+        if (!instruction) { input.focus(); note.textContent = "Say what should change inside the box."; return; }
+        var imageId = Number(String(lastRenderUrl).split("/").pop());
+        btn.disabled = true;
+        note.textContent = "Changing that area…";
+        fetch("/api/buzzy/art", {
+          method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "edit", jobId: jobId || undefined, imageId: imageId, mask: maskDataUrl(), instruction: instruction }),
+        }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, status: r.status, d: d }; }); })
+          .then(function (res) {
+            btn.disabled = false;
+            if (!res.ok) {
+              note.textContent = res.status === 402 ? "Art is part of the paid plans — " + (res.d.error || "")
+                : "Could not change it: " + (res.d.error || "unknown");
+              return;
+            }
+            lastRenderUrl = res.d.image.url;
+            img.src = res.d.image.url;
+            document.getElementById("resultLink").href = res.d.image.url;
+            addImage(res.d.image.url, { x: 60 + images.length * 18, y: 60 + images.length * 18 });
+            picked = null;
+            rectEl.style.display = "none";
+            note.textContent = "Changed in " + Math.round((res.d.ms || 0) / 100) / 10 + "s — saved to this project.";
+            flushSave();
+          })
+          .catch(function (e) { btn.disabled = false; note.textContent = "Failed: " + e.message; });
+      });
+    })();
 
     // ── load the saved board ──────────────────────────────────────────
     function load() {
@@ -633,23 +818,40 @@
         .catch(function () { resize(); });
     }
 
-    // A board with no project: make one, so the first Create has somewhere to land.
-    if (!jobId) {
+    // A board with no project gets one when the owner first PUTS something on it —
+    // never on page load. Opening Sketch used to POST a new job_art_… every time the
+    // nav sent you here, so a lap of the site left a heap of empty "Sketch board"
+    // projects (BZ-13, Nov 2026). One promise, so a burst of strokes still makes one.
+    var jobPromise = null;
+    function ensureJob() {
+      if (jobId) return Promise.resolve(jobId);
+      if (jobPromise) return jobPromise;
       var id = "job_art_" + Date.now().toString(36);
       // POST /api/buzzy/jobs is the upsert (a PUT to /jobs/<id> is a 404 — the
       // route does not exist, and a board with nowhere to land orphans its render).
-      fetch("/api/buzzy/jobs", {
+      jobPromise = fetch("/api/buzzy/jobs", {
         method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" },
         body: JSON.stringify({ id: id, title: "Sketch board", status: "In progress", data: {} }),
       }).then(function (r) {
-        if (!r.ok) return;
+        if (!r.ok) throw new Error("could not open a board");
         jobId = id;
         history.replaceState({}, "", "/buzzy/sketch?job=" + encodeURIComponent(id));
         setStatus("New board ready. Drop images, draw, then Create.");
+        return id;
+      }).catch(function (e) {
+        // One failed attempt must not become one POST per brush stroke: retry on a
+        // later mark, not on every mark.
+        setTimeout(function () { jobPromise = null; }, 5000);
+        throw e;
       });
+      return jobPromise;
     }
     if (!jobId) titleEl.textContent = "New board";
     window.addEventListener("resize", resize);
+    // A stage that changes size without a window resize (nav rows wrapping, fonts
+    // landing, #bzPage gaining its flex on a soft hop) must re-measure the backing
+    // store, or the canvas keeps the size it guessed at parse time.
+    if (window.ResizeObserver) new ResizeObserver(function () { resize(); }).observe(stage);
     load();
   })();
 </script>
