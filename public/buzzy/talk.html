@@ -2744,20 +2744,29 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
-    function submitPaper(payload) {
+    function submitPaper(payload, speechRequest) {
+      if (speechRequest && !speechRequestCurrent(speechRequest)) return Promise.resolve();
       var note = document.getElementById("paperNote");
       var co = activeCompanyId();
       if (!co) {
         if (note) note.textContent = "Pick the company this paper belongs to first. A dropped file stays on that company.";
+        if (speechRequest) finishSpeechRequest(speechRequest, "Pick a company before asking me to read a paper.");
         return Promise.resolve();
       }
-      if (paperBusy) return Promise.resolve();
+      if (paperBusy) {
+        if (speechRequest) finishSpeechRequest(speechRequest, "A paper is still being read. Try again when it finishes.");
+        return Promise.resolve();
+      }
       paperBusy = true;
       if (note) note.textContent = "Reading…";
       var userLine = payload.filename ? "Read this — " + payload.filename : "Read this.";
       chatState.messages.push({ role: "user", content: userLine });
       renderChatMessages();
-      return ensureChatSession().then(function () {
+      return ensureChatSession(speechRequest).then(function () {
+        if (speechRequest) {
+          if (!speechRequestCurrent(speechRequest)) return null;
+          voice.speechRequest = null;
+        }
         return fetch("/api/buzzy/papers", {
           method: "POST",
           credentials: "same-origin",
@@ -2773,9 +2782,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           }),
         });
       }).then(function (r) {
+        if (!r) return null;
         if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
         return r.json().then(function (d) { return { ok: r.ok, d: d }; });
       }).then(function (res) {
+        if (!res) return;
         if (!res.ok || !res.d.paper) {
           if (note) note.textContent = (res.d && res.d.error) || "Couldn't read that.";
           return;
@@ -2992,6 +3003,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // id instead: audio that belongs to the cut turn is dropped, and a new
       // turn always has a new id.
       cutTurn: -1, turnSeq: 0,
+      // A transcription belongs to one Listen generation and conversation.
+      // Stop/navigation revoke it, even if its response is already queued.
+      speechGeneration: 0, speechRequest: null,
       // Which transcriber this session uses. "sr" = the browser's SpeechRecognition
       // (Chrome, and anything with a working speech service); "recorder" = record
       // locally and let the server transcribe (Firefox, Brave, blocked service).
@@ -3022,20 +3036,27 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // head never arrived". Opt-in (?voiceprobe=1); never transcribed, never
       // uploaded, never played.
       probeStream: null, probeCtx: null, probe: null, probeSettings: null,
-      probeErr: null, probeLast: null, probeGaveUp: false,
+      probeErr: null, probeLast: null, probeGaveUp: false, probeAcquiring: null,
       // What the LAST turn's clip actually was: head kept, leading silence
       // trimmed, level lifted. Global preRollMs only ever described whichever
       // turn last started a capture, which is why "0 / no-speech" on the 10:10
       // walk could not be told apart from a turn that kept its head.
       lastTurn: null,
-      // A barge turn is OWNED by the clip, not by the recogniser (see
-      // sendBargeClip). The gate already proved speech started; Chrome's
+      // A turn is OWNED by its clip, not by the recogniser (see sendTurnClip).
+      // Speech was already measured on the audio the clip holds; Chrome's
       // recogniser only gets to say where it ended. On the 9:15 PM walk
       // (b123b80) the gate fired, the story was cut, and the recogniser
       // returned no speech at all — so the turn was dropped with its audio in
       // hand: no bubble, no follow-up, no take, and issue 299 stayed
-      // unmeasured for a second night.
+      // unmeasured for a second night. bargeClip marks the gate-opened case
+      // (a cut reply); it is no longer a precondition for keeping the audio.
       bargeClip: false, bargeSent: false,
+      // Set the moment the recogniser produces a final transcript: from then on
+      // THIS window belongs to its words, and onend/onerror may not also post the
+      // clip. Without it, a kept clip and the recognised turn were two turns from
+      // one window — stopListening() can end the recogniser before sendHeardTurn
+      // has taken the capture.
+      textClaim: false,
       // Voice barge-in (see bargeArm): the detector runs on the pre-roll ring's
       // own frames — one stream, one AudioContext, one truth. It used to be a
       // second MediaStreamSource + AnalyserNode on a context of its own, which
@@ -3271,7 +3292,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         var msg = voice.speaking
           ? "Speaking — mic off until I finish. (Tap the mic to cut me off.)"
           : voice.mic
-            ? "Listening — speak, then pause."
+            ? (voice.note || "Listening — speak, then pause.")
             : voice.armed
               ? "Paused — touch the page and I'll listen again."
               : (voice.note || "");
@@ -3369,6 +3390,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     // One spoken turn: returns the final transcript, or "" if nothing heard.
     function startListening() {
       if (!voice.mic || voice.speaking || voice.sending || voice.rec || recState || recAcquiring) return;
+      voice.note = "";
+      // One window, one clip: the posted flag is per recogniser window, not
+      // per session, so a kept turn cannot suppress the next one.
+      voice.bargeSent = false;
+      voice.textClaim = false;
       // Firefox ships no SpeechRecognition and Brave's service is blocked, so
       // those browsers record the clip and let the server transcribe it. The
       // desktop shell is included by name: Electron HAS the API object but cannot
@@ -3383,6 +3409,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       voice.rec = rec;
       voice.firstInterimAt = 0;
       rec.onresult = function (e) {
+        // A queued result from a stopped/replaced window cannot claim its clip
+        // again, or stop the recogniser that owns the next turn.
+        if (rec._bzStale || voice.rec !== rec || !voice.mic) return;
         // Speaking window: first recognised sound → final transcript. This is
         // the owner's own talk time, separate from our processing time.
         if (!voice.firstInterimAt && e.results && e.results.length) {
@@ -3402,6 +3431,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           // The recogniser heard the turn, so it keeps the floor: no barge
           // fallback may post this clip a second time.
           voice.bargeClip = false;
+          // Its words are the turn now; the clip may not also become one (see
+          // textClaim — stopListening can reach onend before sendHeardTurn runs).
+          voice.textClaim = true;
           stopListening();
           // Timestamp the moment the owner stopped talking: time-to-talk is
           // measured from here, not from when we happened to send.
@@ -3412,26 +3444,46 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         }
       };
       rec.onerror = function (e) {
-        if (rec._bzStale) return;
+        if (rec._bzStale || voice.rec !== rec) return;
         var err = e && e.error;
-        // A barge turn's clip is the evidence, so it must survive the
+        // A clip that MEASURED speech is the evidence, and it must survive the
         // recogniser's own failure. Dropping it here is what silently ate the
-        // 9:15 PM walk's interruption: "no-speech" is Chrome saying IT heard
-        // nothing, not that the room was quiet — the gate had already measured
-        // 0.34 RMS on the ring. onend posts the clip (see sendBargeClip).
-        var keepClip = !!voice.bargeClip && voice.mic && err !== "not-allowed" && err !== "service-not-allowed";
+        // 9:15 PM walk's interruption (the gate had measured 0.34 RMS on the
+        // ring) — and the same line ate ordinary turns: it demanded
+        // voice.bargeClip, so a late SR failure on a turn the gate never opened
+        // threw away audio the capture had already measured as speech. Chrome's
+        // "no-speech" is IT saying it heard nothing, not that the room was
+        // quiet. A denied mic permission is the one case with no route around it.
+        // onend posts the kept clip (see sendTurnClip).
+        var keepClip = err !== "not-allowed" && voice.mic && clipHasSpeech();
         if (!keepClip) dropCapture();
         if (err === "not-allowed") {
           // A denied permission has no route around it.
           stageNote("Microphone blocked — allow the mic for this site, then tap it again.");
           voice.mic = false;
           saveListenPref(false);
+          stopListening();
+          releaseMic();
           paintVoice();
         } else if (err === "service-not-allowed" || err === "network") {
           // Brave exposes SpeechRecognition but blocks Google's service, and a
           // blocked service hits Chrome the same way. Recording needs nothing
           // but getUserMedia, so this session switches to the server transcriber.
           voice.asr = "recorder";
+          if (keepClip) {
+            // A service cut mid-turn is the case this fix exists for: the audio
+            // is already in hand, so post it instead of starting a second
+            // recorder over it (startRecording drops whatever the capture holds).
+            // Stale first, so this window's onend can neither post it twice nor
+            // null out the recogniser the next turn opens.
+            try { rec._bzStale = true; } catch (_) {}
+            try { rec.stop(); } catch (_) {}
+            voice.rec = null;
+            if (sendTurnClip()) return;
+            if (voice.mic) startRecording();
+            return;
+          }
+          rec._bzStale = true;
           try { rec.stop(); } catch (_) {}
           voice.rec = null;
           if (voice.mic) startRecording();
@@ -3445,15 +3497,16 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         // A recogniser this page ABORTED on purpose (see restartTurnCapture) is
         // stale: its onend must not clobber the recogniser that replaced it, nor
         // drop the fresh capture that was seeded with the barge head.
-        if (rec._bzStale) return;
+        if (rec._bzStale || voice.rec !== rec) return;
+        rec._bzStale = true;
         voice.rec = null;
         // A window that ended without a final utterance never became a turn —
-        // UNLESS the barge gate had already voted. Then this window is the turn
-        // the owner took, and the clip (gate take + capture) is the evidence;
-        // the recogniser's silence is just its opinion. Anything else loses the
-        // interruption with its audio sitting in hand.
-        if (voice.bargeClip && voice.mic) {
-          if (sendBargeClip()) return;
+        // UNLESS the audio in hand measured as speech. Then this window is the
+        // turn the owner took, and the clip is the evidence; the recogniser's
+        // silence is just its opinion. Anything else loses the turn with its
+        // audio sitting in hand.
+        if (voice.mic && clipHasSpeech()) {
+          if (sendTurnClip()) return;
         }
         // Its clip is not evidence of anything.
         dropCapture();
@@ -3466,6 +3519,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       } catch (_) {
         // A recognizer that exists but cannot start is the worst case: the mic is
         // on, nothing is recorded, and the owner gets no feedback. Record instead.
+        rec._bzStale = true;
         voice.rec = null;
         voice.asr = "recorder";
         startRecording();
@@ -3479,6 +3533,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function stopListening() {
+      // Ending a recognizer for a final result keeps Listen on. Only ending
+      // Listen itself discards an in-flight transcript and its text fallback.
+      if (!voice.mic) invalidateSpeechRequest("Pending speech discarded. Listen is off.");
       // A permission prompt can still be pending before recState exists.
       // Cancel that acquisition as well, so a late stream cannot restart the mic.
       cancelRecording();
@@ -3486,9 +3543,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // justifies it. Kept while voice.mic is still true (a recognised turn ends
       // the recogniser, not the session).
       if (!voice.mic) preRollStop();
-      if (!voice.rec) return;
-      try { voice.rec.stop(); } catch (_) {}
+      var rec = voice.rec;
+      if (!rec) return;
+      // Invalidate before stop: some engines deliver onend synchronously, and
+      // a final result still needs to take this window's audio afterwards.
+      rec._bzStale = true;
       voice.rec = null;
+      try { rec.stop(); } catch (_) {}
       paintVoice();
     }
 
@@ -3686,7 +3747,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           // A request that has been cancelled or superseded (off, or a newer request)
           // releases its stream on arrival and never becomes the session's, so a late
           // permission answer cannot open a microphone that nothing is listening to.
-          var obsolete = !!acq && acq !== recAcquiring;
+          var obsolete = !voice.mic || (!!acq && acq !== recAcquiring);
           // The session holds one stream. A second live one (an off/on while a prompt
           // was open) is released, and the session keeps the stream it already has.
           var held = !!voice.micStream && voice.micStream.getAudioTracks().some(function (t) { return t.readyState === "live"; });
@@ -3743,6 +3804,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function probeStop() {
+      // A permission dialog may outlive Stop and even the next Listen session.
+      // A late result must release its own stream, never install it there.
+      voice.probeAcquiring = null;
       probeRingStop();
       try { if (voice.probeStream) voice.probeStream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
       voice.probeStream = null;
@@ -3790,24 +3854,38 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function probeStart() {
-      if (!PROBE_ON) return;
+      if (!PROBE_ON || !voice.mic) return;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
       if (voice.probeStream) { probeRingStart(); return; }
-      // One attempt per listen session: an exclusive-access device will keep
-      // saying no, and a getUserMedia retry loop is noise, not evidence.
-      if (voice.probeGaveUp) return;
-      navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false } })
+      // One pending request, and one attempt per listen session. Watchdog ticks
+      // must not open concurrent permission requests and lose a stream handle.
+      if (voice.probeGaveUp || voice.probeAcquiring) return;
+      var request = {};
+      voice.probeAcquiring = request;
+      function failed(e) {
+        if (voice.probeAcquiring !== request) return;
+        voice.probeAcquiring = null;
+        voice.probeErr = String((e && (e.name || e.message)) || "probe-failed");
+        voice.probeGaveUp = true;
+      }
+      var acquisition;
+      try {
+        acquisition = navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      } catch (e) { failed(e); return; }
+      Promise.resolve(acquisition)
         .then(function (s) {
-          if (!voice.mic) { try { s.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {} return; }
+          if (voice.probeAcquiring !== request || !voice.mic || voice.probeStream) {
+            try { s.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
+            if (voice.probeAcquiring === request) voice.probeAcquiring = null;
+            return;
+          }
+          voice.probeAcquiring = null;
           voice.probeStream = s;
           voice.probeSettings = aecSettings(s);
           voice.probeErr = null;
           probeRingStart();
         })
-        .catch(function (e) {
-          voice.probeErr = String((e && (e.name || e.message)) || "probe-failed");
-          voice.probeGaveUp = true;
-        });
+        .catch(failed);
     }
 
     function probeTick() {
@@ -4489,11 +4567,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     var CAP_MAX_MS = 25000;
 
     function startCapture() {
+      var rec = voice.rec;
+      if (!voice.mic || !rec || rec._bzStale) return;
       dropCapture();
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
       ensureMic()
         .then(function (stream) {
-          if (!stream || !voice.rec || capState) return;
+          // A permission answer may arrive after this recogniser ended or was
+          // replaced. Only its own still-active window may install the capture.
+          if (!stream || !voice.mic || voice.rec !== rec || rec._bzStale || capState) return;
           var AC = window.AudioContext || window.webkitAudioContext;
           if (!voice.micCtx || voice.micCtx.state === "closed") voice.micCtx = new AC();
           var ctx = voice.micCtx;
@@ -4537,7 +4619,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             if (rms > 0.02) { capState.speechSeen = true; capState.quietSince = 0; }
             else if (capState.speechSeen && !capState.quietSince) capState.quietSince = Date.now();
             if (voice.bargeClip && capState.speechSeen && capState.quietSince &&
-                Date.now() - capState.quietSince > 1200) sendBargeClip();
+                Date.now() - capState.quietSince > 1200) sendTurnClip();
           };
           src.connect(proc);
           proc.connect(ctx.destination);
@@ -4572,6 +4654,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       try { c.proc.disconnect(); c.src.disconnect(); } catch (_) {}
     }
 
+    // Was this window's audio measured as speech? On a barge turn the gate has
+    // already voted on the same ring frames the clip holds; on an ordinary turn
+    // the capture's own frame callback measured it against the same 0.02 floor
+    // (see the bargeFeed/BARGE_RMS note). Either way it is OUR measurement of
+    // the room, and it — never the recogniser's opinion — decides whether a clip
+    // may be thrown away. capState is null once a clip has been finished, so a
+    // turn already sent cannot be posted twice.
+    function clipHasSpeech() {
+      if (voice.textClaim) return false;   // this window's words already are the turn
+      return !!(voice.bargeClip || (capState && capState.speechSeen));
+    }
+
     function asrQueryString() {
       var q = [];
       if (chatState.jobId) q.push("jobId=" + encodeURIComponent(chatState.jobId));
@@ -4581,13 +4675,66 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       return q.length ? "?" + q.join("&") : "";
     }
 
+    // Only the current request may touch the composer or sending state. Abort
+    // is best-effort: it cannot recall audio already received by the server, so
+    // identity/context checks also gate success, failure and parsed-body results.
+    function invalidateSpeechRequest(note) {
+      voice.speechGeneration = (voice.speechGeneration || 0) + 1;
+      var request = voice.speechRequest;
+      voice.speechRequest = null;
+      if (!request) return false;
+      try { if (request.controller) request.controller.abort(); } catch (_) {}
+      voice.sending = false;
+      if (note) stageNote(note);
+      else paintVoice();
+      return true;
+    }
+
+    function speechContextChanged() {
+      if (invalidateSpeechRequest("Pending speech discarded because the conversation changed. Speak again.")) rearmListening();
+    }
+
+    function finishSpeechRequest(request, note) {
+      if (!speechRequestCurrent(request)) return;
+      voice.speechRequest = null;
+      voice.sending = false;
+      if (note) stageNote(note);
+      else paintVoice();
+      rearmListening();
+    }
+
+    function beginSpeechRequest() {
+      if (!voice.mic) return null;
+      invalidateSpeechRequest();
+      var request = {
+        generation: voice.speechGeneration, context: chatState,
+        jobId: chatState.jobId || null, sessionId: chatState.sessionId || null,
+        companyId: chatState.boundCompanyId || null,
+        controller: typeof AbortController === "function" ? new AbortController() : null,
+      };
+      voice.speechRequest = request;
+      return request;
+    }
+
+    function speechRequestCurrent(request) {
+      if (!request || voice.speechRequest !== request) return false;
+      if (voice.mic && request.generation === voice.speechGeneration && request.context === chatState &&
+          request.jobId === (chatState.jobId || null) && request.sessionId === (chatState.sessionId || null) &&
+          request.companyId === (chatState.boundCompanyId || null)) return true;
+      // Also defend against a context update outside the navigation entry points.
+      if (invalidateSpeechRequest("Pending speech discarded because listening or the conversation changed.")) rearmListening();
+      return false;
+    }
+
     // A recognised turn: the clip is the evidence, the recogniser's text is the
     // guess. Send the guess only when the clip cannot be transcribed — a Listen
     // mode that swallows the turn is worse than one that mishears a name.
     function sendHeardTurn(srText) {
+      var request = beginSpeechRequest();
+      if (!request) return;
       var wav = finishCapture();
       var fallback = jobNameFix(brandName(srText)).trim();
-      if (!wav) { submitHeard(fallback); return; }
+      if (!wav) { submitHeard(fallback, request); return; }
       // Claim the turn now: the recogniser's onend fires while this fetch is in
       // flight and would otherwise re-arm the mic over its own turn.
       voice.sending = true;
@@ -4597,37 +4744,42 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         method: "POST",
         headers: { "Content-Type": "audio/wav" },
         body: wav,
+        signal: request.controller ? request.controller.signal : undefined,
       })
-        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (res) { return speechRequestCurrent(request) && res.ok ? res.json() : null; })
         .then(function (d) {
+          if (!speechRequestCurrent(request)) return;
           var text = d && d.ok && d.text ? jobNameFix(brandName(d.text)).trim() : "";
-          submitHeard(text || fallback);
+          submitHeard(text || fallback, request);
         })
-        .catch(function () { submitHeard(fallback); });
+        .catch(function () { submitHeard(fallback, request); });
     }
 
-    function submitHeard(text) {
+    function submitHeard(text, request) {
+      if (!speechRequestCurrent(request)) return;
       if (!text) {
+        voice.speechRequest = null;
         voice.sending = false;
         stageNote("Didn't catch that — try again.");
         rearmListening();
         return;
       }
+      voice.note = "";
       var input = document.getElementById("chatInput");
       if (input) input.value = text;
       voice.sending = true;
       setAvatarState("thinking");
       paintVoice();
-      sendChatMessage();
+      sendChatMessage(null, request);
     }
 
-    // A barge turn posts its clip even when the recogniser heard nothing.
-    // By the time this runs the gate has already voted on the same ring frames
-    // that are in the clip, so "was there speech" is answered; Chrome's
+    // A turn whose audio measured as speech posts its clip even when the
+    // recogniser heard nothing. By the time this runs the speech was measured on
+    // the same audio the clip holds, so "was there speech" is answered; Chrome's
     // recogniser only gets to say when the speech ended. Returns true when the
     // clip was posted, so a caller must not re-arm over the turn it started.
-    function sendBargeClip() {
-      if (!voice.bargeClip || voice.bargeSent) return false;
+    function sendTurnClip() {
+      if (voice.bargeSent || !clipHasSpeech()) return false;
       var wav = finishCapture();
       if (!wav) return false;
       voice.bargeSent = true;
@@ -4642,6 +4794,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function sendForTranscription(wav) {
+      var request = beginSpeechRequest();
+      if (!request) return;
       voice.sending = true;
       setAvatarState("thinking");
       paintVoice();
@@ -4652,11 +4806,14 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         method: "POST",
         headers: { "Content-Type": "audio/wav" },
         body: wav,
+        signal: request.controller ? request.controller.signal : undefined,
       })
-        .then(function (res) { return res.json(); })
+        .then(function (res) { return speechRequestCurrent(request) ? res.json() : null; })
         .then(function (data) {
+          if (!speechRequestCurrent(request)) return;
           voice.sending = false;
           if (!data || !data.ok) {
+            voice.speechRequest = null;
             micLog("transcribe refused: " + JSON.stringify(data || {}).slice(0, 200));
             stageNote((data && data.error) || "Couldn't transcribe that — try again.");
             rearmListening();
@@ -4668,6 +4825,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           var text = jobNameFix(brandName(data.text)).trim();
           micLog("transcribe ok ms=" + data.ms + " model=" + data.model + ' text="' + text.slice(0, 80) + '"');
           if (!text) {
+            voice.speechRequest = null;
             stageNote("Didn't catch that — try again.");
             rearmListening();
             return;
@@ -4679,9 +4837,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           voice.sending = true;
           setAvatarState("thinking");
           paintVoice();
-          sendChatMessage();
+          sendChatMessage(null, request);
         })
         .catch(function () {
+          if (!speechRequestCurrent(request)) return;
+          voice.speechRequest = null;
           voice.sending = false;
           stageNote("Couldn't reach the transcriber — check the connection.");
           rearmListening();
@@ -4871,6 +5031,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
                    // became the turn. A cut with pending false and sent false on
                    // a walk is a lost interruption — the exact shape of 3187.
                    barge: { pending: !!voice.bargeClip, sent: !!voice.bargeSent },
+                   // QA-facing: what decides whether a failed window keeps its
+                   // audio (see clipHasSpeech). capture.speechSeen is the
+                   // capture's own measurement of this window; kept is the
+                   // combined answer, so "SR failed and the turn vanished" can
+                   // be told apart from "SR failed and there was nothing to keep".
+                   capture: { speechSeen: !!(capState && capState.speechSeen), kept: clipHasSpeech() },
                    // Which capture handles THIS page still holds. One for a
                    // normal session, two with ?voiceprobe=1; a stopped session
                    // must hold none. (Chrome's own recogniser opens a third
@@ -4886,6 +5052,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       window.BeeZillaTalk = {
         openJob: function (id, provided) {
           if (!id) return false;
+          speechContextChanged();
           var ctx = null;
           try {
             var jc = JSON.parse(sessionStorage.getItem("bz_open_job") || "null");
@@ -5774,6 +5941,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function goBackToRecent() {
+      speechContextChanged();
       chatState.sessionId = null;
       try { localStorage.removeItem("bz_session_id"); } catch (_) {}
       try { localStorage.removeItem("bz_session_id"); } catch (_) {}
@@ -5796,6 +5964,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function newChatNow() {
+      speechContextChanged();
       resetContextMeter();
       chatState.sessionId = null;
       chatState.jobId = null;
@@ -6164,7 +6333,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
-    function ensureChatSession() {
+    function ensureChatSession(speechRequest) {
+      if (speechRequest && !speechRequestCurrent(speechRequest)) return Promise.resolve(null);
       if (chatState.sessionId) return Promise.resolve(chatState.sessionId);
       var coId = activeCompanyId();
       return fetch(SESSIONS_BASE, {
@@ -6176,11 +6346,17 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
         return r.ok ? r.json() : null;
       }).then(function (data) {
+        if (speechRequest && !speechRequestCurrent(speechRequest)) return null;
         var s = data && data.session;
         if (s && s.id) {
           chatState.sessionId = s.id;
           try { localStorage.setItem("bz_session_id", s.id); } catch (_) {}
           if (s.companyId) chatState.boundCompanyId = s.companyId;
+          // This request created the session without changing conversations.
+          if (speechRequest) {
+            speechRequest.sessionId = chatState.sessionId;
+            speechRequest.companyId = chatState.boundCompanyId || null;
+          }
         }
         return chatState.sessionId;
       }).catch(function (e) {
@@ -6193,7 +6369,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     // than any phrasing the regexes have to guess at, so it sets execute: true and
     // the server skips the interview and plan-then-confirm entirely.
     var pendingExecute = false;
-    async function sendChatMessage() {
+    async function sendChatMessage(event, speechRequest) {
+      if (speechRequest && !speechRequestCurrent(speechRequest)) return;
       const input = document.getElementById("chatInput");
       const text = input.value.trim();
       if (!text) return;
@@ -6201,6 +6378,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (pastedPaper !== null) {
         input.value = "";
         if (!pastedPaper) {
+          if (speechRequest) finishSpeechRequest(speechRequest);
           chatState.messages.push({ role: "user", content: text });
           chatState.messages.push({
             role: "assistant",
@@ -6209,11 +6387,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           renderChatMessages();
           return;
         }
-        submitPaper({ filename: "", fileKind: "paste", text: pastedPaper });
+        submitPaper({ filename: "", fileKind: "paste", text: pastedPaper }, speechRequest);
         return;
       }
-      try { await ensureChatSession(); } catch (e) {
+      try { await ensureChatSession(speechRequest); } catch (e) {
         if (e && e.message === "signed_out") return;
+      }
+      if (speechRequest) {
+        if (!speechRequestCurrent(speechRequest)) return;
+        voice.speechRequest = null;
       }
 
       input.value = "";
@@ -6711,6 +6893,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       }
     }
     async function openSession(s) {
+      speechContextChanged();
       try {
         const r = await fetch("/api/buzzy/transcript?sessionId=" + encodeURIComponent(s.id), {
           credentials: "same-origin",
@@ -6721,6 +6904,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         const msgs = (data.messages || []).map(function (m) {
           return { role: m.role, content: m.content };
         });
+        speechContextChanged();
         chatState.sessionId = s.id;
         chatState.boundCompanyId = s.companyId || chatState.boundCompanyId;
         chatState.messages = msgs;
@@ -6780,6 +6964,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
     // Start a truly new chat: create a real session, then reset local state.
     function startNewChat() {
+      speechContextChanged();
       var coId = window.BZCompanies && BZCompanies.activeId && BZCompanies.activeId();
       return fetch(SESSIONS_BASE, {
         method: "POST",
@@ -6794,6 +6979,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         return r.json();
       }).then(function (data) {
         const s = data.session;
+        speechContextChanged();
         chatState = {
           jobId: chatState.jobId, // keep job-scoped behavior when a job is present
           sessionId: s ? s.id : null,
@@ -6853,6 +7039,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (line) line.textContent = co && co.oneLiner ? co.oneLiner : "";
       var id = co ? co.id : null;
       if (chatState.boundCompanyId && id && chatState.boundCompanyId !== id) {
+        speechContextChanged();
         chatState.boundCompanyId = id;
         chatState.sessionId = null;
         chatState.jobId = null;
@@ -6965,3 +7152,4 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 </script>
 </body>
 </html>
+

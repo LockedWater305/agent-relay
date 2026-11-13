@@ -15,6 +15,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Script, runInNewContext } from "node:vm";
 import test from "node:test";
+// Keep the speech lifecycle regressions in the existing desktop-boundaries CI gate.
+import "./test-talk-speech-fallback.mjs";
+import "./test-talk-voice-lifecycle.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(join(ROOT, path), "utf8");
@@ -206,7 +209,7 @@ function microphone({ desktop = false, available = true, throws = false, asr = "
     paintVoice() {}, stageNote() {}, saveListenPref() {},
     // Upstream capture helpers: the SR path calls startCapture after rec.start(), and
     // onerror drops a capture. The assertions here are about the recognizer and recorder.
-    startCapture() {}, dropCapture() {},
+    startCapture() {}, dropCapture() {}, clipHasSpeech() { return false; }, stopListening() {}, releaseMic() {},
   };
   runInNewContext(talk.slice(start, end), context);
   context.startListening();
@@ -464,3 +467,4 @@ test("credential UI distinguishes confirmed startup from failed credential write
     if (input) assert.equal(h.element(input).value, "probe-secret", "failed saves retain the entered key for retry");
   }
 });
+
