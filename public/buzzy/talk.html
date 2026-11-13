@@ -4263,16 +4263,24 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     // A mic that hears nothing and a mic that is broken are indistinguishable from
-    // the outside: both are silence with no message. Every step below writes a line
-    // to main.log (desktop) or the console (web), so the failure names itself.
+    // the outside: both are silence with no message. The desktop writes every step to
+    // main.log, so the failure names itself. The web build stays quiet: transcripts and
+    // device labels do not go to every visitor's console. A developer turns the trace on
+    // in one browser with localStorage.setItem("bz.debugVoice", "1").
     function micLog(msg) {
-      try {
-        if (window.beezilla && window.beezilla.app && window.beezilla.app.log) {
-          window.beezilla.app.log("voice: " + msg);
-          return;
-        }
-      } catch (_) {}
-      try { console.log("[voice] " + msg); } catch (_) {}
+      if (window.beezilla) {
+        try {
+          if (window.beezilla.app && window.beezilla.app.log) {
+            window.beezilla.app.log("voice: " + msg);
+            return;
+          }
+        } catch (_) {}
+        try { console.log("[voice] " + msg); } catch (_) {}
+        return;
+      }
+      var debug = false;
+      try { debug = localStorage.getItem("bz.debugVoice") === "1"; } catch (_) {}
+      if (debug) { try { console.log("[voice] " + msg); } catch (_) {} }
     }
 
     // 0.02 RMS was a shout on a good headset and silence on a laptop array: the
