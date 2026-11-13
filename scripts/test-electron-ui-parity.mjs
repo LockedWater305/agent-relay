@@ -83,7 +83,10 @@ test("all public BeeZilla JS and inline scripts parse without merge markers", ()
       scripts += inlineScripts(source).length;
     }
   }
-  assert.ok(scripts >= 42, `expected the full UI, found only ${scripts} scripts`);
+  // 41, not 42. memory.html lost its inline window.__bzHeader("memory") bootstrap: upstream
+  // moved the header into nav.js, which derives the active link from the path (the BZ-15
+  // note in memory.html says so). That is the only script that went away.
+  assert.ok(scripts >= 41, `expected the full UI, found only ${scripts} scripts`);
   assert.doesNotMatch(pageSource, /^(?:<<<<<<<|=======|>>>>>>>)/m);
 });
 
