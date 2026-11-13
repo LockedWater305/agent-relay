@@ -130,4 +130,10 @@ Update this document when a gate is verified. Keep source pushed, CI passed, art
 
 ## Hosted parity verification dependency
 
-Background research reports this fork behind upstream `GumbyEnder/agent-relay` (reported upstream revision prefix `3048d191`). Verify the full current upstream and actual running commit with the authorized hosting operator before declaring hosted parity or deploying. The original reconciliation baseline is this fork's recorded source, not proof of parity with a newer partner deployment. Do not overwrite a newer partner deployment with this fork without resolving that difference.
+Verified read-only GitHub comparison on 2026-11-13: upstream `GumbyEnder/agent-relay` at `b7e8646ad2b55d80214ac28acdb521f1893d539d` is **80 commits ahead**, while fork main `3bf15ce27a10e15e2533a5f659c42da07e9cfe36` has **one unique commit**, the privacy hotfix. Common ancestor: `6f38160ec757c47ba350f1434fd0378c6ce91331`. This supersedes the earlier reported 79-commit/3048d191 observation. [Comparison](https://github.com/GumbyEnder/agent-relay/compare/LockedWater305:3bf15ce27a10e15e2533a5f659c42da07e9cfe36...GumbyEnder:b7e8646ad2b55d80214ac28acdb521f1893d539d).
+
+Upstream changes include shared chat/navigation and multiple product pages, plus migrations 0055 and 0056. The desktop reconciliation's original fork baseline is therefore not proof of parity with upstream or a newer partner deployment.
+
+The upstream `src/lib/buzzy/honcho.ts` at that exact revision still enables message synchronization solely when BZ_HONCHO_URL and BZ_HONCHO_KEY are configured; the fork's disabled-pending-consent implementation is not present there. This is a verified source distinction, **not evidence of what is currently running or configured in production**.
+
+Before retargeting parity or deploying, reconcile the newer upstream changes and preserve the fork privacy fix, then obtain the actual running commit/service mapping from the authorized hosting operator. Do not overwrite partner work or deploy the older fork over a newer service. No upstream source was modified during this investigation.
