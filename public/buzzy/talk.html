@@ -4283,6 +4283,14 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (debug) { try { console.log("[voice] " + msg); } catch (_) {} }
     }
 
+    // The Windows privacy switch fixes a silent mic on Windows only, so the hint is offered
+    // in the desktop shell on a Windows machine and nowhere else.
+    function micWindowsHint() {
+      var win = false;
+      try { win = /Win/.test(navigator.platform || "") || /Windows/.test(navigator.userAgent || ""); } catch (_) {}
+      return window.beezilla && win ? " (Windows: Settings → Privacy → Microphone → let desktop apps use it)" : "";
+    }
+
     // 0.02 RMS was a shout on a good headset and silence on a laptop array: the
     // clip never reached the transcriber, so the user saw "didn't catch that" with
     // nothing in any log. 0.008 still ignores room noise but hears a normal voice.
@@ -4385,7 +4393,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             if (recState !== recording) return;
             micLog("after 700ms: frames=" + recording.frames + " state=" + ctx.state + " track=" + (stream.getAudioTracks()[0] || {}).readyState);
             if (!recording.frames) {
-              stageNote("The microphone opened but is not delivering audio (Windows: Settings → Privacy → Microphone → let desktop apps use it).");
+              stageNote("The microphone opened but is not delivering audio" + micWindowsHint() + ".");
             }
           }, 700);
           micLog("recording at " + ctx.sampleRate + " Hz");
