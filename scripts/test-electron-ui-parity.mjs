@@ -199,6 +199,9 @@ function microphone({ desktop = false, available = true, throws = false, asr = "
     srAvailable: () => available,
     startRecording: () => { calls.recorder += 1; },
     paintVoice() {}, stageNote() {}, saveListenPref() {},
+    // Upstream capture helpers: the SR path calls startCapture after rec.start(), and
+    // onerror drops a capture. The assertions here are about the recognizer and recorder.
+    startCapture() {}, dropCapture() {},
   };
   runInNewContext(talk.slice(start, end), context);
   context.startListening();
@@ -264,6 +267,8 @@ function recorderHarness({ failSetup = false } = {}) {
       }
     } },
     setTimeout(fn) { timers.push(fn); return timers.length; },
+    // Upstream starts its pre-roll watchdog at the top level of the sliced script.
+    setInterval() { return 0; }, clearInterval() {},
     paintVoice() {}, setAvatarState() {}, saveListenPref() {}, saveVoicePref() {}, stopSpeaking() {},
     stageNote(note) { notes.push(note); },
     console: { log() {} },
