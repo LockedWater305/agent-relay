@@ -160,7 +160,9 @@ test("main's shared chat, creative pages and Library survive local integration",
     assert.ok(nav.includes(`href: "/buzzy/${name}"`), `${name} remains in shared navigation`);
   }
   assert.match(nav, /s\.src = "\/buzzy\/chat\.js"/);
-  assert.match(nav, /if \(section\(\) !== "talk"\) askControl\(chrome\)/);
+  // On Talk the Ask panel is never built: askControl wires the nav button to the page's
+  // own composer and returns before the panel exists.
+  assert.match(nav, /function askControl\(nav\) \{[\s\S]*?if \(section\(\) === "talk"\) \{[\s\S]*?\breturn;\s*\}\s*var panel = document\.createElement\("div"\);/);
   assert.match(chat, /window\.BeeZillaChat = \{ mount:/);
   assert.match(chat, /bz_session_id/);
   assert.match(chat, /stream: true/);
