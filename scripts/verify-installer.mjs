@@ -51,7 +51,7 @@ if (!existsSync(ASAR)) {
   check("app.asar exists", false, "missing");
 } else {
   const listing = execFileSync("npx", ["asar", "list", ASAR], { encoding: "utf8", cwd: ROOT });
-  for (const file of ["main.mjs", "preload.cjs", "settings.mjs", "supervisor.mjs", "connect.mjs"]) {
+  for (const file of ["main.mjs", "preload.cjs", "settings.mjs", "supervisor.mjs", "connect.mjs", "capability-broker.mjs", "folders-ipc.mjs"]) {
     check(`the shell ships ${file}`, listing.split("\n").includes(`/${file}`), file);
   }
   // The connect flow is the only thing that can obtain OUR credentials, so a stage

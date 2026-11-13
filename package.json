@@ -71,7 +71,7 @@
     "private:sync": "node scripts/sync-private.mjs",
     "private:check": "node scripts/sync-private.mjs --check",
     "private:verify": "node scripts/sync-private.mjs --check --require-private",
-    "test:desktop-boundaries": "node scripts/test-electron-ui-parity.mjs && node --experimental-vm-modules --test scripts/test-local-db-boundary.mjs scripts/test-local-runtime-inference-boundary.mjs scripts/test-local-asset-boundary.mjs scripts/test-local-start-boundary.mjs && node scripts/test-llm-boundary.mjs && node scripts/test-private-boundary.mjs && npx tsx scripts/test-recipe-local-boundary.ts && node --test --test-concurrency=1 scripts/test-desktop-hardening.mjs scripts/test-desktop-lifecycle.mjs scripts/test-desktop-credential-env.mjs scripts/test-honcho-privacy.mjs scripts/test-capability-broker.mjs",
+    "test:desktop-boundaries": "node scripts/test-electron-ui-parity.mjs && node --experimental-vm-modules --test scripts/test-local-db-boundary.mjs scripts/test-local-runtime-inference-boundary.mjs scripts/test-local-asset-boundary.mjs scripts/test-local-start-boundary.mjs && node scripts/test-llm-boundary.mjs && node scripts/test-private-boundary.mjs && npx tsx scripts/test-recipe-local-boundary.ts && node --test --test-concurrency=1 scripts/test-desktop-hardening.mjs scripts/test-desktop-lifecycle.mjs scripts/test-desktop-credential-env.mjs scripts/test-honcho-privacy.mjs scripts/test-capability-broker.mjs scripts/test-folders-ipc.mjs scripts/test-folders-settings-ui.mjs",
     "test:honcho-privacy": "node --test scripts/test-honcho-privacy.mjs"
   },
   "dependencies": {
