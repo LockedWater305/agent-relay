@@ -24,6 +24,9 @@ const library = read("public/buzzy/library.html");
 const nav = read("public/buzzy/nav.js");
 const chat = read("public/buzzy/chat.js");
 const navScript = '<script src="/buzzy/nav.js" defer></script>';
+// The nav block the handler replaces with the one shared row, and a page with that block blanked.
+const NAV_BLOCK = /<nav id="bzNav"[^>]*>[\s\S]*?<\/nav>/;
+const withoutNav = (html) => html.replace(NAV_BLOCK, '<nav id="bzNav"></nav>');
 const names = [
   "index", "talk", "memory", "remember", "experts", "library", "profile",
   "landing", "login", "recipes", "wallet", "upload", "graph", "capabilities",
@@ -86,6 +89,7 @@ test("all public BeeZilla JS and inline scripts parse without merge markers", ()
 
 test("every current web page and desktop Settings is routed with one shared nav", async () => {
   const handler = pageHandler();
+  const sharedNavRows = new Set();
   for (const name of names) {
     const path = name === "index" ? "/buzzy" : `/buzzy/${name}`;
     const result = await handler({ path: `${path}/?job=parity-check` });
@@ -100,13 +104,19 @@ test("every current web page and desktop Settings is routed with one shared nav"
     assert.match(result.headers.get("content-type"), /text\/html/);
     const body = await result.text();
     const raw = read(`public/buzzy/${name}.html`);
-    const at = raw.lastIndexOf("</body>");
-    assert.equal(body, raw.slice(0, at) + navScript + raw.slice(at), path);
+    // The handler swaps the shared nav row into <nav id="bzNav"> and injects nav.js before
+    // the LAST </body> when a page does not ship it. Everything outside the nav row must
+    // match the file exactly, and every page must serve the same row.
+    const at = withoutNav(raw).lastIndexOf("</body>");
+    assert.equal(withoutNav(body), withoutNav(raw).slice(0, at) + navScript + withoutNav(raw).slice(at), path);
+    const navRow = body.match(NAV_BLOCK);
+    if (navRow) sharedNavRows.add(navRow[0].replace(/^<nav[^>]*>/, "").replace(/<\/nav>$/, ""));
     assert.equal(body.split(navScript).length - 1, 1, path);
     // Talk's Word export contains a literal </body> inside JS. Injection must
     // follow the real final body tag, not break that script string.
     compileScripts(body, path);
   }
+  assert.equal(sharedNavRows.size, 1, "every page serves the same nav row");
 });
 
 test("existing nav is not injected twice and production public fallback works", async () => {
