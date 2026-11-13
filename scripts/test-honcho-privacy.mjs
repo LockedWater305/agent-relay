@@ -3,8 +3,8 @@
  * Ambient Honcho regression checks, using synthetic data and no network/deps.
  * Runs the actual legacy UI action bodies with a minimal DOM and the actual
  * server module with a fetch recorder. Other UI/network providers are outside
- * this test; passing does not establish offline mode or packaged Electron QA.
- * Run: node --test scripts/test-honcho-privacy.mjs (Node 24)
+ * this test; passing does not establish offline mode or a full application build.
+ * Run: npm run test:honcho-privacy (uses Node built-in TypeScript stripping).
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -144,6 +144,10 @@ for (const mode of [undefined, "local", "cloud"]) {
     env.BZ_HONCHO_KEY = "synthetic-replacement-key-not-real";
     assert.equal(h.api.honchoAvailable(), false);
     await h.api.ensurePeer("synthetic-other-owner");
+    assert.equal(await h.api.ensureSession("synthetic-other-session", "synthetic-other-owner"), "synthetic-other-session");
+    await h.api.syncMessages("synthetic-other-session", "synthetic-other-owner", [
+      { peer_id: "synthetic-other-owner", content: "synthetic private message after env change" },
+    ]);
     assert.equal(h.requests.length, 0, "all public helpers fail closed before fetch");
   });
 }

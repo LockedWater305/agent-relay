@@ -37,7 +37,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "verify": "npm run typecheck && npm run build && npm run test:ci",
-    "test:ci": "npm run test:engine && npm run test:openapi-sync && npm run test:bz-f001-profile && npx tsx scripts/test-tool-registry.ts && npx tsx scripts/test-voice-tools.ts && npx tsx scripts/test-file-intent.ts && npm run test:desktop-boundaries",
+    "test:ci": "npm run test:honcho-privacy && npm run test:engine && npm run test:openapi-sync && npm run test:bz-f001-profile && npx tsx scripts/test-tool-registry.ts && npx tsx scripts/test-voice-tools.ts && npx tsx scripts/test-file-intent.ts && npm run test:desktop-boundaries",
     "test:engine": "npx tsx scripts/test-board-engine.ts && npm run test:history && npm run test:build-order && npm run test:refresh-scope && npm run test:p0p2 && npm run test:prod && npm run test:auth-email && npm run test:tenancy && npm run test:tenancy-endpoints && npm run test:skill-routing && npm run test:project-ref && npm run test:docs-html && npm run test:github-ingest",
     "test:tenancy": "npx tsx scripts/test-board-tenancy.ts",
     "test:skill-routing": "npx tsx scripts/test-skill-routing.ts",
@@ -70,7 +70,8 @@
     "private:sync": "node scripts/sync-private.mjs",
     "private:check": "node scripts/sync-private.mjs --check",
     "private:verify": "node scripts/sync-private.mjs --check --require-private",
-    "test:desktop-boundaries": "node scripts/test-electron-ui-parity.mjs && node --experimental-vm-modules --test scripts/test-local-db-boundary.mjs scripts/test-local-runtime-inference-boundary.mjs scripts/test-local-asset-boundary.mjs scripts/test-local-start-boundary.mjs && node scripts/test-llm-boundary.mjs && node scripts/test-private-boundary.mjs && npx tsx scripts/test-recipe-local-boundary.ts && node --test scripts/test-desktop-hardening.mjs scripts/test-desktop-lifecycle.mjs scripts/test-desktop-credential-env.mjs scripts/test-honcho-privacy.mjs"
+    "test:desktop-boundaries": "node scripts/test-electron-ui-parity.mjs && node --experimental-vm-modules --test scripts/test-local-db-boundary.mjs scripts/test-local-runtime-inference-boundary.mjs scripts/test-local-asset-boundary.mjs scripts/test-local-start-boundary.mjs && node scripts/test-llm-boundary.mjs && node scripts/test-private-boundary.mjs && npx tsx scripts/test-recipe-local-boundary.ts && node --test scripts/test-desktop-hardening.mjs scripts/test-desktop-lifecycle.mjs scripts/test-desktop-credential-env.mjs scripts/test-honcho-privacy.mjs",
+    "test:honcho-privacy": "node --test scripts/test-honcho-privacy.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.3",

@@ -1815,8 +1815,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       else if (state.screen === "docs") goDocs();
       saveState();
     }
-    // No ambient third-party memory sync. An account/device ID or a chat action
-    // is not consent to copy messages to an external memory service.
+    // External memory sync is disabled pending authenticated, scoped consent.
+    // This UI must never send owner IDs or conversations to an ambient third party.
 
     // ── Account: session-aware Sign in / user name + Log out ──────────
     (function account() {
