@@ -316,7 +316,8 @@ function resolvePackage(name, from, root) {
 
 function du(dir) {
   try {
-    return Number(execFileSync("du", ["-sb", dir], { encoding: "utf8" }).split("\t")[0]);
+    // -k is accepted by both GNU and BSD/macOS du; -b is GNU-only and made macOS report 0 MB.
+    return Number(execFileSync("du", ["-sk", dir], { encoding: "utf8" }).split("\t")[0]) * 1024;
   } catch {
     return 0;
   }
