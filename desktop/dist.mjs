@@ -9,6 +9,11 @@
  *
  * `all` then hands that tree to electron-builder (NSIS on Windows).
  *
+ * `dir` is the LOCAL TEST build: the same stage, then an unpacked, unsigned app
+ * for the current platform only (`--mac dir` on macOS). It carries no publisher
+ * pins and writes no installer, so it exists to launch the packaged layout on a
+ * machine that cannot make a release. Its output is never a release.
+ *
  * Layout it produces (and that main.mjs expects when packaged):
  *   <install>/resources/app.asar        main.mjs, supervisor.mjs
  *   <install>/resources/app/            .output/ scripts/ bin/ package.json node_modules/
@@ -22,6 +27,7 @@ const DESKTOP = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(DESKTOP, "..");
 const STAGE = join(DESKTOP, "stage");
 const APP = join(STAGE, "app");
+const OUT = join(ROOT, "dist-desktop"); // package.json build.directories.output
 
 const log = (msg) => console.log(`[dist] ${msg}`);
 
@@ -73,6 +79,8 @@ function stage() {
     }
   } else if (mode === "all") {
     throw new Error("refusing to build a release with no publishers.json");
+  } else if (mode === "dir") {
+    log("no publishers.json — this local test build trusts no recipe publisher");
   }
 
   // Production dependency closure.
@@ -323,8 +331,55 @@ function du(dir) {
   }
 }
 
+const LOCAL_TEST = "LOCAL TEST BUILD — not a release, unsigned, no publisher pins";
+
+function localTestBanner() {
+  const rule = "*".repeat(LOCAL_TEST.length + 6);
+  log(rule);
+  log(`**  ${LOCAL_TEST}  **`);
+  log(rule);
+}
+
+/**
+ * `dir`: unpacked, unsigned, current platform only. electron-builder's `dir`
+ * target writes the app under dist-desktop/ (macOS: mac-arm64/BeeZilla.app,
+ * Windows: win-unpacked/). It is not an installer and not a release.
+ */
+function packDir() {
+  const flag = { darwin: "--mac", win32: "--win", linux: "--linux" }[process.platform];
+  if (!flag) throw new Error(`no electron-builder target for ${process.platform}`);
+  log(`running electron-builder ${flag} dir (unpacked, no installer, no publish)…`);
+  execFileSync("npx", ["electron-builder", flag, "dir", "--publish", "never"], {
+    cwd: DESKTOP, stdio: "inherit",
+  });
+  // electron-builder's extraResources copy drops the TOP-LEVEL node_modules of
+  // its source directory (app-builder-lib util/filter.js always excludes a root
+  // `node_modules`), so the production closure never reaches the unpacked tree
+  // and the runtime cannot start. Only this local build is patched: the `all`
+  // (Windows release) config stays exactly as it is.
+  const resources = unpackedResources();
+  log(`adding the production node_modules under ${resources}`);
+  cpSync(join(APP, "node_modules"), join(resources, "node_modules"), { recursive: true, dereference: true });
+  localTestBanner();
+  log("unpacked app written under dist-desktop/");
+}
+
+/** The resources/app folder electron-builder wrote for this platform. */
+function unpackedResources() {
+  const macDirs = process.arch === "arm64" ? ["mac-arm64", "mac"] : ["mac", "mac-arm64"];
+  const candidates = process.platform === "darwin"
+    ? macDirs.map((d) => join(OUT, d, "BeeZilla.app", "Contents", "Resources", "app"))
+    : process.platform === "win32"
+      ? ["win-unpacked", "win-arm64-unpacked"].map((d) => join(OUT, d, "resources", "app"))
+      : ["linux-unpacked", "linux-arm64-unpacked"].map((d) => join(OUT, d, "resources", "app"));
+  const found = candidates.find((p) => existsSync(join(p, "package.json")));
+  if (!found) throw new Error(`no unpacked app under ${OUT} (looked in ${candidates.join(", ")})`);
+  return found;
+}
+
 const mode = process.argv[2] ?? "stage";
-if (mode === "stage" || mode === "all") stage();
+if (mode === "dir") localTestBanner();
+if (mode === "stage" || mode === "all" || mode === "dir") stage();
 if (mode === "all") {
   log("running electron-builder…");
   execFileSync("npx", ["electron-builder", "--win", "nsis", "--publish", "never"], {
@@ -332,3 +387,4 @@ if (mode === "all") {
   });
   log("installer written to dist-desktop/");
 }
+if (mode === "dir") packDir();

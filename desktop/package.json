@@ -10,7 +10,8 @@
   "scripts": {
     "start": "electron .",
     "stage": "node dist.mjs stage",
-    "dist": "node dist.mjs all"
+    "dist": "node dist.mjs all",
+    "pack:dir": "node dist.mjs dir"
   },
   "build": {
     "appId": "ai.beezilla.desktop",
@@ -38,6 +39,10 @@
       }
     ],
     "asar": true,
+    "mac": {
+      "target": "dir",
+      "identity": null
+    },
     "win": {
       "target": [
         "nsis"
