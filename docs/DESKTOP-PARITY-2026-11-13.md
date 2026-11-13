@@ -61,6 +61,9 @@ the user has rights to license, not arbitrary third-party attachments.
 
 The chat loop's local-model preference is enforced across its inference calls,
 but manual session summaries and runner inference still have separate policy
-paths. Honcho synchronization, transcription, web search, music and image
-services are also independent network capabilities. This integration must not
+paths. Transcription, web search, music and image services are also independent
+network capabilities. Automatic Honcho cloud-memory synchronization is now
+disabled in both browser and server paths pending authenticated, scoped user
+consent. Environment configuration or sign-in is not consent. This deliberate
+privacy difference from the hosted baseline must not be called feature parity. This integration must not
 be labeled an air-gapped or fully egress-blocked Lockdown implementation.

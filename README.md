@@ -77,7 +77,7 @@ BeeZilla (alias **Buzzy**, permanently) is the consumer front door on the same e
 
 **Multi-company.** One account can hold several companies — facts, profile lines and work are scoped to the active company, while search spans all of them.
 
-**Memory.** Short-term state is the current job's draft; long-term is a per-account **Honcho** peer plus a sanitized card. Job history is the product store, not the memory layer.
+**Memory.** Short-term state is the current job's draft. Automatic Honcho cloud synchronization is disabled until an authenticated, scoped user-consent flow is implemented; configuring its environment variables alone does not enable it. Job history remains in the product store.
 
 **Models.** The picker shows roles, not model IDs, and defaults to the cheapest model likely to succeed (Marvin / `z-ai/glm-5.3-flash`), escalating only when a job needs it. The catalog and routing live in [`src/lib/buzzy/llm.ts`](src/lib/buzzy/llm.ts) and `BZ_CHAT_MODELS`.
 
