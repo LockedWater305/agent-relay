@@ -107,11 +107,8 @@ Update this document when a gate is verified. Keep source pushed, CI passed, art
 
 ## Owner-supplied visual references
 
-**Original copies pending:** all four direct downloads returned HTTP 403 from this execution environment; the web reader also could not access them. No pixels have been inspected and no original image files have been uploaded to this repository. The descriptions below identify the intended role from the owner's written brief, not verified visual contents. Replace this status only after original bytes are received, inspected and committed. Preserve originals and their source links; do not generate lookalike substitutes.
+[Four original images and inspected descriptions](references/beezilla/README.md) are now included. Originals were supplied as attachments after Imgur returned403; bytes are preserved and hashes recorded. The first image contains the active whiteboard and inspiration wall; the fourth is an existing Talk interface screenshot, not the inspiration mockup. Written requirements and later owner decisions take precedence over image labels.
 
-1. [Workspace layout reference: zMWSgG0.jpeg](https://i.imgur.com/zMWSgG0.jpeg). The owner's brief associates this with three stacked top bars (voice/chat, search, main navigation), a built-in browser below, and a top build / bottom browse split.
-2. [Idle voice/chat reference: A6b7ky7.png](https://i.imgur.com/A6b7ky7.png). The owner's brief associates this with the prominent Talk to BeeZilla button docked inside a single-line input, drag-and-drop rather than a plus button, and the top-right privacy control.
-3. [Search and sharing reference: qVxl1TJ.png](https://i.imgur.com/qVxl1TJ.png). The owner's brief associates this with search/URL navigation, drag-to-share, URL/QR sharing and privacy warnings. The later explicit Public versus Selected team choice supersedes any earlier automatic-opening behavior.
-4. [Inspiration feed reference: 4v4rpSw.png](https://i.imgur.com/4v4rpSw.png). The owner's brief associates this with a Pinterest-style finished-project feed, separate similar/expand controls, drag-first cards and highlighted whiteboard drop targets.
+## Hosted parity verification dependency
 
-These references are design inputs, not an assertion of ownership or an automatic MIT license grant for third-party imagery.
+Background research reports this fork behind upstream `GumbyEnder/agent-relay` (reported upstream revision prefix `3048d191`). Verify the full current upstream and actual running commit with the authorized hosting operator before declaring hosted parity or deploying. The original reconciliation baseline is this fork's recorded source, not proof of parity with a newer partner deployment. Do not overwrite a newer partner deployment with this fork without resolving that difference.
