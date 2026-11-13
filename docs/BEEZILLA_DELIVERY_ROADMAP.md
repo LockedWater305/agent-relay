@@ -16,16 +16,16 @@ Environment: macOS (Darwin 25.6.0, arm64), Node v26.7.0, npm 11.19.0 — **not**
 
 | Status | Desktop branch `beezilla/desktop-parity-20261113` |
 |---|---|
-| Source pushed | `d75d581` — integration `b669b1b` + fixes `a334acc`, `495cef6` + merge of GumbyEnder/agent-relay `main` at `3048d19` (79 newer web commits) + mailer typecheck fix + updated desktop tests |
+| Source pushed | `15ca075` — Electron 45.3.2 (bundled Node 24.22.2, verified from the binary) and electron-builder 26.18.0 on top of `d75d581` — integration `b669b1b` + fixes `a334acc`, `495cef6` + merge of GumbyEnder/agent-relay `main` at `3048d19` (79 newer web commits) + mailer typecheck fix + updated desktop tests |
 | Checks on this Mac | `npm ci`, `npm run typecheck`, `npm run build`, `npm run test:desktop-boundaries` (parity 12/12, local boundary 65/65, LLM 7/7, private split 12, recipe boundary 41, desktop node tests 42/42) and `npm run test:ci` — all exit 0 on `d75d581` |
 | GitHub CI | not run: Actions are enabled on the fork but no workflow run exists for this branch yet |
 | Artifact built | no — `npm run stage` works (426 MB staged); `npm run dist` stops by design at the empty `publishers.json` (needs the production publisher key set) |
-| Installed behaviour | not tested |
+| Installed behaviour | development-mode smoke launch only (macOS, `15ca075`): local runtime on 127.0.0.1:7331, `/buzzy/talk` and first-run `/buzzy/settings` windows load with the preload bridge, no errors in the app log, clean exit; the packaged installer, chat, settings saves and runtime restart are not yet tested |
 | Live | not applicable |
 
 Found and fixed on the way: `desktop/package-lock.json` was missing 32 electron-builder entries (desktop `npm ci` failed with EUSAGE); `dist.mjs` measured size with GNU-only `du -sb` (macOS recorded 0 MB); the desktop lifecycle tests were flaky when run concurrently under load (now `--test-concurrency=1`); after the upstream merge the parity test followed upstream's renames (`index.html` → `library.html`, `/buzzy` redirect, nav rebuilt by `nav.js`) and the web build no longer prints voice diagnostics to every visitor's console.
 
-Electron (phase 1, step 3): the pinned Electron 32.3.3 bundles **Node 20.18.1** (read from the binary). From releases.electronjs.org: Electron 35 is the first major with Node 22 (22.16.0); 40+ bundle Node 24. The supported majors today are 43–45; the upgrade target is **45.3.2 (Node 24.22.2)**. npm 11 skips Electron's postinstall unless `allowScripts` permits it, and `extract-zip` stalls under Node 26 — use Node 22/24 for desktop installs or unzip the cached binary.
+Electron (phase 1, step 3) — **done in source** (`a7e632d`, `15ca075`): Electron 45.3.2 with Node 24.22.2; desktop-boundaries 42/42 and test:ci pass on it; the only code change the 33→45 breaking changes required was the `console-message` event object. Still to do before Electron 46: move the four `safeStorage.encryptString/decryptString` calls to the async API. Background: the old pin, Electron 32.3.3, bundled **Node 20.18.1** (read from the binary). From releases.electronjs.org: Electron 35 is the first major with Node 22 (22.16.0); 40+ bundle Node 24. The supported majors today are 43–45; the upgrade target is **45.3.2 (Node 24.22.2)**. npm 11 skips Electron's postinstall unless `allowScripts` permits it, and `extract-zip` stalls under Node 26 — use Node 22/24 for desktop installs or unzip the cached binary.
 
 The hosted site's equivalent changes are separate pull requests into GumbyEnder/agent-relay (#288 music/3D auto-detect, #300 the roadmap's Talk workspace, #301 the privacy hotfix); none is merged or live yet.
 
