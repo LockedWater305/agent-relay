@@ -139,3 +139,11 @@ Upstream changes include shared chat/navigation and multiple product pages, plus
 The upstream `src/lib/buzzy/honcho.ts` at that exact revision still enables message synchronization solely when BZ_HONCHO_URL and BZ_HONCHO_KEY are configured; the fork's disabled-pending-consent implementation is not present there. This is a verified source distinction, **not evidence of what is currently running or configured in production**.
 
 Before retargeting parity or deploying, reconcile the newer upstream changes and preserve the fork privacy fix, then obtain the actual running commit/service mapping from the authorized hosting operator. Do not overwrite partner work or deploy the older fork over a newer service. No upstream source was modified during this investigation.
+
+## Desktop reconciliation checkpoint: 2026-11-13
+
+PR #1 now includes partner updates through `6e246da19a3c118c56fdb6a6677635a3bb7c2cad` (including upstream through 3048d191, Electron 45.3.2, lockfile and packaged-runtime dependency fixes). Earlier Electron32/source-gap observations above are historical, not the current dependency state. Partner commit messages describe local builds; those claims are not substituted for independent acceptance here.
+
+Verified source commit [9441642](https://github.com/LockedWater305/agent-relay/commit/94416422214ccf7568ca60f0cfbabb460a12de00) reconciles the remaining upstream b7e8646 speech-fallback change and fixes two reproduced lifecycle risks: pending transcription entering a different job after Stop/navigation, and overlapping diagnostic microphone requests leaking a stream. Exactly four files changed; partner packaging was preserved with an expected-head, non-force update. Portable regression suites are imported into the existing UI parity gate.
+
+**84/84 focused Node/VM checks independently passed.** These use synthetic handlers, streams and requests, not real microphone/device/browser validation. Uploaded blob hashes match reviewed local bytes. Exact-head Actions query returned no runs. Full current-repository parity/privacy/build/typecheck and packaged acceptance remain unverified; the older local checkout lacks current surrounding assets. No deployment performed, and the actual hosted commit/configuration remains unknown. Upstream source was not modified.
