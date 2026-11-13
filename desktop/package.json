@@ -54,7 +54,8 @@
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false
     },
-    "artifactName": "BeeZilla-Setup-${version}.${ext}"
+    "artifactName": "BeeZilla-Setup-${version}.${ext}",
+    "afterPack": "./after-pack.cjs"
   },
   "devDependencies": {
     "electron": "^45.3.2",

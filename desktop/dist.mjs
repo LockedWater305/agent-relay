@@ -352,14 +352,13 @@ function packDir() {
   execFileSync("npx", ["electron-builder", flag, "dir", "--publish", "never"], {
     cwd: DESKTOP, stdio: "inherit",
   });
-  // electron-builder's extraResources copy drops the TOP-LEVEL node_modules of
-  // its source directory (app-builder-lib util/filter.js always excludes a root
-  // `node_modules`), so the production closure never reaches the unpacked tree
-  // and the runtime cannot start. Only this local build is patched: the `all`
-  // (Windows release) config stays exactly as it is.
+  // The production node_modules is added by the afterPack hook (after-pack.cjs)
+  // for every target, because extraResources drops a top-level node_modules.
+  // Check it really landed: without it the packaged runtime cannot start.
   const resources = unpackedResources();
-  log(`adding the production node_modules under ${resources}`);
-  cpSync(join(APP, "node_modules"), join(resources, "node_modules"), { recursive: true, dereference: true });
+  if (!existsSync(join(resources, "node_modules", "@electric-sql", "pglite"))) {
+    throw new Error(`packaged runtime has no node_modules under ${resources} — the afterPack hook did not run`);
+  }
   localTestBanner();
   log("unpacked app written under dist-desktop/");
 }
