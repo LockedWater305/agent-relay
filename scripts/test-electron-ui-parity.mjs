@@ -20,7 +20,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(join(ROOT, path), "utf8");
 const pageSource = read("src/lib/buzzy/pages.nitro.ts");
 const talk = read("public/buzzy/talk.html");
-const library = read("public/buzzy/index.html");
+const library = read("public/buzzy/library.html");
 const nav = read("public/buzzy/nav.js");
 const chat = read("public/buzzy/chat.js");
 const navScript = '<script src="/buzzy/nav.js" defer></script>';
@@ -55,6 +55,10 @@ function pageHandler(readImpl = readFile) {
     defineEventHandler: (fn) => fn,
     getMethod: (event) => event.method || "GET",
     setResponseStatus: (event, status) => { event.status = status; },
+    sendRedirect: (event, location, status = 302) => {
+      event.status = status;
+      return new Response(null, { status, headers: { location } });
+    },
     readFile: readImpl, join, resolve, Buffer, Uint8Array, Response,
     process: { cwd: () => ROOT },
   };
@@ -85,10 +89,17 @@ test("every current web page and desktop Settings is routed with one shared nav"
   for (const name of names) {
     const path = name === "index" ? "/buzzy" : `/buzzy/${name}`;
     const result = await handler({ path: `${path}/?job=parity-check` });
+    if (name === "index") {
+      // /buzzy is not a page any more: the handler redirects it to Talk. The Library
+      // page is library.html, routed as /buzzy/library.
+      assert.equal(result.status, 302, path);
+      assert.equal(result.headers.get("location"), "/buzzy/talk", path);
+      continue;
+    }
     assert.equal(result.status, 200, path);
     assert.match(result.headers.get("content-type"), /text\/html/);
     const body = await result.text();
-    const raw = read(`public/buzzy/${name === "library" ? "index" : name}.html`);
+    const raw = read(`public/buzzy/${name}.html`);
     const at = raw.lastIndexOf("</body>");
     assert.equal(body, raw.slice(0, at) + navScript + raw.slice(at), path);
     assert.equal(body.split(navScript).length - 1, 1, path);
