@@ -82,6 +82,16 @@ import { transcribeAudio, formatFromContentType, ASR_MAX_BYTES } from "./asr";
  */
 const ASSET_MAX_BYTES = 25 * 1024 * 1024;
 
+// Uploaded MIME metadata is untrusted. Only inert raster/media formats may be
+// displayed at the app origin; SVG/HTML/XML and unknown formats must download.
+// PDF also downloads until there is an isolated preview, not a same-origin frame.
+const INLINE_ASSET_TYPES = new Set([
+  "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp",
+  "image/x-icon", "image/vnd.microsoft.icon",
+  "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm",
+  "audio/mp4", "audio/aac", "audio/flac",
+]);
+
 /**
  * One latency sample. Two sources: `server` (our own stage timings) and
  * `client` (what the owner actually experienced — mic stop → first sound →
@@ -769,8 +779,24 @@ export default defineEventHandler(async (event) => {
       return { ok: false, error: "No such file on this account.", code: "not_found" };
     }
     const row = rows[0]!;
-    setResponseHeader(event, "content-type", row.content_type || "application/octet-stream");
-    setResponseHeader(event, "content-disposition", `inline; filename="${row.filename.replace(/"/g, "")}"`);
+    const mime = (row.content_type || "").split(";", 1)[0].trim().toLowerCase();
+    const inline = INLINE_ASSET_TYPES.has(mime);
+    // Keep Unicode download names using RFC 5987, with an ASCII fallback that
+    // cannot inject headers or escape the quoted filename. Buffer normalises a
+    // surrogate split by the display-name length limit before URI encoding.
+    const filename = Buffer.from(cleanFilename(row.filename) || "download", "utf8").toString("utf8");
+    const fallbackName = filename.replace(/[^\x20-\x7e]|["\\]/g, "_");
+    const encodedName = encodeURIComponent(filename).replace(/[!'()*]/g, (char) =>
+      `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
+    setResponseHeader(event, "content-type", inline ? mime : "application/octet-stream");
+    setResponseHeader(event, "content-disposition", `${inline ? "inline" : "attachment"}; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`);
+    setResponseHeader(event, "x-content-type-options", "nosniff");
+    setResponseHeader(event, "cross-origin-resource-policy", "same-origin");
+    setResponseHeader(event, "cache-control", "private, no-store");
+    if (!inline) {
+      setResponseHeader(event, "content-security-policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'");
+    }
     return new Uint8Array(row.body);
   }
 

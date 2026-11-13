@@ -13,6 +13,7 @@ Everything a buyer or an auditor needs to check a claim:
 | Ed25519 signing + `verifyBundle` (self-consistency and signature) | `src/lib/recipe-seal/bundle.ts` |
 | Check DSL, compiler, fuel-bounded VM | `src/lib/recipe-checks/*` |
 | The verify tier — runs with **no KEK** | `src/lib/recipe-seal/verify.ts` |
+| Local-only catalog, pinned publisher verification, and offline cache API | `src/lib/recipe-seal/{local-api,local.nitro,catalog,trust,cache}.ts` |
 | Content-addressed storage contract | `src/lib/recipe-seal/storage.ts` |
 | Leak-gate logging (allow-list, not deny-list) | `src/lib/recipe-seal/safe-log.ts` |
 | Manifest schema, the public promise and its stated limits | `docs/RECIPE-SEAL.md` |
@@ -43,8 +44,12 @@ a clone using `BZ_PRIVATE_REPO_TOKEN` (https) or `BZ_PRIVATE_DEPLOY_KEY` (ssh
 deploy key, base64) → **stubs**.
 
 A clone with no credential gets `.private-stub/` instead: the tree still typechecks
-and still builds, and `/api/recipes*` answers `503 marketplace_disabled`. That is
-the honest open-source build.
+and still builds. The marketplace routes answer `503 marketplace_disabled`.
+The more-specific `/api/recipes/local` and `/api/recipes/local/**` routes remain
+public: in local runtime mode they authenticate the desktop requester and support
+listing, verifying, importing, and fetching signed bundles into the offline cache.
+They answer 404 in hosted mode and cannot publish, license, decrypt, or run a
+commercial recipe. This client API never imports the private management plane.
 
 The commit is pinned in `private.lock.json`. A source that cannot produce that
 exact commit is refused rather than substituted, because "what is in production"

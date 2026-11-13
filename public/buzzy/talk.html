@@ -3040,7 +3040,14 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // Which transcriber this session uses. "sr" = the browser's SpeechRecognition
       // (Chrome, and anything with a working speech service); "recorder" = record
       // locally and let the server transcribe (Firefox, Brave, blocked service).
-      asr: "sr",
+      //
+      // The desktop shell is ALWAYS "recorder": Electron exposes
+      // window.webkitSpeechRecognition because it is Chromium, but that API posts
+      // the clip to Google's speech service, which a packaged app cannot use —
+      // rec.start() throws (or answers `network`) and the mic dies silently with
+      // nothing in the dialogue tree. Measured: /api/buzzy/transcribe on the local
+      // runtime answers {ok:true,text,model:"openai/gpt-audio-mini"} in ~1.9 s.
+      asr: window.beezilla ? "recorder" : "sr",
       // Playback + lip-sync
       ctx: null, gain: null, analyser: null, nextTime: 0, active: 0, raf: 0,
       // Timings
@@ -3288,10 +3295,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
     // One spoken turn: returns the final transcript, or "" if nothing heard.
     function startListening() {
-      if (voice.rec || recState) return;
+      if (!voice.mic || voice.speaking || voice.sending || voice.rec || recState || recAcquiring) return;
       // Firefox ships no SpeechRecognition and Brave's service is blocked, so
-      // those browsers record the clip and let the server transcribe it.
-      if (!srAvailable() || voice.asr === "recorder") { startRecording(); return; }
+      // those browsers record the clip and let the server transcribe it. The
+      // desktop shell is included by name: Electron HAS the API object but cannot
+      // reach the speech service, so taking the SR branch there means the mic
+      // never produces a transcript.
+      if (!srAvailable() || voice.asr === "recorder" || window.beezilla) { startRecording(); return; }
       var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       var rec = new SR();
       rec.lang = "en-US";
@@ -3356,12 +3366,22 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           setTimeout(function () { if (voice.mic && !voice.speaking && !voice.sending) startListening(); }, 400);
         }
       };
-      try { rec.start(); } catch (_) { voice.rec = null; }
+      try {
+        rec.start();
+      } catch (_) {
+        // A recognizer that exists but cannot start is the worst case: the mic is
+        // on, nothing is recorded, and the owner gets no feedback. Record instead.
+        voice.rec = null;
+        voice.asr = "recorder";
+        startRecording();
+      }
       paintVoice();
     }
 
     function stopListening() {
-      if (recState) cancelRecording();
+      // A permission prompt can still be pending before recState exists.
+      // Cancel that acquisition as well, so a late stream cannot restart the mic.
+      cancelRecording();
       if (!voice.rec) return;
       try { voice.rec.stop(); } catch (_) {}
       voice.rec = null;
@@ -3374,6 +3394,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     // Everything here is getUserMedia + WebAudio, which every browser has.
     var REC_RATE = 16000;
     var recState = null;
+    // The request object is also its generation token. Off/on may start a new
+    // acquisition while an old permission prompt is unresolved; only the current
+    // request can become recState, and every obsolete stream is stopped on arrival.
+    var recAcquiring = null;
 
     function srAvailable() {
       return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -3425,8 +3449,34 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       return new Blob([buf], { type: "audio/wav" });
     }
 
+    // A mic that hears nothing and a mic that is broken are indistinguishable from
+    // the outside: both are silence with no message. Every step below writes a line
+    // to main.log (desktop) or the console (web), so the failure names itself.
+    function micLog(msg) {
+      try {
+        if (window.beezilla && window.beezilla.app && window.beezilla.app.log) {
+          window.beezilla.app.log("voice: " + msg);
+          return;
+        }
+      } catch (_) {}
+      try { console.log("[voice] " + msg); } catch (_) {}
+    }
+
+    // 0.02 RMS was a shout on a good headset and silence on a laptop array: the
+    // clip never reached the transcriber, so the user saw "didn't catch that" with
+    // nothing in any log. 0.008 still ignores room noise but hears a normal voice.
+    var SPEECH_RMS = 0.008;
+
+    function releaseRecording(r) {
+      if (!r) return;
+      try { if (r.proc) { r.proc.onaudioprocess = null; r.proc.disconnect(); } } catch (_) {}
+      try { if (r.src) r.src.disconnect(); } catch (_) {}
+      try { if (r.stream) r.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
+      try { if (r.ctx) Promise.resolve(r.ctx.close()).catch(function () {}); } catch (_) {}
+    }
+
     function startRecording() {
-      if (recState || voice.sending) return;
+      if (!voice.mic || voice.speaking || voice.sending || recState || recAcquiring) return;
       var md = navigator.mediaDevices;
       if (!md || !md.getUserMedia) {
         stageNote("This browser can't record audio — typed chat works here.");
@@ -3435,22 +3485,40 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         paintVoice();
         return;
       }
-      md.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
+      var recording = { ctx: null, stream: null, src: null, proc: null, chunks: [], rate: 0, speechSeen: false, peak: 0, frames: 0 };
+      recAcquiring = recording;
+      micLog("getUserMedia request");
+      var request;
+      try { request = md.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }); }
+      catch (e) { request = Promise.reject(e); }
+      Promise.resolve(request)
         .then(function (stream) {
-          if (!voice.mic) {
-            stream.getTracks().forEach(function (t) { t.stop(); });
+          recording.stream = stream;
+          if (recAcquiring !== recording || !voice.mic || voice.speaking || voice.sending) {
+            if (recAcquiring === recording) recAcquiring = null;
+            releaseRecording(recording);
             return;
           }
+          var tr = stream.getAudioTracks()[0];
+          var st = (tr && tr.getSettings && tr.getSettings()) || {};
+          micLog('stream ok label="' + ((tr && tr.label) || "") + '" rate=' + (st.sampleRate || "?") + " ch=" + (st.channelCount || "?"));
           var AC = window.AudioContext || window.webkitAudioContext;
-          var ctx = new AC();
-          var src = ctx.createMediaStreamSource(stream);
-          var proc = ctx.createScriptProcessor(2048, 1, 1);
-          var chunks = [];
+          var ctx = recording.ctx = new AC();
+          // A suspended context still opens the stream and still shows a device —
+          // it simply never fires onaudioprocess, so the recorder collects nothing
+          // and the clip never exists. Chrome in a tab resumes on the click; an
+          // Electron window can stay suspended, which is exactly the "works in the
+          // browser, deaf in the app" report. Resume, then say so if it did not take.
+          if (ctx.state === "suspended") { try { Promise.resolve(ctx.resume()).catch(function () {}); } catch (_) {} }
+          var src = recording.src = ctx.createMediaStreamSource(stream);
+          var proc = recording.proc = ctx.createScriptProcessor(2048, 1, 1);
+          var chunks = recording.chunks;
+          micLog("audio ctx state=" + ctx.state);
           var speechSeen = false;
           var quietSince = 0;
           var startedAt = Date.now();
           proc.onaudioprocess = function (ev) {
-            if (!recState) return;
+            if (recState !== recording) return;
             var input = ev.inputBuffer.getChannelData(0);
             var copy = new Float32Array(input.length);
             copy.set(input);
@@ -3458,9 +3526,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             var sum = 0;
             for (var i = 0; i < copy.length; i++) sum += copy[i] * copy[i];
             var rms = Math.sqrt(sum / copy.length);
-            if (rms > 0.02) { speechSeen = true; quietSince = 0; }
+            recording.frames += 1;
+            recording.peak = Math.max(recording.peak, rms);
+            if (rms > SPEECH_RMS) { speechSeen = true; quietSince = 0; }
             else if (speechSeen && !quietSince) { quietSince = Date.now(); }
-            if (recState) recState.speechSeen = speechSeen;
+            recording.speechSeen = speechSeen;
             var elapsed = Date.now() - startedAt;
             // End of speech: ~0.9s of quiet after talking. Hard caps keep a
             // forgotten mic from uploading a minute of silence.
@@ -3473,13 +3543,31 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           // nothing, so this is silent.
           src.connect(proc);
           proc.connect(ctx.destination);
-          recState = { ctx: ctx, stream: stream, src: src, proc: proc, chunks: chunks, rate: ctx.sampleRate, speechSeen: false };
+          recording.rate = ctx.sampleRate;
+          recState = recording;
+          recAcquiring = null;
+          setTimeout(function () {
+            if (recState !== recording) return;
+            micLog("after 700ms: frames=" + recording.frames + " state=" + ctx.state + " track=" + (stream.getAudioTracks()[0] || {}).readyState);
+            if (!recording.frames) {
+              stageNote("The microphone opened but is not delivering audio (Windows: Settings → Privacy → Microphone → let desktop apps use it).");
+            }
+          }, 700);
+          micLog("recording at " + ctx.sampleRate + " Hz");
           voice.note = "";
           setAvatarState("listening");
           paintVoice();
         })
         .catch(function (e) {
+          var current = recAcquiring === recording || recState === recording;
+          if (recAcquiring === recording) recAcquiring = null;
+          if (recState === recording) recState = null;
+          // Setup can fail after getUserMedia succeeded, so release whatever
+          // this request owns. An old rejection must not stop a newer request.
+          releaseRecording(recording);
+          if (!current) return;
           var name = (e && e.name) || "";
+          micLog("getUserMedia failed " + name + ": " + ((e && e.message) || ""));
           if (name === "NotAllowedError" || name === "SecurityError") {
             stageNote("Microphone blocked — allow the mic for this site, then tap it again.");
             voice.mic = false;
@@ -3496,15 +3584,23 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var r = recState;
       if (!r) return;
       recState = null;
-      try { r.proc.disconnect(); r.src.disconnect(); } catch (_) {}
-      try { r.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
-      try { r.ctx.close(); } catch (_) {}
+      releaseRecording(r);
       // Nothing was said: re-arm instead of uploading a silent clip and paying
       // the model to tell us it heard nothing.
-      if (!r.speechSeen) { rearmListening(); return; }
+      if (!r.speechSeen) {
+        micLog("dropped: no speech above " + SPEECH_RMS + " (peak " + (r.peak || 0).toFixed(4) + ")");
+        stageNote("The microphone heard nothing above room noise (peak " + (r.peak || 0).toFixed(4) + "). Check Settings → Microphone.");
+        rearmListening();
+        return;
+      }
       var total = 0;
       for (var i = 0; i < r.chunks.length; i++) total += r.chunks[i].length;
-      if (total < r.rate * 0.3) { rearmListening(); return; }
+      if (total < r.rate * 0.3) {
+        micLog("dropped: clip too short (" + total + " samples at " + r.rate + " Hz)");
+        rearmListening();
+        return;
+      }
+      micLog("clip " + (total / r.rate).toFixed(2) + " s peak=" + (r.peak || 0).toFixed(4) + " → transcribe");
       var flat = new Float32Array(total);
       var off = 0;
       for (var k = 0; k < r.chunks.length; k++) { flat.set(r.chunks[k], off); off += r.chunks[k].length; }
@@ -3512,12 +3608,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function cancelRecording() {
+      var pending = recAcquiring;
+      recAcquiring = null;
+      releaseRecording(pending);
       var r = recState;
-      if (!r) return;
       recState = null;
-      try { r.proc.disconnect(); r.src.disconnect(); } catch (_) {}
-      try { r.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_) {}
-      try { r.ctx.close(); } catch (_) {}
+      releaseRecording(r);
     }
 
     function sendForTranscription(wav) {
@@ -3533,11 +3629,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         .then(function (data) {
           voice.sending = false;
           if (!data || !data.ok) {
+            micLog("transcribe refused: " + JSON.stringify(data || {}).slice(0, 200));
             stageNote((data && data.error) || "Couldn't transcribe that — try again.");
             rearmListening();
             return;
           }
           var text = String(data.text || "").trim();
+          micLog("transcribe ok ms=" + data.ms + " model=" + data.model + ' text="' + text.slice(0, 80) + '"');
           if (!text) {
             stageNote("Didn't catch that — try again.");
             rearmListening();

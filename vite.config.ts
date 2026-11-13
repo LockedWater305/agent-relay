@@ -486,6 +486,16 @@ export default defineConfig(({ command }) => ({
                 handler: "./src/lib/search-gateway.nitro.ts",
               },
               {
+                // Public desktop client: verify/import/cache signed bundles, not
+                // the private marketplace's publish/license/run management plane.
+                route: "/api/recipes/local",
+                handler: "./src/lib/recipe-seal/local.nitro.ts",
+              },
+              {
+                route: "/api/recipes/local/**",
+                handler: "./src/lib/recipe-seal/local.nitro.ts",
+              },
+              {
                 route: "/api/recipes",
                 handler: "./src/lib/private/recipes.nitro.ts",
               },

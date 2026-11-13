@@ -27,3 +27,9 @@ scripts/private/
 # directory rule above does not match a symlink named node_modules, and one was
 # committed by accident — a self-referential link that breaks every checkout.
 node_modules
+# desktop release staging (generated; see desktop/dist.mjs)
+desktop/stage/
+dist-desktop/
+
+# test outputs
+fixtures/results/
