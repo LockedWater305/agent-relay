@@ -468,3 +468,11 @@ test("credential UI distinguishes confirmed startup from failed credential write
   }
 });
 
+
+
+test("Settings distinguishes local inference from cloud model and search transmission", () => {
+  const settings = read("public/buzzy/settings.html");
+  assert.doesNotMatch(settings, /Everything stays on this machine/i);
+  assert.match(settings, /Cloud models and online search send requests to their providers\./);
+  assert.match(settings, /Choose a local model to run inference on this machine\./);
+});
