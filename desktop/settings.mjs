@@ -12,6 +12,7 @@
  * and a wrapper around a CLI.
  */
 import { runtimeLib } from "./paths.mjs";
+import { existsSync } from "node:fs";
 import { managedAccountConnectCapability } from "./connect.mjs";
 
 // Loaded from the runtime tree, not by a relative path: inside app.asar a
@@ -25,6 +26,7 @@ const {
   resolveInference,
   isExpired,
   redactKey,
+  storePath: inferenceStorePath,
 } = await runtimeLib("scripts/lib/inference.mjs");
 const {
   resolveSearch,
@@ -40,17 +42,28 @@ const {
 } = await runtimeLib("scripts/lib/music-keys.mjs");
 
 /**
- * @param {{ dataDir: () => string, supervisor?: any, cipher?: {encrypt?:Function, decrypt?:Function} }} deps
+ * @param {{ dataDir: () => string, supervisor?: any, cipher?: {encrypt?:Function, decrypt?:Function}, beforeRestart?: Function, afterRestart?: Function, isStoredInferenceApplied?: Function, hasInjectedInferenceKey?: Function }} deps
  */
-export function createSettingsHandlers({ dataDir, supervisor, cipher = {}, beforeRestart, afterRestart }) {
+export function createSettingsHandlers({ dataDir, supervisor, cipher = {}, beforeRestart, afterRestart, isStoredInferenceApplied = () => false, hasInjectedInferenceKey = () => false }) {
   const describe = () => {
     const dir = dataDir();
-    const inf = resolveInference(dir, cipher);
+    const stored = loadInference(dir, cipher);
+    let inf = resolveInference(dir, cipher);
+    // The desktop injects decrypted keys before spawning the shared CLI runtime.
+    // Only main's matching injection proof can restore their store provenance;
+    // a genuine environment key must stay "env", even if equal to the store.
+    if (inf?.source === "env" && stored && isStoredInferenceApplied(stored)) {
+      inf = { ...inf, source: "store", provider: stored.provider, encrypted: stored.encrypted,
+        expiresAt: stored.expiresAt ?? null, expired: isExpired(stored) };
+    }
     const search = resolveSearch(dir, cipher);
     const music = resolveMusicKey(dir, cipher);
     return {
       // Additive, non-secret status for the UI. Enforcement remains in main.
       capabilities: { managedAccountConnect: managedAccountConnectCapability() },
+      // Removal must not depend on successful decryption or provenance. A broken
+      // store (or an owned injection whose file vanished) still needs an exit.
+      inferenceRemovable: existsSync(inferenceStorePath(dir)) || hasInjectedInferenceKey(),
       inference: inf
         ? {
             provider: inf.provider,

@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runInNewContext } from "node:vm";
+import { createContext, runInContext, runInNewContext } from "node:vm";
 import test from "node:test";
 import { saveInference, clearInference, storePath } from "./lib/inference.mjs";
 import { saveMusicKey, clearMusicKey, musicStorePath } from "./lib/music-keys.mjs";
@@ -64,10 +64,15 @@ function setup(t) {
     rmSync(dir, { recursive: true, force: true });
     assert.equal(logged.some((line) => /synthetic-key|sk_synthetic/.test(line)), false, "credentials must not be logged");
   });
+  const inferenceContext = createContext(context);
+  const inferenceStart = source.indexOf("const injectedInferenceEnv =");
+  const inferenceEnd = source.indexOf("\n}", source.indexOf("async function applyStoredInferenceToEnv()")) + 2;
+  assert.ok(inferenceStart >= 0 && inferenceEnd > inferenceStart);
+  runInContext(source.slice(inferenceStart, inferenceEnd), inferenceContext);
   return {
     dir, cipher,
     failDecryption: () => { decryptionFails = true; },
-    applyInference: runInNewContext(functionSource("applyStoredInferenceToEnv"), context),
+    applyInference: runInContext("applyStoredInferenceToEnv", inferenceContext),
     applyMusic: runInNewContext(functionSource("applyStoredMusicToEnv"), context),
   };
 }

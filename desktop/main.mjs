@@ -180,6 +180,31 @@ function saveIdentity(account) {
   }
 }
 
+// Only values this process injected may be withdrawn on the next Save/Remove.
+// A real environment override (including one equal to a stored key at launch)
+// is not a stored credential and must keep the shared resolver's precedence.
+const injectedInferenceEnv = new Map();
+let appliedStoredInference = null;
+
+function injectInferenceEnv(name, value) {
+  injectedInferenceEnv.set(name, { previous: process.env[name], value });
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+function hasInjectedInferenceKey() {
+  const injected = injectedInferenceEnv.get("BZ_CHAT_KEY");
+  return Boolean(injected && process.env.BZ_CHAT_KEY === injected.value);
+}
+
+function isStoredInferenceApplied(stored) {
+  if (!stored || !appliedStoredInference) return false;
+  const { credential, env } = appliedStoredInference;
+  return ["provider", "key", "baseUrl", "model", "encrypted", "expiresAt", "updatedAt"]
+    .every((field) => stored[field] === credential[field]) &&
+    Object.entries(env).every(([name, value]) => process.env[name] === value);
+}
+
 /**
  * Decrypt the stored inference key into the environment the runtime inherits.
  * safeStorage only works after `app.whenReady()`, so this cannot run at module
@@ -189,47 +214,55 @@ function saveIdentity(account) {
  * call time (see paths.mjs); a missing file becomes a sentence, not a crash.
  */
 async function applyStoredInferenceToEnv() {
+  for (const [name, { previous, value }] of injectedInferenceEnv) {
+    // A subsequently changed value is an override, not ours to erase.
+    if (process.env[name] !== value) continue;
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  }
+  injectedInferenceEnv.clear();
+  appliedStoredInference = null;
   try {
     const { loadInference, isExpired } = await runtimeLib("scripts/lib/inference.mjs");
     const inf = loadInference(supervisor.dataDir, {
       decrypt: (buf) => safeStorage.decryptString(Buffer.from(buf)),
     });
-    if (inf && inf.provider === "beezilla" && isExpired(inf)) {
+    const envKey = (process.env.BZ_CHAT_KEY ?? "").trim();
+    if (!envKey && inf && inf.provider === "beezilla" && isExpired(inf)) {
       // Expiry is a session problem: refuse by name instead of spending a request
       // that comes back 401 and reads as "your key is wrong".
-      delete process.env.BZ_CHAT_KEY;
-      delete process.env.BZ_CHAT_BASE_URL;
-      delete process.env.BZ_CHAT_MODEL;
-      delete process.env.BZ_MUSIC_VIA_GATEWAY;
-      process.env.BZ_MANAGED_EXPIRED = "1";
+      injectInferenceEnv("BZ_MANAGED_EXPIRED", "1");
+      injectInferenceEnv("BZ_MUSIC_VIA_GATEWAY", undefined);
       console.warn("[desktop] BeeZilla token expired — Settings will ask you to reconnect");
       return;
     }
-    delete process.env.BZ_MANAGED_EXPIRED;
-    if (inf?.key) {
-      process.env.BZ_CHAT_KEY = inf.key;
+    injectInferenceEnv("BZ_MANAGED_EXPIRED", undefined);
+    if (envKey || inf?.key) {
+      if (!envKey) injectInferenceEnv("BZ_CHAT_KEY", inf.key);
       // A new key's blank optional fields mean provider defaults, not the
       // previous key's gateway/model. Never send it to a retired endpoint.
-      if (inf.baseUrl) process.env.BZ_CHAT_BASE_URL = inf.baseUrl;
-      else delete process.env.BZ_CHAT_BASE_URL;
-      if (inf.model) process.env.BZ_CHAT_MODEL = inf.model;
-      else delete process.env.BZ_CHAT_MODEL;
+      // Genuine endpoint/model overrides win; otherwise use this store's fields.
+      if (!(process.env.BZ_CHAT_BASE_URL ?? "").trim() && inf?.baseUrl) injectInferenceEnv("BZ_CHAT_BASE_URL", inf.baseUrl);
+      if (!(process.env.BZ_CHAT_MODEL ?? "").trim() && inf?.model) injectInferenceEnv("BZ_CHAT_MODEL", inf.model);
       // Managed music rides the same short-lived gateway token as chat: the app holds
       // no music key at all, and quota/plan are enforced on our side. BYOK installs
       // (provider "byok") keep using their own ElevenLabs key from Settings.
-      if (inf.provider === "beezilla" && inf.baseUrl) process.env.BZ_MUSIC_VIA_GATEWAY = inf.baseUrl;
-      else delete process.env.BZ_MUSIC_VIA_GATEWAY;
-      console.log(`[desktop] inference: ${inf.provider} (stored${inf.encrypted ? ", encrypted" : ""})`);
+      injectInferenceEnv("BZ_MUSIC_VIA_GATEWAY", !envKey && inf.provider === "beezilla" && inf.baseUrl ? inf.baseUrl : undefined);
+      if (!envKey) {
+        // Private proof of the injection, never an env flag or renderer payload.
+        // Settings must also match the current decrypted store and effective env.
+        appliedStoredInference = {
+          credential: { ...inf },
+          env: Object.fromEntries(["BZ_CHAT_KEY", "BZ_CHAT_BASE_URL", "BZ_CHAT_MODEL"].map((name) => [name, process.env[name]])),
+        };
+      }
+      console.log(`[desktop] inference: ${envKey ? "env" : `${inf.provider} (stored${inf.encrypted ? ", encrypted" : ""})`}`);
       return;
     }
   } catch (err) {
     // A store we cannot decrypt must not take the app down — chat refuses by name.
     console.warn("[desktop] could not read the stored inference key:", err instanceof Error ? err.message : err);
   }
-  delete process.env.BZ_CHAT_KEY;
-  delete process.env.BZ_CHAT_BASE_URL;
-  delete process.env.BZ_CHAT_MODEL;
-  delete process.env.BZ_MUSIC_VIA_GATEWAY;
 }
 
 /**
@@ -275,6 +308,8 @@ function registerSettingsIpc() {
     const handlers = createSettingsHandlers({
       dataDir: () => supervisor.dataDir,
       supervisor,
+      isStoredInferenceApplied,
+      hasInjectedInferenceKey,
       cipher: {
         encrypt: (s) => safeStorage.encryptString(s),
         decrypt: (b) => safeStorage.decryptString(Buffer.from(b)),

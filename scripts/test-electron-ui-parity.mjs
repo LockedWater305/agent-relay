@@ -428,7 +428,7 @@ const credentialActions = [
   ["save-inference", "inference-status", "Saved.", "key"],
   ["save-search", "search-status", "Saved.", "search-key"],
   ["save-music", "music-status", "Saved.", "music-key"],
-  ["clear-inference", "inference-status", "Key removed."],
+  ["clear-inference", "inference-status", "Saved key removed."],
   ["clear-search", "search-status", "Key removed."],
   ["clear-music", "music-status", "Key removed."],
 ];

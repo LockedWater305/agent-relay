@@ -301,21 +301,25 @@
         }
         const inf = state?.inference;
         $("inference-current").innerHTML = inf
-          ? `Now: <strong>${inf.provider === "beezilla" ? "BeeZilla inference" : "your own key"}</strong> · ${inf.key}` +
+          ? `Now: <strong>${inf.provider === "beezilla" ? "BeeZilla inference" : inf.provider === "env" ? "environment key" : "your own key"}</strong> · ${inf.key}` +
+            (inf.source === "env" ? " · overrides saved settings" : "") +
             (inf.expired ? ' · <span style="color:#a4262c">expired — add a new one</span>' : "") +
             (inf.encrypted === false ? " · stored unencrypted" : "")
-          : selectionNote(state);
-        // Nothing to remove when nothing is configured.
-        $("clear-inference").disabled = !inf;
+          : state?.inferenceRemovable
+            ? "Saved credential unavailable. Remove it or save a replacement."
+            : selectionNote(state);
+        // An unreadable store or still-owned injection must remain removable;
+        // a genuine environment-only key is outside this button's scope.
+        $("clear-inference").disabled = state?.inferenceRemovable !== true;
         if (inf) {
           const radio = document.querySelector(`input[name="provider"][value="${inf.provider}"]`);
           if (radio) {
             radio.checked = true;
             paintProvider();
           }
-          if (inf.provider === "byok" && inf.baseUrl) $("baseUrl").value = inf.baseUrl;
-          if (inf.provider === "byok" && inf.model) $("model").value = inf.model;
         }
+        $("baseUrl").value = inf?.provider === "byok" ? inf.baseUrl || "" : "";
+        $("model").value = inf?.provider === "byok" ? inf.model || "" : "";
         const search = state?.search;
         // Three different situations, three different sentences. "Off" would send a
         // signed-in user hunting for a key they were never meant to need.
@@ -370,7 +374,7 @@
       // re-tick the radio from the saved state one line later — picking "My own key"
       // would flip straight back to "BeeZilla inference" and look like a broken click.
       function renderSelectionNote() {
-        if (lastState?.inference) return;
+        if (lastState?.inference || lastState?.inferenceRemovable) return;
         $("inference-current").innerHTML = selectionNote(lastState);
       }
 
@@ -479,7 +483,7 @@
       $("clear-inference").addEventListener("click", async () => {
         const res = await bridge.clear("inference");
         if (!res.ok) return say($("inference-status"), res.error || "Could not remove.", "err");
-        reportCredentialChange($("inference-status"), res.data, "Key removed.");
+        reportCredentialChange($("inference-status"), res.data, "Saved key removed.");
       });
 
       $("clear-search").addEventListener("click", async () => {
