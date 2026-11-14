@@ -18,7 +18,7 @@ Environment: macOS (Darwin 25.6.0, arm64), Node v26.7.0, npm 11.19.0 — **not**
 |---|---|
 | Source pushed | `6e246da` — packaging: `npm run pack:dir` (local unpacked, unsigned test build, `79b7770`) and an electron-builder `afterPack` hook that puts the runtime's production `node_modules` into every packaged build, the Windows installer included (`6e246da`); on top of `15ca075` — Electron 45.3.2 (bundled Node 24.22.2, verified from the binary) and electron-builder 26.18.0 on top of `d75d581` — integration `b669b1b` + fixes `a334acc`, `495cef6` + merge of GumbyEnder/agent-relay `main` at `3048d19` (79 newer web commits) + mailer typecheck fix + updated desktop tests |
 | Checks on this Mac | `npm ci`, `npm run typecheck`, `npm run build`, `npm run test:desktop-boundaries` (parity 12/12, local boundary 65/65, LLM 7/7, private split 12, recipe boundary 41, desktop node tests 42/42) and `npm run test:ci` — all exit 0 on `d75d581` |
-| GitHub CI | not run: Actions are enabled on the fork but no workflow run exists for this branch yet |
+| GitHub CI | **passed** 2026-11-14: the Node 22 `ci` workflow (install, typecheck, build, test:ci) on this branch at `b99ea02` ([run 43647696783](https://github.com/LockedWater305/agent-relay/actions/runs/43647696783)), and on the stacked desktop branches: the capability broker at `6da33b4` and the desktop workspace at `c022b9e` |
 | Artifact built | local test builds only — `npm run pack:dir` writes an unpacked, unsigned `BeeZilla.app` (macOS arm64, 687 MB); `electron-builder --win dir --x64` cross-built on the Mac writes `win-unpacked` with the same 34,057 runtime library files. `npm run dist` (the signed Windows installer) still stops by design at the empty `publishers.json` (needs the production publisher key set). Found on the way: electron-builder's `extraResources` drops a top-level `node_modules`, so every earlier packaged build would have shipped a runtime that could not start — fixed by the hook. The Windows build uses the default Electron icon (no app icon set yet). |
 | Installed behaviour | packaged smoke launch (macOS, `6e246da` unpacked app run directly): `packaged: true`, the runtime starts from `Contents/Resources/app` on 127.0.0.1:7331, `/buzzy/talk` and first-run `/buzzy/settings` load, clean exit 0 with no process or port left. Not yet tested: the Windows installer on Windows, chat with a real model, settings saves, runtime restart, a signed/notarised Mac build (the unsigned bundle's seal is broken by design, so a downloaded copy would be blocked by Gatekeeper) |
 | Live | not applicable |
@@ -29,7 +29,7 @@ Electron (phase 1, step 3) — **done in source** (`a7e632d`, `15ca075`): Electr
 
 Phase 2 groundwork — **core done, not wired**: `desktop/capability-broker.mjs` (branch `beezilla/desktop-capability-broker`, draft PR LockedWater305/agent-relay#4): read-only per-folder grants that start switched off, activate/pause/resume/revoke, list/read/search confined to the granted folder (realpath containment, pinned root identity, `O_NOFOLLOW` reads), an activity log without search text; 33 tests, run inside `test:desktop-boundaries`. Known limits are listed in the file (hard links and mounted volumes inside a granted folder; Windows has no `O_NOFOLLOW`). The native folder picker, IPC and Settings controls are being built on top.
 
-The hosted site's equivalent changes are separate pull requests into GumbyEnder/agent-relay (#288 music/3D auto-detect, #300 the roadmap's Talk workspace — now with the share dialog: Selected team vs Public link with QR code, a reading page for shared links and a join page for team invitations — and #301 the privacy hotfix); all pass the `verify` check and wait for the code owner's review; none is merged or live yet.
+The hosted site's equivalent changes are separate pull requests into GumbyEnder/agent-relay (#288 music/3D auto-detect, #300 the roadmap's Talk workspace — now with the share dialog: Selected team vs Public link with QR code, a reading page for shared links and a join page for team invitations — #301 the privacy hotfix, #302 BeeZilla answers questions about itself from 50 checked facts, and #303 BeeZilla does what the owner asks on its own screen); all pass the `verify` check and wait for the code owner's review; none is merged or live yet.
 
 ## 1. Finish Electron/web parity and establish a release baseline
 
@@ -93,9 +93,12 @@ These boundaries apply throughout earlier phases, not only when this UI ships.
 - Advocate's optional cloud model must disclose what selected profile/context leaves the device. Do not claim every local-mode configuration is fully offline. Lockdown blocks egress; retention and deletion behavior must be testable.
 
 
-- Generate and verify a 200-question BeeZilla answer base from actual product/source behavior, with version/source references and limitations.
+- Generate and verify a 200-question BeeZilla answer base from actual product/source behavior, with version/source references and limitations. **Status:** the owner set 50 for now (2026-11-14). The 50 are built and waiting for review in GumbyEnder/agent-relay#302. Each answer cites exact code phrases, and a test fails when one disappears.
 - Package it as a default skill; do not fabricate capabilities, active models or deployment status.
-- Build observable UI actions so work mode actually executes authorized tasks rather than merely answering as chat.
+- Build observable UI actions so work mode actually executes authorized tasks rather than merely answering as chat. **Status:** the first step is waiting for review in GumbyEnder/agent-relay#303.
+  - Talk-page commands ("open the whiteboard", "switch to Lockdown", "take me to my library") become plans from a closed list, which the page carries out where the owner can see them. Each control lights up before it is pressed, Stop works at every step, and a missing control is named. Less privacy and the microphone wait for Allow.
+  - 30 commands and 18 messages that must stay chat are unit-tested, and 14 end-to-end checks passed on the built app with stand-in providers.
+  - Not yet covered: voice turns with real speech, and the floating chat on other pages.
 - Show what is happening, teach through visible steps, and support cancellation, failure recovery and permission checks.
 
 ## 7. Whiteboard orchestration engine
