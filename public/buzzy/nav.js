@@ -276,19 +276,22 @@
       add.value = "__add";
       add.textContent = "＋ Add a company…";
       sel.appendChild(add);
+      sel.value = activeId || "";
       sel.disabled = false;
       if (window.BZCompanies.onChange && !sel._wired) {
         sel._wired = true;
-        window.BZCompanies.onChange(function () { fill(); });
+        window.BZCompanies.onChange(function () { fill(); }, sel);
       }
     }
 
     sel.addEventListener("change", function () {
       var id = sel.value;
       if (id === "__add") {
-        // Soft hop: a /buzzy/ URL assigned to location.href is a document load,
-        // and Talk's document is where the recogniser lives (BZ-16).
-        if (window.BeeZillaShell) window.BeeZillaShell.go("/buzzy/talk?addCompany=1");
+        // Stay on this page and keep Talk/voice alive. The old query-only
+        // hop had no receiver and never displayed a creation form.
+        fill();
+        var companies = window.BZCompanies;
+        if (companies && typeof companies.openCreate === "function") companies.openCreate(sel);
         return;
       }
       var api = window.BZCompanies;
@@ -1272,6 +1275,8 @@
     opts = opts || {};
     var url;
     try { url = new URL(href, location.href); } catch (e) { return Promise.resolve(false); }
+    // Navigation retires an open create intent, even if its POST already ran.
+    if (window.BZCompanies && typeof window.BZCompanies.closeCreate === "function") window.BZCompanies.closeCreate(false);
     if (!isShellPath(url)) {
       navigationId++;
       pendingNavigation = null;

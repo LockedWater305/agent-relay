@@ -7283,12 +7283,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (briefCo) briefCo.textContent = name ? "For " + name : "";
       if (line) line.textContent = co && co.oneLiner ? co.oneLiner : "";
       var id = co ? co.id : null;
-      if ((chatState.boundCompanyId && chatState.boundCompanyId !== id) ||
+      // A verified company-less conversation is a real scope too. Creating
+      // the first company must not relabel that existing session/history.
+      if (((chatState.boundCompanyId || chatState.sessionVerified) && (chatState.boundCompanyId || null) !== (id || null)) ||
           (chatNavigation.pending && chatNavigation.pending.context.companyId !== id) ||
           (chatNavigation.ensure && chatNavigation.ensure.context.companyId !== id)) {
         finishChatNavigation(beginChatNavigation("company", id));
         chatState.boundCompanyId = id;
         chatState.sessionId = null;
+        chatState.sessionVerified = false;
         storeChatSession(null);
         chatState.jobId = null;
         chatState.jobContext = null;
