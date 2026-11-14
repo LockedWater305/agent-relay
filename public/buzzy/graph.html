@@ -136,7 +136,12 @@
     var statusEl = document.getElementById("status");
 
     function say(msg, cls) { statusEl.textContent = msg; statusEl.className = "hint " + (cls || ""); }
-    function rid() { return "n" + (++state.seq); }
+    function rid() {
+      // Reopened graphs can have gaps or custom keys; node count is not an ID.
+      var key;
+      do { key = "n" + (++state.seq); } while (byId(key));
+      return key;
+    }
     function byId(id) { for (var i = 0; i < state.nodes.length; i++) if (state.nodes[i].key === id) return state.nodes[i]; return null; }
 
     // ── config that differs per kind ─────────────────────────────────────
