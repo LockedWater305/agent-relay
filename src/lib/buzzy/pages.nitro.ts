@@ -16,13 +16,14 @@
 import { defineEventHandler, getMethod, sendRedirect, setResponseStatus } from "h3";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { BUZZY_PAGE_NAMES, htmlAliasLocation } from "./page-alias";
 
 // Every name here must have a file in public/buzzy — "form" was listed with no
 // form.html behind it, so /buzzy/form answered 404 from a route that claimed
 // to serve it.
 // "settings" is desktop-only: the Electron shell loads the Settings window
 // through this route so it stops depending on a static .html fallback.
-const PAGES = new Set(["talk", "memory", "remember", "experts", "library", "profile", "landing", "login", "recipes", "wallet", "upload", "graph", "capabilities", "project", "sketch", "studio", "settings"]);
+const PAGES = new Set<string>(BUZZY_PAGE_NAMES);
 
 const html = (body: string, status = 200) =>
   new Response(body, {
@@ -40,6 +41,10 @@ export default defineEventHandler(async (event) => {
     return { error: "method not allowed" };
   }
   const headOnly = method === "HEAD";
+  // This also covers direct handler/dev use. The production fetch-entry plugin
+  // runs the same rule before Nitro's static HTML shortcut can bypass chrome.
+  const alias = htmlAliasLocation(event.path ?? "", method);
+  if (alias) return new Response(null, { status: 302, headers: { location: alias } });
   // Every HTML answer goes through `out`, so HEAD can never forget to drop the
   // body while keeping the status and content-type.
   const out = (body: string, status = 200) => html(headOnly ? "" : body, status);

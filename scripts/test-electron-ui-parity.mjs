@@ -52,10 +52,12 @@ function compileScripts(html, filename) {
 // Use the production handler body unchanged after TS erasure; only imports and
 // the export are adapted so its real file reads and Response objects still run.
 function pageHandler(readImpl = readFile) {
-  const js = stripTypeScriptTypes(pageSource)
+  const aliases = stripTypeScriptTypes(read("src/lib/buzzy/page-alias.ts")).replace(/^export /gm, "");
+  const js = aliases + "\n" + stripTypeScriptTypes(pageSource)
     .replace(/import\s*\{[^}]+\}\s*from\s*["']h3["'];/, "")
     .replace(/import\s*\{[^}]+\}\s*from\s*["']node:fs\/promises["'];/, "")
     .replace(/import\s*\{[^}]+\}\s*from\s*["']node:path["'];/, "")
+    .replace(/import\s*\{[^}]+\}\s*from\s*["']\.\/page-alias["'];/, "")
     .replace("export default", "globalThis.handler =");
   const context = {
     defineEventHandler: (fn) => fn,

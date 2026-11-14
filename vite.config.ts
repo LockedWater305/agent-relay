@@ -399,6 +399,7 @@ export default defineConfig(({ command }) => ({
       ? [
           nitro({
             preset: "node-server",
+            plugins: ["./src/lib/buzzy/page-alias.plugin.ts"],
             // Keep native/wasm DB drivers out of the bundle
             noExternals: false,
             externals: {
