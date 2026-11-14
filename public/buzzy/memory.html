@@ -283,46 +283,71 @@
     var memGen = 0;
     async function loadMemory() {
       var gen = ++memGen;
-      try {
-      const res = await fetch("/api/buzzy/memory", { credentials: "same-origin" });
       const root = document.getElementById("content");
-      if (gen !== memGen) return;
+      if (!root) return;
+      root.innerHTML = '<p class="empty">Loading memory…</p>';
+      var companies = window.BZCompanies;
+      var company = null;
+      var companyId = null;
+      var requested = false;
+      function emptyAccount() {
+        if (typeof companies.loadError !== "function" || companies.loadError() || typeof companies.list !== "function") return false;
+        var known = companies.list();
+        return Array.isArray(known) && known.length === 0;
+      }
+      function current() {
+        if (gen !== memGen || window.BZCompanies !== companies) return false;
+        var active = companies.active();
+        return companies.ready() && (active ? active.id : null) === companyId &&
+          (companyId !== null || emptyAccount());
+      }
+      try {
+      // An unavailable company catalogue is not an account with no companies.
+      // Only a verified empty catalogue may request account-wide memory.
+      if (!companies || typeof companies.ready !== "function" || typeof companies.active !== "function") throw new Error("company_unavailable");
+      if (!companies.ready()) return;
+      company = companies.active();
+      if (company) {
+        if (typeof company.id !== "string" || !/^co_[a-z0-9]{8,32}$/.test(company.id)) throw new Error("invalid_company");
+        companyId = company.id;
+      } else if (!emptyAccount()) {
+        throw new Error("company_unavailable");
+      }
+      requested = true;
+      const res = await fetch("/api/buzzy/memory" + (companyId ? "?companyId=" + encodeURIComponent(companyId) : ""), { credentials: "same-origin" });
+      if (!current()) return;
       if (res.status === 401) {
         root.innerHTML =
           '<div class="signout"><p class="muted">Memory is tied to your account.</p><a href="/buzzy/landing">Sign in</a></div>';
         return;
       }
-      if (!res.ok) {
-        root.innerHTML = '<p class="empty">Couldn\u2019t load memory right now. Try refreshing.</p>';
-        return;
-      }
+      if (!res.ok) throw new Error("memory_unavailable");
       const data = await res.json();
-      var facts = data.facts || [];
-      var messages = data.messages || [];
-      var company = window.BZCompanies && BZCompanies.ready && BZCompanies.ready() ? BZCompanies.active() : null;
-      if (company) {
-        var jr = await fetch("/api/buzzy/jobs?companyId=" + encodeURIComponent(company.id), { credentials: "same-origin" });
-        if (gen !== memGen) return;
-        if (!jr.ok) {
-          root.innerHTML = '<p class="empty">Couldn\u2019t open memory for this company. Try refreshing.</p>';
-          return;
-        }
-        var jd = await jr.json();
-        var allowed = {};
-        (jd.jobs || []).forEach(function (j) { if (j && j.id) allowed[j.id] = true; });
-        facts = facts.filter(function (f) { return f.jobId && allowed[f.jobId]; });
-        messages = messages.filter(function (m) { return m.jobId && allowed[m.jobId]; });
-      }
+      if (!current()) return;
+      if (!data || !data.scope || data.scope.companyId !== companyId ||
+          !Array.isArray(data.facts) || !Array.isArray(data.messages)) throw new Error("invalid_memory");
+      var facts = data.facts;
+      var messages = data.messages;
+      if (companyId && facts.concat(messages).some(function (row) {
+        return !row || !row.source || row.source.companyId !== companyId;
+      })) throw new Error("wrong_memory_scope");
       const honcho = data.honchoAvailable;
-      const jobLabel = (id) => (id ? id.slice(0, 8) : "General");
+      const sourceLabel = (source) => {
+        if (!source || source.kind === "unassigned") return "Unassigned memory";
+        if (typeof source.title === "string" && source.title.trim()) return source.title;
+        return (source.kind === "session" ? "Conversation " : "Job ") + String(source.id || "").slice(0, 8);
+      };
 
       // ── Memory redesign: summary first, drill-down on demand ──────────
-      // Group facts by job, show a plain-language summary line per job plus
+      // Group facts by their verified job or conversation, not a raw memory key.
+      // Show a plain-language summary line per source plus
       // a one-line "what we know" digest; details hidden behind toggles.
-      const jobsMap = {};
+      const groups = new Map();
       facts.forEach((f) => {
-        const k = f.jobId || "general";
-        (jobsMap[k] = jobsMap[k] || []).push(f);
+        const source = f.source || { kind: "unassigned", id: null };
+        const key = JSON.stringify([source.kind, source.id]);
+        if (!groups.has(key)) groups.set(key, { source: source, facts: [] });
+        groups.get(key).facts.push(f);
       });
 
       const digest = facts.length
@@ -332,7 +357,7 @@
       const stats = `
         <div class="mem-status">
           <div class="stat"><b>${facts.length}</b><span>things known</span></div>
-          <div class="stat"><b>${Object.keys(jobsMap).length}</b><span>jobs touched</span></div>
+          <div class="stat"><b>${groups.size}</b><span>memory sources</span></div>
           <div class="stat"><b>${honcho ? "on" : "off"}</b><span>long-term memory</span></div>
         </div>`;
 
@@ -342,15 +367,15 @@
           <p>${digest}</p>
         </div>`;
 
-      const jobsHtml = Object.keys(jobsMap).length
-        ? Object.entries(jobsMap).map(([jobId, fs]) => {
-            const label = jobLabel(jobId);
+      const jobsHtml = groups.size
+        ? Array.from(groups.values()).map(({ source, facts: fs }) => {
+            const label = sourceLabel(source);
             const digestLine = fs.map((f) => esc(f.value)).join(" · ");
             const detailRows = fs
               .map((f) => `<div class="fact"><span class="k">${esc(f.key)}</span><span class="v">${esc(f.value)}</span></div>`)
               .join("");
             return `<div class="mem-job">
-              <button type="button" class="mem-job-head" data-job="${esc(jobId)}">
+              <button type="button" class="mem-job-head">
                 <span class="mj-title">${esc(label)}</span>
                 <span class="mj-digest">${digestLine}</span>
                 <span class="mj-count">${fs.length}</span>
@@ -364,7 +389,7 @@
         ? messages.slice(0, 20)
             .map(
               (m) =>
-                `<div class="msg ${esc(m.role)}"><div class="who">${m.role === "assistant" ? "BeeZilla" : "You"} · ${jobLabel(m.jobId)}</div>${esc(m.content)}</div>`,
+                `<div class="msg ${m.role === "assistant" ? "assistant" : "user"}"><div class="who">${m.role === "assistant" ? "BeeZilla" : "You"} · ${esc(sourceLabel(m.source))}</div>${esc(m.content)}</div>`,
             )
             .join("")
         : '<p class="empty">No conversations yet.</p>';
@@ -376,7 +401,7 @@
         coTitle +
         stats +
         summaryCard +
-        '<section><h2>By job</h2>' + jobsHtml + '</section>' +
+        '<section><h2>By job or conversation</h2>' + jobsHtml + '</section>' +
         '<details class="mem-conv"><summary>Recent conversations</summary>' + msgsHtml + '</details>';
 
       // Wire drill-down toggles
@@ -390,7 +415,7 @@
       });
       } catch (err) {
         if (gen !== memGen) return;
-        const root = document.getElementById("content");
+        if (requested && !current()) return;
         if (root) root.innerHTML = '<p class="empty">Couldn\u2019t load memory right now. Try refreshing.</p>';
       }
     }

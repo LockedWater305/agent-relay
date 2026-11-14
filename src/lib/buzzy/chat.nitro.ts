@@ -2087,34 +2087,115 @@ export default defineEventHandler(async (event) => {
       return { error: "Sign in required", code: "signed_out" };
     }
 
-    const sql = await getSql();
-    const facts = await sql`
-      SELECT job_id, key, value, updated_at FROM buzzy_user_memory
-      WHERE user_id = ${user.id}
-      ORDER BY updated_at DESC
-      LIMIT 200
-    `;
-    const messages = await sql`
-      SELECT job_id, role, content, created_at FROM buzzy_chat_messages
-      WHERE user_id = ${user.id}
-      ORDER BY created_at DESC
-      LIMIT 100
-    `;
-    return {
-      honchoAvailable: honchoAvailable(),
-      facts: facts.map((r) => ({
-        jobId: r.job_id,
-        key: r.key,
-        value: r.value,
-        updatedAt: r.updated_at,
-      })),
-      messages: messages.map((r) => ({
-        jobId: r.job_id,
-        role: r.role,
-        content: r.content,
-        createdAt: r.created_at,
-      })),
-    };
+    const params = new URLSearchParams(fullPath.includes("?") ? fullPath.slice(fullPath.indexOf("?") + 1) : "");
+    const scopes = params.getAll("companyId");
+    // No other query keys are supported: misspelled/array scopes must not
+    // silently turn into an account-wide read.
+    if ([...params.keys()].some((key) => key !== "companyId") || scopes.length > 1 || (scopes.length === 1 && !isCompanyId(scopes[0]!))) {
+      setResponseStatus(event, 400);
+      return { error: "Choose one valid company scope.", code: "bad_company" };
+    }
+    const companyId = scopes.length ? scopes[0]! : null;
+    try {
+      const sql = await getSql();
+      if (companyId) {
+        const owned = await sql`SELECT id FROM buzzy_companies WHERE id = ${companyId} AND user_id = ${user.id}`;
+        if (!owned.length) {
+          setResponseStatus(event, 404);
+          return { error: "Company not found", code: "not_found" };
+        }
+      }
+      // Resolve provenance before limiting. All joins stay within this owner;
+      // unknown or conflicting relationships are account-visible, never guessed
+      // into a company. Archived jobs are deliberately included. A session job_id
+      // is only its latest work pointer: immutable message edges preserve older
+      // associations. Session identity is independent of its latest job pointer.
+      // This describes verified current stored association, not a historical
+      // company-at-message-time stamp.
+      const sources = `
+        WITH owned_companies AS (SELECT id FROM buzzy_companies WHERE user_id = $1),
+        owned_jobs AS (SELECT id, title, company_id FROM buzzy_jobs WHERE user_id = $1),
+        owned_sessions AS (SELECT id, title, job_id, company_id FROM buzzy_sessions WHERE user_id = $1),
+        job_session_edges AS (
+          SELECT job_id, id AS session_id FROM owned_sessions WHERE job_id IS NOT NULL
+          UNION
+          SELECT job_id, session_id FROM buzzy_chat_messages
+          WHERE user_id = $1 AND job_id IS NOT NULL AND session_id IS NOT NULL
+        ),
+        verified_edges AS (
+          SELECT e.job_id, c.id AS company_id
+          FROM job_session_edges e LEFT JOIN owned_sessions s ON s.id = e.session_id
+          LEFT JOIN owned_companies c ON c.id = s.company_id
+        ),
+        legacy_companies AS (
+          SELECT job_id, CASE WHEN COUNT(*) = COUNT(company_id) AND COUNT(DISTINCT company_id) = 1
+            THEN MIN(company_id) ELSE NULL END AS company_id
+          FROM verified_edges GROUP BY job_id
+        ),
+        resolved_jobs AS (
+          SELECT j.id, j.title, CASE WHEN j.company_id IS NOT NULL THEN c.id
+            ELSE lc.company_id END AS company_id
+          FROM owned_jobs j LEFT JOIN owned_companies c ON c.id = j.company_id
+          LEFT JOIN legacy_companies lc ON lc.job_id = j.id
+        ),
+        resolved_sessions AS (
+          SELECT s.id, s.title, s.job_id, c.id AS company_id
+          FROM owned_sessions s LEFT JOIN owned_companies c ON c.id = s.company_id
+        )`;
+      const factSql = sources + `,
+        sourced AS (
+          SELECT m.id AS row_id, m.job_id, m.key, m.value, m.updated_at,
+            CASE WHEN j.id IS NOT NULL AND s.id IS NULL AND j.company_id IS NOT NULL THEN 'job'
+              WHEN s.id IS NOT NULL AND j.id IS NULL AND s.company_id IS NOT NULL THEN 'session'
+              ELSE 'unassigned' END AS source_kind,
+            CASE WHEN j.id IS NOT NULL AND s.id IS NULL AND j.company_id IS NOT NULL THEN j.id
+              WHEN s.id IS NOT NULL AND j.id IS NULL AND s.company_id IS NOT NULL THEN s.id END AS source_id,
+            CASE WHEN j.id IS NOT NULL AND s.id IS NULL AND j.company_id IS NOT NULL THEN j.title
+              WHEN s.id IS NOT NULL AND j.id IS NULL AND s.company_id IS NOT NULL THEN s.title END AS source_title,
+            CASE WHEN j.id IS NOT NULL AND s.id IS NULL THEN j.company_id
+              WHEN s.id IS NOT NULL AND j.id IS NULL THEN s.company_id END AS source_company_id
+          FROM buzzy_user_memory m LEFT JOIN resolved_jobs j ON j.id = m.job_id
+          LEFT JOIN resolved_sessions s ON s.id = m.job_id WHERE m.user_id = $1
+        ) SELECT * FROM sourced WHERE (CAST($2 AS TEXT) IS NULL OR source_company_id = $2)
+          ORDER BY updated_at DESC, row_id DESC LIMIT 200`;
+      const messageSql = sources + `,
+        related AS (
+          SELECT m.id AS row_id, m.job_id, m.session_id, m.role, m.content, m.created_at,
+            CASE WHEN m.session_id IS NOT NULL THEN
+              CASE WHEN s.id IS NOT NULL AND (m.job_id IS NULL OR (actual_job.id IS NOT NULL AND
+                (actual_job.company_id IS NULL OR actual_job.company_id = s.company_id)))
+                THEN s.company_id END
+              ELSE j.company_id END AS source_company_id,
+            CASE WHEN m.session_id IS NOT NULL THEN 'session' ELSE 'job' END AS candidate_kind,
+            CASE WHEN m.session_id IS NOT NULL THEN s.id ELSE j.id END AS candidate_id,
+            CASE WHEN m.session_id IS NOT NULL THEN s.title ELSE j.title END AS candidate_title
+          FROM buzzy_chat_messages m LEFT JOIN resolved_sessions s ON s.id = m.session_id
+          LEFT JOIN resolved_jobs j ON j.id = m.job_id
+          LEFT JOIN owned_jobs actual_job ON actual_job.id = m.job_id
+          WHERE m.user_id = $1
+        ), sourced AS (
+          SELECT row_id, job_id, session_id, role, content, created_at, source_company_id,
+            CASE WHEN source_company_id IS NOT NULL THEN candidate_kind ELSE 'unassigned' END AS source_kind,
+            CASE WHEN source_company_id IS NOT NULL THEN candidate_id END AS source_id,
+            CASE WHEN source_company_id IS NOT NULL THEN candidate_title END AS source_title
+          FROM related
+        ) SELECT * FROM sourced WHERE (CAST($2 AS TEXT) IS NULL OR source_company_id = $2)
+          ORDER BY created_at DESC, row_id DESC LIMIT 100`;
+      const facts = await sql.query(factSql, [user.id, companyId]);
+      const messages = await sql.query(messageSql, [user.id, companyId]);
+      const source = (r: any) => ({ kind: r.source_kind, id: r.source_id ?? null,
+        title: r.source_title ?? null, companyId: r.source_company_id ?? null });
+      return {
+        honchoAvailable: honchoAvailable(), scope: { companyId },
+        facts: facts.map((r: any) => ({ jobId: r.job_id, key: r.key, value: r.value,
+          updatedAt: r.updated_at, source: source(r) })),
+        messages: messages.map((r: any) => ({ jobId: r.job_id, sessionId: r.session_id,
+          role: r.role, content: r.content, createdAt: r.created_at, source: source(r) })),
+      };
+    } catch (_) {
+      setResponseStatus(event, 503);
+      return { error: "Memory could not be loaded. Try again.", code: "memory_unavailable" };
+    }
   }
 
   // ── DELETE /api/buzzy/memory — forget, with propagation (BZ-F031) ─────

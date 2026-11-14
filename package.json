@@ -73,12 +73,13 @@
     "private:sync": "node scripts/sync-private.mjs",
     "private:check": "node scripts/sync-private.mjs --check",
     "private:verify": "node scripts/sync-private.mjs --check --require-private",
-    "test:desktop-boundaries": "npm run test:library-vault && npm run test:talk-sessions && npm run test:desktop-settings-provenance && node scripts/test-electron-ui-parity.mjs && node --experimental-vm-modules --test scripts/test-desktop-connect-guard.mjs scripts/test-local-db-boundary.mjs scripts/test-local-runtime-inference-boundary.mjs scripts/test-local-asset-boundary.mjs scripts/test-local-start-boundary.mjs && node scripts/test-llm-boundary.mjs && node scripts/test-private-boundary.mjs && npx tsx scripts/test-recipe-local-boundary.ts && node --test --test-concurrency=1 scripts/test-desktop-hardening.mjs scripts/test-desktop-csp.mjs scripts/test-desktop-lifecycle.mjs scripts/test-desktop-credential-env.mjs scripts/test-desktop-after-pack.mjs scripts/test-desktop-harness.mjs scripts/test-honcho-privacy.mjs",
+    "test:desktop-boundaries": "npm run test:library-vault && npm run test:talk-sessions && npm run test:memory-scope && npm run test:desktop-settings-provenance && node scripts/test-electron-ui-parity.mjs && node --experimental-vm-modules --test scripts/test-desktop-connect-guard.mjs scripts/test-local-db-boundary.mjs scripts/test-local-runtime-inference-boundary.mjs scripts/test-local-asset-boundary.mjs scripts/test-local-start-boundary.mjs && node scripts/test-llm-boundary.mjs && node scripts/test-private-boundary.mjs && npx tsx scripts/test-recipe-local-boundary.ts && node --test --test-concurrency=1 scripts/test-desktop-hardening.mjs scripts/test-desktop-csp.mjs scripts/test-desktop-lifecycle.mjs scripts/test-desktop-credential-env.mjs scripts/test-desktop-after-pack.mjs scripts/test-desktop-harness.mjs scripts/test-honcho-privacy.mjs",
     "test:honcho-privacy": "node --test scripts/test-honcho-privacy.mjs",
     "test:desktop-connect-guard": "node --experimental-vm-modules --test scripts/test-desktop-connect-guard.mjs",
     "test:desktop-settings-provenance": "node --experimental-vm-modules --test scripts/test-desktop-settings-provenance.mjs",
     "test:library-vault": "node --experimental-vm-modules --test scripts/test-library-vault-backend.mjs scripts/test-library-vault-client.mjs scripts/test-desktop-library-transition.mjs scripts/test-library-port-regression.mjs",
-    "test:talk-sessions": "node --experimental-vm-modules --test scripts/test-talk-session-lifecycle.mjs scripts/test-talk-voice-lifecycle.mjs"
+    "test:talk-sessions": "node --experimental-vm-modules --test scripts/test-talk-session-lifecycle.mjs scripts/test-talk-voice-lifecycle.mjs",
+    "test:memory-scope": "node --experimental-vm-modules --test scripts/test-memory-scope-backend.mjs scripts/test-memory-scope-ui.mjs"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.3",

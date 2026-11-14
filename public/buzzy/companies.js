@@ -3,7 +3,7 @@
    Adding from a website shows a card. A line is a company fact only after Confirm or Change. */
 (function () {
   var KEY = "bz_active_company";
-  var state = { companies: [], activeId: null, ready: false, started: false, signedOut: false };
+  var state = { companies: [], activeId: null, ready: false, started: false, signedOut: false, loadError: false };
   var listeners = [];
   var mounts = [];
   var adding = false;
@@ -304,16 +304,19 @@
     return fetch("/api/buzzy/companies", { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then(function (r) {
         state.signedOut = r.status === 401;
+        state.loadError = !r.ok;
         return r.ok ? r.json() : { companies: [] };
       })
       .then(function (d) {
-        state.companies = (d && d.companies) || [];
+        state.loadError = state.loadError || !(d && Array.isArray(d.companies));
+        state.companies = d && Array.isArray(d.companies) ? d.companies : [];
         rememberActive();
         state.ready = true;
         renderAll();
         emit();
       })
       .catch(function () {
+        state.loadError = true;
         state.ready = true;
         renderAll();
         emit();
@@ -441,6 +444,8 @@
 
   var api = {
     ready: function () { return state.ready; },
+    // Memory must distinguish a verified empty account from a failed lookup.
+    loadError: function () { return state.loadError; },
     list: function () { return state.companies.slice(); },
     active: active,
     activeId: function () { return state.activeId; },
