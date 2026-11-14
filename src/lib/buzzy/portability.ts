@@ -9,6 +9,7 @@
  */
 
 import JSZip from "jszip";
+import { isLocalRuntime } from "../runtime";
 
 function csvEscape(v: unknown): string {
   const s = String(v ?? "");
@@ -65,6 +66,23 @@ export async function buildExportBundle(sql: any, userId: string): Promise<Expor
     docCount++;
   }
 
+  if (isLocalRuntime()) {
+    // Port-independent local Library history. IDs, never untrusted names, form
+    // archive paths; the manifest retains original filenames and exact metadata.
+    const vault = await sql.query(
+      "SELECT id::text, record_hash, job_id, document FROM buzzy_library_vault WHERE user_id = $1 ORDER BY buzzy_library_vault.id ASC",
+      [userId],
+    );
+    const vaultManifest = [];
+    for (const row of vault) {
+      const path = `library-history/${row.id}.md`;
+      zip.file(path, row.document.md);
+      vaultManifest.push({ id: row.id, hash: row.record_hash, jobId: row.job_id, path,
+        name: row.document.name, createdAt: row.document.createdAt, updatedAt: row.document.updatedAt });
+    }
+    zip.file("library-history/manifest.json", JSON.stringify(vaultManifest, null, 2));
+  }
+
   // Human-readable index
   zip.file("README.txt", [
     "Your BeeZilla export — everything you gave us, in ordinary files.",
@@ -119,6 +137,16 @@ export async function deleteAccountData(sql: any, userId: string): Promise<Recor
   for (const [table, statement] of Object.entries(DELETION_STATEMENTS)) {
     const rows = await sql.query(statement, [userId]);
     receipt[table] = rows.length;
+  }
+  // Finish source-data deletion before exposing a fresh vault generation.
+  if (isLocalRuntime()) {
+    // Same owner lock as imports: advance the tombstone and delete atomically.
+    // Keep only non-content store identity/generation so old browser caches
+    // cannot silently repopulate history after this intentional deletion.
+    const vaultDeleted = await sql.query(
+      "SELECT buzzy_library_vault_delete($1)::text AS deleted", [userId],
+    );
+    receipt.buzzy_library_vault = Number(vaultDeleted[0]?.deleted ?? 0);
   }
   return receipt;
 }

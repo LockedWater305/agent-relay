@@ -404,7 +404,10 @@
       function reportCredentialChange(status, data, completed) {
         if (data?.status) renderStatus(data.status);
         if (data?.reason || !(data?.started === true || data?.restarted === true)) {
-          say(status, `${completed} BeeZilla did not restart. Restart the app to apply the change.` +
+          var advice = /Library|history|migration/i.test(data?.reason || "")
+            ? "Keep this window open and retry from Settings after Library history is saved. Do not force-quit to apply the change."
+            : "Restart the app to apply the change.";
+          say(status, `${completed} BeeZilla did not restart. ${advice}` +
             (data?.reason ? ` Reason: ${data.reason}` : ""), "warn");
           return;
         }

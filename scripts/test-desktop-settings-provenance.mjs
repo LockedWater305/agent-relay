@@ -13,6 +13,7 @@ import * as url from "node:url";
 import vm from "node:vm";
 import test from "node:test";
 import * as security from "../desktop/security.mjs";
+import { createLibraryTransition, canonicalRecord, LEGACY_KEY, PENDING_PREFIX } from "../desktop/library-vault.mjs";
 import * as connect from "../desktop/connect.mjs";
 import { saveInference } from "./lib/inference.mjs";
 
@@ -39,19 +40,21 @@ function syntheticCipher() {
   };
 }
 
-async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDir } = {}) {
+async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDir, libraryStorage = new Map(), libraryFetch = null } = {}) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(tmpdir(), "bz-settings-provenance-"));
   const cipher = syntheticCipher();
   if (stored) saveInference(dir, stored, cipher);
   const env = { ...initialEnv }, logs = [], ipc = new Map(), starts = [], notifications = [], responses = [];
-  let supervisor, now = Date.now();
+  let supervisor, now = Date.now(), stopFailure = false;
+  const lifecycle = [], appEvents = new Map(), dialogs = [];
   class FixtureDate extends Date { static now() { return now; } }
   const unexpected = (name) => () => { throw new Error(`Unexpected fixture effect: ${name}`); };
   class FakeSupervisor {
     constructor() { supervisor = this; this.dataDir = dir; this.runtime = null; }
     async isHealthy(value) { assert.equal(value, this.runtime); return Boolean(value); }
-    async stop() { this.runtime = null; }
+    async stop() { lifecycle.push("stop"); if (stopFailure) throw new Error("synthetic safe-stop failure"); this.runtime = null; }
     async start() {
+      lifecycle.push("start");
       this.runtime = { host: "127.0.0.1", port: 7331 + starts.length, token: String(starts.length).repeat(43) };
       starts.push({ runtime: this.runtime, env: { ...env } });
       return this.runtime;
@@ -65,10 +68,10 @@ async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDi
   const mocks = {
     electron: {
       app: { getVersion: () => "test", commandLine: { appendSwitch() {} }, requestSingleInstanceLock: () => true,
-        on() {}, whenReady: () => new Promise(() => {}), exit: unexpected("app exit"), quit: unexpected("app quit") },
+        on(name, fn) { appEvents.set(name, fn); }, whenReady: () => new Promise(() => {}), exit: () => lifecycle.push("exit"), quit: unexpected("app quit") },
       BrowserWindow: unexpected("native window"), Menu: {}, session: {},
       shell: { openExternal: unexpected("external page"), openPath: unexpected("open path") },
-      dialog: { showErrorBox: unexpected("error dialog") },
+      dialog: { showErrorBox: (...args) => dialogs.push(args) },
       safeStorage: { encryptString: cipher.encrypt, decryptString: cipher.decrypt },
       ipcMain: { handle: (name, fn) => ipc.set(name, fn) }, systemPreferences: {},
     },
@@ -78,6 +81,7 @@ async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDi
     "./connect.mjs": { ...connect, managedAccountConnectCapability: () => connect.managedAccountConnectCapability?.(env), connectAccount: unexpected("Connect"), cloudBaseUrl: unexpected("cloud URL") },
     "./csp.mjs": { createDesktopCsp: unexpected("CSP install"), loadCspManifest: unexpected("manifest") },
     "./security.mjs": security,
+    "./library-vault.mjs": { createLibraryTransition: (deps) => createLibraryTransition({ ...deps, fetchImpl: libraryFetch ?? unexpected("Library network") }) },
   };
   const modules = new Map();
   async function load(name) {
@@ -106,11 +110,13 @@ async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDi
 export const testApi = {
   initialize: async (main, settings) => {
     mainWindow = main; settingsWindow = settings;
+    guardLibraryWindowClose(main); guardLibraryWindowClose(settings);
     await applyStoredInferenceToEnv();
     settingsHandlers = await registerSettingsIpc();
     bindRuntime(await supervisor.start());
   },
-  reapply: applyStoredInferenceToEnv
+  reapply: applyStoredInferenceToEnv,
+  authHeaders: (details) => runtimeAuth.headers(details)
 };`, {
     context, initializeImportMeta(meta) { meta.url = url.pathToFileURL(path.join(ROOT, "desktop/main.mjs")).href; },
     importModuleDynamically: evaluated,
@@ -120,9 +126,14 @@ export const testApi = {
   function windowFixture(id, route) {
     let bridge;
     const timers = [], ipcRenderer = new EventEmitter();
+    const historyWindow = {}, windowEvents = new Map();
+    let destroyed = false;
+    const historyStorage = { get length() { return libraryStorage.size; }, getItem: (key) => libraryStorage.get(key) ?? null,
+      key: (i) => [...libraryStorage.keys()][i] ?? null, setItem: (key,value) => libraryStorage.set(key,String(value)), removeItem: (key) => libraryStorage.delete(key) };
     const wc = {
+      executeJavaScript: async (code) => vm.runInNewContext(code, { window: historyWindow, localStorage: historyStorage }),
       id, mainFrame: { url: `http://127.0.0.1:7331${route}` },
-      getURL() { return this.mainFrame.url; }, isDestroyed: () => false,
+      getURL() { return this.mainFrame.url; }, isDestroyed: () => destroyed,
       send(channel, payload) { notifications.push({ id, channel, payload }); ipcRenderer.emit(channel, {}, payload); },
     };
     ipcRenderer.invoke = async (channel, payload) => {
@@ -138,14 +149,17 @@ export const testApi = {
       setTimeout: (fn) => { timers.push(fn); return timers.length; },
       window: { location: { replace: (value) => { wc.mainFrame.url = value; } } },
     });
-    return { webContents: wc, isDestroyed: () => false, bridge,
+    return { webContents: wc, isDestroyed: () => destroyed, bridge, historyWindow,
+      on: (name,fn) => windowEvents.set(name,fn),
+      close: () => { let prevented = false; windowEvents.get("close")?.({preventDefault: () => { prevented=true; }}); if (!prevented) { destroyed=true; lifecycle.push("closed"); } },
       flush: () => { while (timers.length) timers.shift()(); } };
   }
   const mainWindow = windowFixture(1, "/buzzy/talk?existing=1#chat");
   const settingsWindow = windowFixture(2, "/buzzy/settings");
   await main.namespace.testApi.initialize(mainWindow, settingsWindow);
   const result = {
-    dir, env, cipher, starts, notifications, responses, api: main.namespace.testApi,
+    dir, env, cipher, starts, notifications, responses, lifecycle, dialogs, appEvents, libraryStorage,
+    setStopFailure: (value) => { stopFailure = value; }, api: main.namespace.testApi,
     bridge: settingsWindow.bridge.settings, mainWindow, settingsWindow,
     flush: () => { mainWindow.flush(); settingsWindow.flush(); },
     status: async () => {
@@ -564,4 +578,95 @@ test("a key-only environment override retains expired managed endpoint/model fal
   assert.equal(removed.data.status.inference.model, null);
   assert.equal(fx.env.BZ_CHAT_KEY, key);
   assert.equal(fx.env.BZ_MANAGED_EXPIRED, undefined);
+});
+
+// Library saves participate in the real main/IPC lifecycle, not merely a
+// source-order assertion. API storage is synthetic and contains no user data.
+function historyApi({ events = [], fail = () => false, pause = null } = {}) {
+  const rows = new Map(), storeId = '00000000-0000-4000-8000-000000000001';
+  return { rows, fetch: async (_url, options) => {
+    if (pause) await pause();
+    if (fail()) return Response.json({ ok: false, error: 'Library fixture unavailable' }, { status: 503 });
+    if (options.method === 'GET') return Response.json({ ok: true, storeId, generation: '0' });
+    const stored = JSON.parse(options.body).records.map((record) => {
+      const row = canonicalRecord(record);
+      if (!rows.has(row.hash)) rows.set(row.hash, { ...row.record, hash: row.hash, id: String(rows.size + 1) });
+      return rows.get(row.hash);
+    });
+    events.push('commit');
+    return Response.json({ ok: true, storeId, generation: '0', stored });
+  } };
+}
+const historyRecord = (md) => ({ jobId: 'job_fixture', document: { name: 'report.md', md, createdAt: 1, updatedAt: 2 } });
+const historyMap = () => new Map([[LEGACY_KEY, JSON.stringify({ job_fixture: [historyRecord('VERSION ONE').document, historyRecord('VERSION TWO').document] })]]);
+const settleClose = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+test('Library barrier failure keeps old runtime, bearer, environment and window usable with saved-but-not-applied status', async (t) => {
+  let failure = true;
+  const db = historyApi({ fail: () => failure }), libraryStorage = historyMap();
+  const fx = await fixture(t, { stored: byok, libraryStorage, libraryFetch: db.fetch });
+  const original = fx.runtime(), originalBytes = libraryStorage.get(LEGACY_KEY);
+  const ui = renderer(fx.bridge); await ui.idle(); ui.select('byok');
+  ui.nodes.get('key').value = 'synthetic-key-replacement-123456';
+  await ui.click('save-inference');
+  assert.equal(fx.starts.length, 1); assert.equal(fx.runtime(), original);
+  assert.equal(fx.env.BZ_CHAT_KEY, byok.key); assert.equal(fx.notifications.length, 0);
+  assert.equal(fx.lifecycle.includes('stop'), false); assert.equal(libraryStorage.get(LEGACY_KEY), originalBytes);
+  assert.match(ui.nodes.get('inference-status').textContent, /Keep this window open.*retry/i);
+  assert.doesNotMatch(ui.nodes.get('inference-status').textContent, /Restart the app to apply/);
+  const wc = fx.settingsWindow.webContents;
+  const auth = fx.api.authHeaders({ url: wc.getURL().replace('/buzzy/settings', '/api/buzzy/jobs'), webContentsId: wc.id, frame: wc.mainFrame, resourceType: 'xhr', requestHeaders: {} });
+  assert.equal(auth.requestHeaders.Authorization, `Bearer ${original.token}`);
+  assert.equal(fx.mainWindow.historyWindow.__bzLibraryVaultBarrier, undefined);
+  failure = false; ui.nodes.get('key').value = 'synthetic-key-replacement-123456'; await ui.click('save-inference');
+  assert.equal(db.rows.size, 2); assert.equal(fx.starts.length, 2); fx.flush();
+  assert.equal(new URL(fx.mainWindow.webContents.getURL()).port, '7332');
+});
+
+test('normal window close persists exact versions before destroying either old-origin page', async (t) => {
+  const db = historyApi(), fx = await fixture(t, { libraryStorage: historyMap(), libraryFetch: db.fetch });
+  fx.mainWindow.close(); assert.equal(fx.mainWindow.isDestroyed(), false);
+  await settleClose(); assert.equal(fx.mainWindow.isDestroyed(), true); assert.equal(db.rows.size, 2);
+  assert.equal(fx.settingsWindow.isDestroyed(), false); assert.equal(fx.settingsWindow.historyWindow.__bzLibraryVaultBarrier, undefined);
+});
+
+test('normal close failure leaves the page alive and retry succeeds', async (t) => {
+  let fail = true; const db = historyApi({ fail: () => fail }), fx = await fixture(t, { libraryStorage: historyMap(), libraryFetch: db.fetch });
+  fx.mainWindow.close(); await settleClose(); assert.equal(fx.mainWindow.isDestroyed(), false); assert.equal(fx.dialogs.length, 1);
+  assert.equal(fx.mainWindow.historyWindow.__bzLibraryVaultBarrier, undefined);
+  fail = false; fx.mainWindow.close(); await settleClose(); assert.equal(fx.mainWindow.isDestroyed(), true); assert.equal(db.rows.size, 2);
+});
+
+test('Quit commits history, waits for runtime stop and only then exits', async (t) => {
+  const db = historyApi(); let fx;
+  const libraryFetch = async (...args) => {
+    const result = await db.fetch(...args);
+    if (args[1].method === 'POST') fx.lifecycle.push('commit');
+    return result;
+  };
+  fx = await fixture(t, { libraryStorage: historyMap(), libraryFetch });
+  let prevented = 0;
+  await fx.appEvents.get('before-quit')({ preventDefault: () => { prevented++; } });
+  assert.equal(prevented, 1); assert.equal(db.rows.size, 2);
+  assert.deepEqual(fx.lifecycle.slice(-2), ['stop', 'exit']); assert.ok(fx.lifecycle.indexOf('commit') < fx.lifecycle.indexOf('stop'));
+  assert.equal(fx.dialogs.length, 0);
+});
+
+test('failed history or runtime stop cannot accidentally exit, and a later Quit retries', async (t) => {
+  let fail = true; const db = historyApi({ fail: () => fail }), fx = await fixture(t, { libraryStorage: historyMap(), libraryFetch: db.fetch });
+  const quit = () => fx.appEvents.get('before-quit')({ preventDefault() {} });
+  await quit(); assert.equal(fx.lifecycle.includes('stop'), false); assert.equal(fx.lifecycle.includes('exit'), false);
+  fail = false; fx.setStopFailure(true); await quit(); assert.equal(fx.lifecycle.includes('exit'), false); assert.equal(db.rows.size, 2);
+  fx.setStopFailure(false); await quit(); assert.equal(fx.lifecycle.at(-1), 'exit');
+});
+
+test('a second Quit while saving cannot bypass the first pending barrier', async (t) => {
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const db = historyApi({ pause: () => gate }), fx = await fixture(t, { libraryStorage: historyMap(), libraryFetch: db.fetch });
+  let prevented = 0;
+  const first = fx.appEvents.get('before-quit')({ preventDefault: () => { prevented++; } });
+  await new Promise(resolve => setImmediate(resolve));
+  await fx.appEvents.get('before-quit')({ preventDefault: () => { prevented++; } });
+  assert.equal(prevented, 2); assert.equal(fx.lifecycle.includes('exit'), false);
+  release(); await first; assert.equal(db.rows.size, 2); assert.equal(fx.lifecycle.filter(x => x === 'exit').length, 1);
 });

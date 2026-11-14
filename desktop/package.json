@@ -31,7 +31,8 @@
       "paths.mjs",
       "logger.mjs",
       "security.mjs",
-      "csp.mjs"
+      "csp.mjs",
+      "library-vault.mjs"
     ],
     "extraResources": [
       {

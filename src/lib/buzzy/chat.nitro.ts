@@ -74,6 +74,9 @@ import { resolveActingAccount, guard, canPerform, denialReason, TEAM_ACTIONS, DE
 import { STATEMENT_IDS, DEEPENING_IDS } from "./questions";
 import { createHash } from "node:crypto";
 import { transcribeAudio, formatFromContentType, ASR_MAX_BYTES, normalizeVocab } from "./asr";
+import { isLocalRuntime } from "../runtime";
+import { LOCAL_OWNER_ID, localToken } from "../local-owner";
+import { LibraryVaultError, readVaultBody, validateVaultBatch, storeVaultBatch, listVaultPage, vaultPageOptions, getVaultMetadata } from "./libraryVault";
 
 /**
  * Largest single file the bulk asset path will store. A skills corpus is
@@ -323,6 +326,50 @@ export default defineEventHandler(async (event) => {
   // Split it: `path` is the pathname, the query is parsed where needed.
   const fullPath = event.path ?? "";
   const path = fullPath.split("?")[0];
+
+  // Desktop-only history storage. Local identity is not supplied by the body.
+  // Deny hosted/unsigned callers before reading their body or querying the DB.
+  if (path === "/api/buzzy/library-vault") {
+    setResponseHeader(event, "cache-control", "no-store");
+    if (!isLocalRuntime()) {
+      setResponseStatus(event, 404);
+      return { ok: false, code: "local_only", error: "Library migration is available only in the local app." };
+    }
+    // Manual dev mode permits missing tokens elsewhere; migration never does.
+    if (!localToken()) {
+      setResponseStatus(event, 503);
+      return { ok: false, code: "local_auth_required", error: "Restart through the local launcher before migrating Library history." };
+    }
+    const user = await getSessionUserFromHeaders(headersFromEvent(event));
+    if (!user || user.id !== LOCAL_OWNER_ID) {
+      setResponseStatus(event, 401);
+      return { ok: false, code: "signed_out", error: "The local app must authenticate before accessing Library history." };
+    }
+    if (method !== "GET" && method !== "POST") {
+      setResponseStatus(event, 405);
+      return { ok: false, code: "method_not_allowed", error: "Use GET or POST for Library history." };
+    }
+    try {
+      // Parse and validate the bounded body before obtaining a database handle.
+      if (method === "POST") {
+        const body = await readVaultBody(event.req as Request);
+        validateVaultBatch(body);
+        return await storeVaultBatch(await getSql(), user.id, body);
+      }
+      if (new URL(fullPath, "http://127.0.0.1").searchParams.get("metadata") === "1") {
+        return { ok: true, ...await getVaultMetadata(await getSql(), user.id) };
+      }
+      const options = vaultPageOptions(fullPath);
+      return await listVaultPage(await getSql(), user.id, options);
+    } catch (error) {
+      if (error instanceof LibraryVaultError) {
+        setResponseStatus(event, error.status);
+        return { ok: false, code: error.code, error: error.message };
+      }
+      setResponseStatus(event, 503);
+      return { ok: false, code: "vault_unavailable", error: "Library history could not be saved or loaded. Original copies were not removed; retry before restarting." };
+    }
+  }
 
   // ── GET /api/buzzy/shared/:token — PUBLIC controlled-share read (BZ-F021) ─
   // The ONLY unauthenticated buzzy route. Serves exactly one pinned version

@@ -13,6 +13,7 @@ import vm from "node:vm";
 import test from "node:test";
 import { managedAccountConnectCapability } from "../desktop/connect.mjs";
 import * as security from "../desktop/security.mjs";
+import { createLibraryTransition } from "../desktop/library-vault.mjs";
 
 const ROOT = process.env.BZ_CONNECT_GUARD_BASELINE_DIR
   ? resolve(process.env.BZ_CONNECT_GUARD_BASELINE_DIR)
@@ -65,7 +66,10 @@ async function mainFixture(flag, connect = async () => ({ ok: false, error: "fix
       saveMusicKey: (_dir, cfg) => music = store("music", { provider: "elevenlabs", ...cfg }),
     },
   };
+  const historyWindow = {};
+  const historyStorage = { length: 0, getItem: () => null, key: () => null };
   const wc = {
+    executeJavaScript: async (code) => vm.runInNewContext(code, { window: historyWindow, localStorage: historyStorage }),
     id: 7, mainFrame: { url: `${base}/buzzy/settings` },
     getURL() { return this.mainFrame.url; }, isDestroyed: () => false, send() {},
   };
@@ -113,6 +117,7 @@ async function mainFixture(flag, connect = async () => ({ ok: false, error: "fix
     "./connect.mjs": connectExports,
     "./csp.mjs": { createDesktopCsp: unexpected("csp"), loadCspManifest: unexpected("manifest") },
     "./security.mjs": { ...security },
+    "./library-vault.mjs": { createLibraryTransition: (deps) => createLibraryTransition({ ...deps, fetchImpl: unexpected("Library network") }) },
   };
   const modules = new Map();
   const load = async (name) => {

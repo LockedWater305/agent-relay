@@ -51,7 +51,8 @@ function setup() {
 test("generated manifest covers the actual shipped hard-load and shell script bytes", async () => {
   assert.equal(manifest.pages.length, 17);
   assert.equal(manifest.scriptHashes.length, 41);
-  assert.equal(manifest.scriptPaths.length, 8);
+  assert.equal(manifest.scriptPaths.length, 9);
+  assert.ok(manifest.scriptPaths.includes("/buzzy/library-vault.js"), "only the exact packaged Library helper is added");
   assert.ok(!manifest.scriptPaths.includes("/buzzy/common.js"), "unused JS does not receive script authority");
   let inlineCount = 0;
   for (const name of CSP_PAGE_NAMES) {

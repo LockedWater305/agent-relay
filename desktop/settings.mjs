@@ -42,9 +42,9 @@ const {
 } = await runtimeLib("scripts/lib/music-keys.mjs");
 
 /**
- * @param {{ dataDir: () => string, supervisor?: any, cipher?: {encrypt?:Function, decrypt?:Function}, beforeRestart?: Function, afterRestart?: Function, isStoredInferenceApplied?: Function, hasInjectedInferenceKey?: Function }} deps
+ * @param {{ dataDir: () => string, supervisor?: any, cipher?: {encrypt?:Function, decrypt?:Function}, beforeRestart?: Function, afterRestart?: Function, afterRestartFinally?: Function, isStoredInferenceApplied?: Function, hasInjectedInferenceKey?: Function }} deps
  */
-export function createSettingsHandlers({ dataDir, supervisor, cipher = {}, beforeRestart, afterRestart, isStoredInferenceApplied = () => false, hasInjectedInferenceKey = () => false }) {
+export function createSettingsHandlers({ dataDir, supervisor, cipher = {}, beforeRestart, afterRestart, afterRestartFinally, isStoredInferenceApplied = () => false, hasInjectedInferenceKey = () => false }) {
   const describe = () => {
     const dir = dataDir();
     const stored = loadInference(dir, cipher);
@@ -110,6 +110,8 @@ export function createSettingsHandlers({ dataDir, supervisor, cipher = {}, befor
       return { restarted: wasRunning, started: !wasRunning, port: rt?.port ?? null };
     } catch (err) {
       return { restarted: false, reason: err instanceof Error ? err.message : String(err) };
+    } finally {
+      if (afterRestartFinally) await afterRestartFinally();
     }
   };
 

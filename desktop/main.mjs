@@ -19,6 +19,7 @@ import { ROOT, runtimeLib } from "./paths.mjs";
 import { installLogging, logLine, logPaths } from "./logger.mjs";
 import { connectAccount, cloudBaseUrl, managedAccountConnectCapability } from "./connect.mjs";
 import { createDesktopCsp, loadCspManifest } from "./csp.mjs";
+import { createLibraryTransition } from "./library-vault.mjs";
 import {
   allowAudioPermission, connectBaseUrl, createRuntimeAuth, isAppDownload, isAppPage,
   isConnectNavigation, isTrustedSender, retargetAppPage, safeExternalUrl, sameOrigin,
@@ -75,6 +76,36 @@ const testPageUrl = !app.isPackaged && process.env.BZ_SETTINGS_TEST
   ? pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "test-settings.html")).href
   : null;
 const runtimeAuth = createRuntimeAuth({ getContents: trustedContents, testPageUrl });
+const acquireLibraryTransition = createLibraryTransition({
+  getContents: trustedContents, getBase: () => runtimeBase,
+  getRuntime: () => supervisor.runtime, testPageUrl,
+});
+let settingsHistoryTransition = null;
+let quitting = false;
+
+function guardLibraryWindowClose(win) {
+  const contents = win.webContents;
+  let allowed = false, pending = false;
+  win.on("close", (event) => {
+    if (allowed) return;
+    event.preventDefault();
+    if (quitting || pending) return;
+    pending = true;
+    void (async () => {
+      let transition;
+      try {
+        transition = await acquireLibraryTransition();
+        allowed = true;
+        win.close();
+      } catch (error) {
+        dialog.showErrorBox("Library history still needs to be saved", `${error.message}\n\nBeeZilla stayed open. Retry after the local Library is available; do not force-quit to apply this change.`);
+      } finally {
+        if (transition) await transition.release({ skip: allowed ? [contents] : [] });
+        pending = false;
+      }
+    })();
+  });
+}
 
 function bindRuntime(rt, notifyWindows = false) {
   const previousBase = runtimeBase;
@@ -315,13 +346,26 @@ function registerSettingsIpc() {
         decrypt: (b) => safeStorage.decryptString(Buffer.from(b)),
       },
       beforeRestart: async () => {
+        // Freeze/drain only the current origin’s named Library stores BEFORE
+        // clearing auth or stopping the database. No cross-origin storage copy.
+        settingsHistoryTransition = await acquireLibraryTransition({ allowDeferred: true });
         runtimeAuth.clear();
         // Identity first: the runtime reads BZ_LOCAL_OWNER_* at spawn.
         applyIdentityToEnv();
         await applyStoredInferenceToEnv();
         await applyStoredMusicToEnv();
       },
-      afterRestart: async (rt) => { bindRuntime(rt, true); },
+      afterRestart: async (rt) => {
+        // A crashed runtime may require a new server before its still-visible
+        // origin can migrate. Persist before navigating away from that origin.
+        await settingsHistoryTransition?.flush(rt);
+        bindRuntime(rt, true);
+      },
+      afterRestartFinally: async () => {
+        const transition = settingsHistoryTransition;
+        settingsHistoryTransition = null;
+        await transition?.release({ keepRetiredFrozen: true });
+      },
     });
 
     const wrap = (fn) => async (event, payload) => {
@@ -443,6 +487,7 @@ function settingsWindowFor(url) {
     settingsWindow = null;
   });
   confineAppWindow(settingsWindow);
+  guardLibraryWindowClose(settingsWindow);
   // Electron 35+ passes one event object; the positional level/message/line
   // arguments are deprecated (see the 35.0 breaking changes).
   settingsWindow.webContents.on("console-message", ({ message }) =>
@@ -553,6 +598,7 @@ async function performConnect() {
   // Search is a second capability and is allowed to be missing. Saying so once, at
   // connect time, is better than a user discovering it later in a chat turn.
   let searchSaved = null;
+  let restartFailure = saved.reason || null;
   if (outcome.search?.ok) {
     try {
       const res = await settingsHandlers.saveManagedSearch({
@@ -561,6 +607,7 @@ async function performConnect() {
         expiresAt: outcome.search.expiresAt,
       });
       searchSaved = res.saved;
+      restartFailure = res.reason || null;
       console.log(`[desktop] connect: BeeZilla search connected (expires ${outcome.search.expiresAt ?? "unknown"})`);
     } catch (err) {
       console.warn(`[desktop] connect: search token not stored — ${err instanceof Error ? err.message : err}`);
@@ -571,7 +618,7 @@ async function performConnect() {
     console.warn(`[desktop] connect: search token unavailable — ${outcome.search.error}`);
   }
 
-  return { ...outcome, token: undefined, search: { ...outcome.search, token: undefined, saved: searchSaved }, savedTo: saved.saved?.key };
+  return { ...outcome, ...(restartFailure ? { ok: false, error: `Account credentials were saved, but BeeZilla did not restart. ${restartFailure} Retry from Settings without force-quitting.` } : {}), token: undefined, search: { ...outcome.search, token: undefined, saved: searchSaved }, savedTo: saved.saved?.key };
 }
 
 async function openSettings() {
@@ -619,6 +666,7 @@ async function createWindow() {
   });
 
   confineAppWindow(mainWindow);
+  guardLibraryWindowClose(mainWindow);
 
   mainWindow.webContents.on("did-fail-load", (_e, code, desc, url) =>
     console.log(`[desktop] load failed ${code} ${desc} ${url}`),
@@ -859,15 +907,22 @@ app.whenReady().then(async () => {
 
 // The runtime holds an embedded Postgres. Killing it abruptly loses the WAL
 // flush, so quitting waits for a graceful stop.
-let quitting = false;
 app.on("before-quit", async (event) => {
-  if (quitting) return;
+  // A second Quit must not bypass a pending save/stop barrier. app.exit below
+  // intentionally bypasses before-quit only after both steps have succeeded.
+  if (quitting) { event.preventDefault(); return; }
   quitting = true;
   event.preventDefault();
+  let transition;
   try {
+    transition = await acquireLibraryTransition();
     await supervisor.stop();
-  } finally {
     app.exit(0);
+  } catch (error) {
+    quitting = false;
+    dialog.showErrorBox("BeeZilla stayed open", `${error.message}\n\nRetry when Library history can be saved and the local database can stop safely.`);
+  } finally {
+    await transition?.release();
   }
 });
 
