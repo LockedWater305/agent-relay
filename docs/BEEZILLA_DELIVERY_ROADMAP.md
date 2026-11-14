@@ -151,3 +151,12 @@ Verified source commit [9441642](https://github.com/LockedWater305/agent-relay/c
 ### Exact-current source verification follow-up
 
 The stale-assets blocker above is now resolved for dependency-free UI/privacy checks at commit `94416422214ccf7568ca60f0cfbabb460a12de00`: 644 local files were verified against that commit's Git blob hashes with zero mismatches; only six unchanged branding PNGs were omitted. `node --test scripts/test-electron-ui-parity.mjs scripts/test-honcho-privacy.mjs` passed **106/106** on Node 24.22.1. These are source/VM/synthetic-network checks, including the portable voice suites, not live service or real-device tests. Full dependency installation, build/typecheck, packaged Electron acceptance and hosted deployment remain unverified.
+
+
+### Exact-head source/build gate passed: 2026-11-14
+
+PR #1 head [43ef877](https://github.com/LockedWater305/agent-relay/commit/43ef8778369f90934871780aa6e0349d0d845b8b) passed the complete `npm run verify` command on macOS in an isolated, credential-free scratch checkout: public recipe stub preparation, TypeScript, production build and the full hermetic CI suite. Both lockfiles matched the installed dependencies copied into scratch. The original owner checkouts remained untouched and clean. This supersedes the earlier build/typecheck blocker above; it does not establish hosted or installed-app parity.
+
+Two test-only commits add portable afterPack dependency-copy regression coverage and isolate native E2E launch configuration. The latter removes inherited provider environment, sets temporary userData before the single-instance lock, requires positive successful-launch/page-load evidence, and rejects missing prerequisites rather than printing a passing skip. The final desktop unit/fixture group passed **68/68 with zero skips**, including 17 mocked launch-harness tests. No production application code was changed in these two commits.
+
+**Still pending:** actual Electron UI and packaged-app execution, real audio/device checks, and the authorized host's running commit/configuration. No real Keychain or provider access was exercised. Public recipe stubs do not verify private commercial recipes. GitHub Actions for this exact head still returned zero runs; the full passing verification described here is the isolated Mac command, not a GitHub Actions result. Native tests must not silently touch a real Keychain or accept OS permission prompts.
