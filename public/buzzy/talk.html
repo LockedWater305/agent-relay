@@ -2066,7 +2066,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     // Selection owns all asynchronous session/transcript results. A failed
     // selection leaves the current conversation intact; an older response can
     // never replace a newer New chat, History, company or job choice.
-    var chatNavigation = { generation: 0, pending: null, ensure: null, restore: 0, history: 0, sendClaim: null };
+    var chatNavigation = { generation: 0, pending: null, ensure: null, restore: 0, history: 0, sendClaim: null, turn: null, auth: 0 };
 
     function chatContextSnapshot() {
       return { generation: chatNavigation.generation, state: chatState,
@@ -2086,6 +2086,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       chatNavigation.restore++;
       chatNavigation.ensure = null;
       chatNavigation.sendClaim = null;
+      chatNavigation.turn = null;
       paperOperation = (paperOperation || 0) + 1;
       paperBusy = false;
       // Selecting a conversation relinquishes the old turn's UI/audio, not
@@ -6570,7 +6571,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       }
       var selectionGeneration = chatNavigation.generation;
       const input = document.getElementById("chatInput");
-      if (!speechRequest && (input.disabled || chatNavigation.sendClaim)) return;
+      if (!speechRequest && (input.disabled || chatNavigation.sendClaim || chatNavigation.turn)) return;
       const text = input.value.trim();
       if (!text) return;
       var pastedPaper = readThisBody(text);
@@ -6593,7 +6594,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (claim) chatNavigation.sendClaim = claim;
       var sessionId;
       try { sessionId = await ensureChatSession(speechRequest); }
-      finally { if (claim && chatNavigation.sendClaim === claim) chatNavigation.sendClaim = null; }
+      finally {
+        if (claim && chatNavigation.sendClaim === claim) {
+          chatNavigation.sendClaim = null;
+          paintChatInputAvailability();
+        }
+      }
       if (!sessionId || selectionGeneration !== chatNavigation.generation || chatNavigation.pending) {
         if (speechRequest && speechRequestCurrent(speechRequest)) finishSpeechRequest(speechRequest);
         return;
@@ -6603,6 +6609,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (!speechRequestCurrent(speechRequest)) return;
         voice.speechRequest = null;
       }
+      // A turn owns the composer until its own completion or a newer voice
+      // turn/selection replaces it. Acquire only after cancellation checks;
+      // auth callbacks render this ownership, never the separate ASR phase.
+      var turn = {};
+      chatNavigation.turn = turn;
 
       input.value = "";
       const sentExecute = pendingExecute === true;
@@ -6861,47 +6872,50 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         // turn owns the shared state; a stale finally that cleared it re-armed
         // the mic over its own follow-up and re-enabled the composer mid-turn.
         clearInterval(elapsedTimer);
+        if (chatNavigation.turn === turn) chatNavigation.turn = null;
         if (myTurn === voice.turnSeq && chatContextCurrent(conversation)) {
           voice.sending = false;
           // A spoken turn ended without a reply: go back to listening.
           if (voice.mic && !voice.speaking) setTimeout(function () {
             if (voice.mic && !voice.speaking && !voice.sending && !voice.rec) startListening();
           }, 600);
-          // Only re-enable if not signed out
-          if (chatState._signedOut) {
-            input.disabled = true;
-            document.getElementById("chatSend").disabled = true;
-          } else {
-            input.disabled = false;
-            document.getElementById("chatSend").disabled = false;
-            input.focus();
-          }
+          paintChatInputAvailability();
+          if (!input.disabled) input.focus();
         }
       }
     }
 
+    function paintChatInputAvailability() {
+      var busy = !!chatNavigation.turn || !!chatNavigation.sendClaim;
+      var disabled = !!chatState._signedOut || !!busy;
+      document.getElementById("chatInput").disabled = disabled;
+      document.getElementById("chatSend").disabled = disabled || !!chatNavigation.pending;
+    }
+
     function checkAuthAndEnableInput() {
-      fetch("/api/auth/get-session", { credentials: "same-origin" })
+      var request = chatNavigation.auth = (chatNavigation.auth || 0) + 1;
+      var generation = chatNavigation.generation;
+      var state = chatState;
+      function current() {
+        return request === chatNavigation.auth && generation === chatNavigation.generation && state === chatState;
+      }
+      return fetch("/api/auth/get-session", { credentials: "same-origin" })
         // An outage is not a logout here either: a 500 used to disable the composer
         // and set _signedOut, so Talk looked signed out during an auth blip. Only a
         // 200 with no user disables it; a non-2xx falls through to the catch.
         .then(function (r) {
+          if (!current()) return null;
           if (!r.ok) throw new Error("get-session " + r.status);
           return r.json();
         })
         .then(function (session) {
+          if (!current()) return;
           var user = session && session.user;
-          if (!user) {
-            chatState._signedOut = true;
-            document.getElementById("chatInput").disabled = true;
-            document.getElementById("chatSend").disabled = true;
-          } else {
-            chatState._signedOut = false;
-            document.getElementById("chatInput").disabled = false;
-            document.getElementById("chatSend").disabled = false;
-          }
+          chatState._signedOut = !user;
+          paintChatInputAvailability();
         })
         .catch(function () {
+          if (!current()) return;
           // Outage, not logout. The chrome keeps the last known identity (fee2c5f);
           // if there is one, do not strand a signed-in reader behind a dead composer.
           // No cache means "never asked yet", so leave the shipped disabled state.
@@ -6909,8 +6923,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           try { cached = JSON.parse(window.localStorage.getItem("bz_identity") || "null"); } catch (e) {}
           if (cached && (cached.name || cached.email)) {
             chatState._signedOut = false;
-            document.getElementById("chatInput").disabled = false;
-            document.getElementById("chatSend").disabled = false;
+            paintChatInputAvailability();
           }
         });
     }

@@ -85,7 +85,8 @@ function speechHarness({ realSend = false, controller = true, wav = {} } = {}) {
     "validChatSession", "storeChatSession", "selectChatSession", "showChatFailure", "invalidateSpeechRequest", "speechContextChanged", "beginSpeechRequest", "speechRequestCurrent", "finishSpeechRequest",
     "asrQueryString", "submitHeard", "sendHeardTurn", "sendForTranscription", "stopListening", "releaseMic", "toggleMic",
     "initVoice", "goBackToRecent", "newChatNow", "openSession", "startNewChat", "applyChatCompany", "paintVoice"];
-  if (realSend) names.push("sendChatMessage", "ensureChatSession", "readThisBody", "submitPaper", "streamTextTurn", "streamVoiceTurn", "loadCompanyPaper", "loadContext", "postPaperLine", "saveSlotEdit", "submitMedia", "readDroppedFile");
+  if (realSend) names.push("sendChatMessage", "ensureChatSession", "readThisBody", "submitPaper", "streamTextTurn", "streamVoiceTurn", "loadCompanyPaper", "loadContext", "postPaperLine", "saveSlotEdit", "submitMedia", "readDroppedFile", "checkAuthAndEnableInput");
+  if (realSend && source.includes("    function paintChatInputAvailability()")) names.push("paintChatInputAvailability");
   runInNewContext(names.map(fn).join("\n"), c, { filename: "talk-speech-lifecycle.js" });
   c.initVoice();
   function start(sender = "sendForTranscription", text = "recognizer fallback") {
@@ -630,5 +631,202 @@ for (const action of ["read this", "media"]) {
     assert.equal(h.c.chatState.jobId, "resolved-job");
     assert.equal(await h.c.ensureChatSession(), "original-session");
     assert.equal(h.requests.length, 1);
+  });
+}
+
+// Auth is a separate asynchronous request. Its success/cache fallback cannot
+// take ownership of the composer from the active send or a newer selection.
+function authHarness(cached = true) {
+  const h = speechHarness({ realSend: true }); h.c.voice.mic = false;
+  h.c.chatState._signedOut = false;
+  h.c.window.localStorage = { getItem: () => cached ? JSON.stringify({ name: "Synthetic Owner" }) : null };
+  return h;
+}
+function answerAuth(request, outcome) {
+  if (outcome === "network error") request.reject(new Error("synthetic offline"));
+  else if (outcome === "HTTP error") request.resolve(response({ error: "temporary" }, false));
+  else if (outcome === "JSON error") request.resolve({ ok: true, status: 200, json: () => Promise.reject(new Error("synthetic JSON")) });
+  else request.resolve(response({ user: { id: "synthetic-owner" } }));
+}
+for (const outcome of ["success", "HTTP error", "network error", "JSON error"]) {
+  test(`auth ${outcome} during a live typed turn cannot unlock or duplicate Send`, async () => {
+    const h = authHarness(); h.c.checkAuthAndEnableInput();
+    h.node("chatInput").value = "first question";
+    const first = h.c.sendChatMessage(); await settle();
+    assert.equal(h.requests[1].url, "/chat");
+    answerAuth(h.requests[0], outcome); await settle();
+    const disabledDuringTurn = [h.node("chatInput").disabled, h.node("chatSend").disabled];
+    h.node("chatInput").value = "second draft";
+    const repeated = h.c.sendChatMessage(); await settle();
+    const posts = h.requests.filter(r => r.url === "/chat");
+    for (const request of posts) request.resolve(response({ ok: true, reply: "synthetic reply" }));
+    await Promise.all([first, repeated]);
+    assert.equal(posts.length, 1, "one active typed turn despite the auth callback");
+    assert.deepEqual(disabledDuringTurn, [true, true], "auth must preserve live turn's composer lock");
+    assert.equal(h.node("chatInput").value, "second draft", "blocked repeated Send retains typed text");
+    assert.equal(h.node("chatInput").disabled, false);
+    assert.equal(h.node("chatSend").disabled, false);
+  });
+}
+
+test("auth success after typed completion leaves the composer usable", async () => {
+  const h = authHarness(); h.c.checkAuthAndEnableInput();
+  h.node("chatInput").value = "question"; const sending = h.c.sendChatMessage(); await settle();
+  h.requests[1].resolve(response({ ok: true, reply: "reply" })); await sending;
+  answerAuth(h.requests[0], "success"); await settle();
+  assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+});
+
+test("auth signed-out result during a live turn remains disabled after finish", async () => {
+  const h = authHarness(); h.c.checkAuthAndEnableInput();
+  h.node("chatInput").value = "question"; const sending = h.c.sendChatMessage(); await settle();
+  h.requests[0].resolve(response({ user: null })); await settle();
+  h.requests[1].resolve(response({ ok: true, reply: "reply" })); await sending;
+  assert.equal(h.c.chatState._signedOut, true);
+  assert.equal(h.node("chatInput").disabled, true); assert.equal(h.node("chatSend").disabled, true);
+});
+
+test("auth from an old selection cannot disable the newly selected session", async () => {
+  const h = authHarness(); h.c.checkAuthAndEnableInput();
+  const selecting = h.c.openSession({ id: "new-session" });
+  h.requests[1].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" }, messages: [], slots: {} })); await selecting;
+  h.requests[0].resolve(response({ user: null })); await settle();
+  assert.equal(h.c.chatState.sessionId, "new-session");
+  assert.equal(h.c.chatState._signedOut, false);
+  assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+});
+
+for (const outcome of ["success", "HTTP error"]) {
+  test(`auth ${outcome} during ensure does not strand the composer when ensure fails`, async () => {
+    const h = authHarness(); h.c.chatState.sessionId = null;
+    h.c.checkAuthAndEnableInput();
+    h.node("chatInput").value = "unsent question";
+    const sending = h.c.sendChatMessage();
+    assert.equal(h.requests[1].url, "/sessions");
+    answerAuth(h.requests[0], outcome); await settle();
+    const busy = h.node("chatSend").disabled;
+    h.requests[1].resolve(response({ error: "session unavailable" }, false)); await sending;
+    assert.equal(busy, true);
+    assert.equal(h.requests.length, 2, "no chat POST after ensure failure");
+    assert.equal(h.node("chatInput").value, "unsent question");
+    assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+  });
+}
+
+test("auth error without cached identity leaves a live turn locked without inventing logout", async () => {
+  const h = authHarness(false); h.c.checkAuthAndEnableInput();
+  h.node("chatInput").value = "question"; const sending = h.c.sendChatMessage(); await settle();
+  answerAuth(h.requests[0], "network error"); await settle();
+  assert.equal(h.c.chatState._signedOut, false);
+  assert.equal(h.node("chatInput").disabled, true); assert.equal(h.node("chatSend").disabled, true);
+  h.requests[1].resolve(response({ ok: true, reply: "reply" })); await sending;
+  assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+});
+
+test("auth success during a turn error still releases only the finished turn", async () => {
+  const h = authHarness(); h.c.checkAuthAndEnableInput();
+  h.node("chatInput").value = "question"; const sending = h.c.sendChatMessage(); await settle();
+  answerAuth(h.requests[0], "success"); await settle();
+  h.requests[1].resolve({ ok: true, status: 200, json: () => Promise.reject(new Error("synthetic turn decode error")) }); await sending;
+  assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+  h.node("chatInput").value = "retry"; const retry = h.c.sendChatMessage(); await settle();
+  assert.equal(h.requests.length, 3);
+  h.requests[2].resolve(response({ ok: true, reply: "retry reply" })); await retry;
+});
+
+for (const oldOutcome of ["success", "HTTP error", "network error"]) {
+  test(`auth older ${oldOutcome} cannot overwrite a newer signed-out result`, async () => {
+    const h = authHarness(); h.c.checkAuthAndEnableInput(); h.c.checkAuthAndEnableInput();
+    h.requests[1].resolve(response({ user: null })); await settle();
+    answerAuth(h.requests[0], oldOutcome); await settle();
+    assert.equal(h.c.chatState._signedOut, true);
+    assert.equal(h.node("chatInput").disabled, true); assert.equal(h.node("chatSend").disabled, true);
+  });
+}
+
+test("auth older parsed JSON cannot change a newer selection", async () => {
+  const h = authHarness(); const body = deferred();
+  h.c.checkAuthAndEnableInput();
+  h.requests[0].resolve({ ok: true, status: 200, json: () => body.promise }); await settle();
+  const selecting = h.c.newChatNow();
+  h.requests[1].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await selecting;
+  body.resolve({ user: null }); await settle();
+  assert.equal(h.c.chatState.sessionId, "new-session"); assert.equal(h.c.chatState._signedOut, false);
+  assert.equal(h.node("chatSend").disabled, false);
+});
+
+for (const outcome of ["success", "HTTP error"]) {
+  test(`auth ${outcome} cannot enable Send while New chat is pending`, async () => {
+    const h = authHarness(); const selecting = h.c.newChatNow();
+    h.c.checkAuthAndEnableInput(); answerAuth(h.requests[1], outcome); await settle();
+    assert.equal(h.node("chatSend").disabled, true);
+    assert.equal(h.node("chatInput").disabled, false, "typing may continue during selection");
+    h.requests[0].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await selecting;
+    assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+  });
+}
+
+for (const olderFirst of [true, false]) {
+  test(`auth during speech interruption preserves latest turn ownership (older finishes ${olderFirst ? 'first' : 'last'})`, async () => {
+    const h = authHarness(); h.c.voice.mic = true;
+    h.c.checkAuthAndEnableInput();
+    h.node("chatInput").value = "first typed question";
+    const first = h.c.sendChatMessage(); await settle();
+    const speech = h.start(); speech.resolve(response({ ok: true, text: "spoken follow up" })); await settle();
+    assert.equal(h.requests[3].url, "/chat", "speech deliberately bypasses typed turn's lock");
+    assert.equal(JSON.parse(h.requests[3].init.body).message, "spoken follow up");
+    answerAuth(h.requests[0], "success"); await settle();
+    assert.equal(h.node("chatSend").disabled, true);
+    if (olderFirst) {
+      h.requests[1].resolve(response({ ok: true, reply: "old typed reply" })); await first;
+      assert.equal(h.node("chatSend").disabled, true, "old finally cannot unlock the newer speech turn");
+      h.requests[3].resolve(response({ ok: true, reply: "latest spoken reply" })); await settle();
+    } else {
+      h.requests[3].resolve(response({ ok: true, reply: "latest spoken reply" })); await settle();
+      assert.equal(h.node("chatSend").disabled, false, "latest completion is not held by an older draining turn");
+      h.node("chatInput").value = "newer typed turn";
+      const next = h.c.sendChatMessage(); await settle();
+      assert.equal(h.requests[4].url, "/chat");
+      h.requests[1].resolve(response({ ok: true, reply: "old typed reply" })); await first;
+      assert.equal(h.node("chatSend").disabled, true, "old finally cannot release a third turn");
+      h.requests[4].resolve(response({ ok: true, reply: "newest typed reply" })); await next;
+    }
+    assert.equal(h.c.voice.mic, true); assert.equal(h.c.voice.sending, false);
+    assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+  });
+}
+
+
+test("auth turn ownership: Stop before the resolved ensure continuation leaves no orphaned turn", async () => {
+  const h = authHarness(); h.c.voice.mic = true;
+  const request = h.c.beginSpeechRequest(); h.c.voice.sending = true;
+  h.node("chatInput").value = "cancelled speech";
+  const sending = h.c.sendChatMessage(undefined, request);
+  h.stop(); await sending;
+  assert.ok(!h.c.chatNavigation.turn, "canceled speech never acquires turn ownership");
+  assert.equal(h.requests.length, 0);
+  h.node("chatInput").value = "typed retry";
+  const retry = h.c.sendChatMessage(); await settle();
+  assert.equal(h.requests.length, 1); assert.equal(h.requests[0].url, "/chat");
+  h.requests[0].resolve(response({ ok: true, reply: "retry reply" })); await retry;
+});
+
+for (const outcome of ["Stop", "error", "empty"]) {
+  test(`auth success during ASR preserves usable composer after ${outcome}`, async () => {
+    const h = authHarness(); h.c.voice.mic = true; h.c.checkAuthAndEnableInput();
+    const asr = h.start();
+    assert.equal(h.c.voice.sending, true);
+    answerAuth(h.requests[0], "success"); await settle();
+    assert.equal(h.node("chatInput").disabled, false, "ASR is not a chat-turn lock");
+    if (outcome === "Stop") { h.stop(); asr.resolve(response()); }
+    else if (outcome === "error") asr.reject(new Error("synthetic ASR error"));
+    else asr.resolve(response({ ok: true, text: "" }));
+    await settle();
+    assert.equal(h.c.voice.sending, false);
+    assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+    h.node("chatInput").value = "typed retry";
+    const retry = h.c.sendChatMessage(); await settle();
+    assert.equal(h.requests[2].url, "/chat");
+    h.requests[2].resolve(response({ ok: true, reply: "retry reply" })); await retry;
   });
 }
