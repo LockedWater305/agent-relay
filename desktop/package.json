@@ -1,0 +1,66 @@
+{
+  "name": "beezilla-desktop",
+  "productName": "BeeZilla",
+  "version": "0.2.12",
+  "private": true,
+  "description": "BeeZilla desktop \u2014 the local runtime in a window",
+  "type": "module",
+  "main": "main.mjs",
+  "author": "BeeZilla",
+  "scripts": {
+    "start": "electron .",
+    "stage": "node dist.mjs stage",
+    "dist": "node dist.mjs all",
+    "pack:dir": "node dist.mjs dir"
+  },
+  "build": {
+    "appId": "ai.beezilla.desktop",
+    "productName": "BeeZilla",
+    "copyright": "BeeZilla",
+    "directories": {
+      "output": "../dist-desktop",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.mjs",
+      "supervisor.mjs",
+      "package.json",
+      "settings.mjs",
+      "preload.cjs",
+      "connect.mjs",
+      "paths.mjs",
+      "logger.mjs",
+      "security.mjs",
+      "csp.mjs",
+      "library-vault.mjs"
+    ],
+    "extraResources": [
+      {
+        "from": "stage/app",
+        "to": "app"
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "target": "dir",
+      "identity": null
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "artifactName": "BeeZilla-Setup-${version}.${ext}",
+    "afterPack": "./after-pack.cjs"
+  },
+  "devDependencies": {
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
+  }
+}

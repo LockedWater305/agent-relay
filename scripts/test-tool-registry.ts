@@ -25,14 +25,22 @@ function check(label: string, condition: boolean, detail?: string) {
   }
 }
 
+console.log("one policy per tool:");
+const policyNames = TOOL_POLICIES.map((policy) => policy.name);
+check("policy names are unique", new Set(policyNames).size === policyNames.length, policyNames.join(","));
+check("music has exactly one policy", policyNames.filter((name) => name === "generate_music").length === 1);
+
 console.log("closed gate:");
 const closed = offeredToolNames({ draftGateOpen: false });
 check("offers read-only tools", ["web_search", "read_web_page", "lookup_market_rate", "search_knowledge", "calculate"].every((n) => closed.includes(n)), closed.join(","));
+check("withholds music until the draft gate opens", !closed.includes("generate_music"));
 check("withholds every render tool", !closed.some((n) => n.startsWith("render_")), closed.join(","));
 check("withholds the superseded fetch_website", !closed.includes("fetch_website"), closed.join(","));
 
 console.log("open gate:");
 const open = offeredToolNames({ draftGateOpen: true });
+check("offers music exactly once", open.filter((name) => name === "generate_music").length === 1);
+check("open gate offers no duplicate tools", new Set(open).size === open.length, open.join(","));
 check("offers render tools", ["render_document", "render_presentation", "render_sheet"].every((n) => open.includes(n)), open.join(","));
 check("still withholds fetch_website", !open.includes("fetch_website"), open.join(","));
 
@@ -43,6 +51,11 @@ check(
   schemas.length === closed.length && schemas.every((s) => closed.includes(String(s.function?.name))),
   JSON.stringify(schemas.map((s) => s.function?.name)),
 );
+
+const openSchemas = offeredTools({ draftGateOpen: true }) as Array<{ function?: { name?: string } }>;
+const openSchemaNames = openSchemas.map((schema) => String(schema.function?.name));
+check("open schema names are unique", new Set(openSchemaNames).size === openSchemaNames.length, openSchemaNames.join(","));
+check("open music schema appears exactly once", openSchemaNames.filter((name) => name === "generate_music").length === 1);
 
 console.log("refusals carry a reason:");
 const renderRefusal = refusalFor("render_document", { draftGateOpen: false });

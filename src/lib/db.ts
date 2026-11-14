@@ -1,18 +1,46 @@
+import { isLocalRuntime, localDataDir } from "./runtime";
+
 /** Which database backend is active. */
 export type DbSource = "neon" | "pglite";
 
+const localRuntime = typeof process !== "undefined" && isLocalRuntime();
+
+// Local is an isolation boundary, not a fallback. A desktop process can inherit
+// a hosted DATABASE_URL from its shell; it must never send local data there.
 // An empty/whitespace DATABASE_URL (an easy misconfig in deploy UIs) must mean
 // "unset" — otherwise production would silently run on the PGLite fallback.
 const rawDatabaseUrl =
   typeof process !== "undefined" ? process.env.DATABASE_URL : undefined;
 const databaseUrl =
-  rawDatabaseUrl && rawDatabaseUrl.trim() ? rawDatabaseUrl : undefined;
+  !localRuntime && rawDatabaseUrl && rawDatabaseUrl.trim()
+    ? rawDatabaseUrl
+    : undefined;
+
+const rawPgliteDataDir =
+  typeof process !== "undefined" ? process.env.BZ_DATA_DIR : undefined;
+/**
+ * Durability for a local/desktop install. PGLite constructed with no `dataDir`
+ * is **in-memory** — every process restart wipes the whole local database, which
+ * is fine for a laptop demo and the test suites but fatal for an app the user
+ * runs every day. `BZ_DATA_DIR` opts into an on-disk store (the desktop shell
+ * points it at the per-user app data directory); unset keeps the in-memory
+ * behaviour every suite depends on.
+ */
+const pgliteDataDir =
+  rawPgliteDataDir && rawPgliteDataDir.trim()
+    ? rawPgliteDataDir.trim()
+    : // Local installs get a durable store without any env plumbing: the
+      // desktop app is useless if a restart forgets every job.
+      localRuntime
+      ? localDataDir()
+      : undefined;
 
 /**
- * Active backend: real **Neon** when `DATABASE_URL` is set (deployed / configured
- * sandbox), otherwise a local embedded **PGLite** (Postgres compiled to WASM) so
+ * Active backend: **PGLite** always in local runtime mode, real **Neon** when
+ * `DATABASE_URL` is set outside local mode (deployed / configured sandbox),
+ * otherwise embedded **PGLite** (Postgres compiled to WASM) so
  * the app has a working database even with nothing configured — the live preview
- * included. Swap in Neon later by just setting `DATABASE_URL`; no code changes.
+ * included. Hosted installs can use Neon by setting `DATABASE_URL`.
  */
 export const dbSource: DbSource = databaseUrl ? "neon" : "pglite";
 
@@ -160,6 +188,7 @@ async function createPgliteSql(): Promise<Sql> {
   globalRef.__pgliteInstance__ ??= (async () => {
     const { PGlite } = await import("@electric-sql/pglite");
     const pg = new PGlite({
+      ...(pgliteDataDir ? { dataDir: pgliteDataDir } : {}),
       parsers: {
         [OID_INT8]: Number,
         [OID_DATE]: identity,
@@ -226,8 +255,8 @@ async function createSql(): Promise<Sql> {
 }
 
 /**
- * Get the shared, **server-only** SQL client. Neon when `DATABASE_URL` is set,
- * otherwise the local PGLite fallback. Memoized — safe to call per request.
+ * Get the shared, **server-only** SQL client. Neon when `DATABASE_URL` is set
+ * outside local mode, otherwise PGLite. Memoized — safe to call per request.
  *
  * Schema comes from `migrations/*.sql`, auto-applied before the first query on
  * both backends — define tables there, never inline in server functions.
@@ -241,13 +270,13 @@ export function getSql(): Promise<Sql> {
 }
 
 /**
- * The shared PGLite instance (preview only), with `migrations/*.sql` applied.
- * Lets Better Auth persist to the SAME embedded DB as app data in preview (via a
- * Kysely dialect). Throws when `DATABASE_URL` is set (that path uses Neon).
+ * The shared PGLite instance (preview and local), with migrations applied.
+ * Lets Better Auth persist to the SAME embedded DB as app data via a Kysely
+ * dialect. Throws when the active backend is Neon.
  */
 export async function getPglite(): Promise<import("@electric-sql/pglite").PGlite> {
   if (dbSource !== "pglite") {
-    throw new Error("getPglite() is only available on the PGLite fallback (no DATABASE_URL)");
+    throw new Error("getPglite() is only available when the active backend is PGLite");
   }
   await getSql();
   const pg = await globalRef.__pgliteInstance__;
@@ -258,7 +287,7 @@ export async function getPglite(): Promise<import("@electric-sql/pglite").PGlite
 /**
  * Finish DB bootstrap before the server handles traffic.
  *
- * - **PGLite** (preview / no `DATABASE_URL`): open the in-memory DB and apply
+ * - **PGLite** (local / preview): open the durable or in-memory DB and apply
  *   `migrations/*.sql`. Idempotent — concurrent callers share one promise.
  * - **Neon**: no-op (pool is created lazily on first query).
  *

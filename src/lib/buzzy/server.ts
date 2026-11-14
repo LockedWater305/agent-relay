@@ -45,6 +45,7 @@ import { compactHistory, normalizeToolResult, estimateTokens, contextWindowFor, 
 import { sanitizeMemoryText, leaksJargon } from "./sanitizer";
 import { BUZZY_QUESTIONS, BUZZY_STATEMENTS, SLOT_IDS, STATEMENT_IDS, REQUIRED_SLOTS, DEEPENING_IDS, classifyJobType, TYPE_DRAFT_HINTS, EXPERT_SUGGESTIONS } from "./questions";
 import { getSql } from "@/lib/db";
+import { isLocalRuntime } from "@/lib/runtime";
 import { DbMemory } from "./memory";
 import { materializeDraft, documentIdForJob } from "./documents";
 import { ensurePeer, ensureSession, syncMessages, honchoAvailable } from "./honcho";
@@ -178,6 +179,7 @@ async function extractDecisions(
    *  the extractor, so the scripted question asked for it again — the exact
    *  "ignored what I already said" complaint. */
   transcript?: string,
+  localOnly = false,
 ): Promise<Record<string, string>> {
   const body = transcript
     ? `Conversation so far (owner's words only):\n${transcript.slice(-3500)}\n\nLatest message:\n${userMessage.slice(0, 2000)}`
@@ -186,12 +188,14 @@ async function extractDecisions(
     { role: "system", content: extractSystemPrompt(existing) },
     { role: "user", content: body },
   ];
-  const candidates = [EXTRACT_MODEL, model].filter(
+  // The fast default is a cloud catalog id. Under local-only, extraction must
+  // use the model selected by the same policy as the reply, with no cloud retry.
+  const candidates = (localOnly ? [model] : [EXTRACT_MODEL, model]).filter(
     (m, i, all): m is string => typeof m === "string" && m.length > 0 && all.indexOf(m) === i,
   );
   for (const candidate of candidates) {
     try {
-      const raw = await chatCompletion(messages, { model: candidate, temperature: 0.2, maxTokens: 200 });
+      const raw = await chatCompletion(messages, { model: candidate, temperature: 0.2, maxTokens: 200, localOnly });
       return parseExtracted(raw, userMessage);
     } catch {
       // Try the next candidate; a failed extraction degrades to nothing rather
@@ -356,6 +360,19 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
     return { ok: false, reply: "", error: "message is required", code: "bad_request" };
   }
 
+  // A managed token that has expired is a SESSION problem, not a bad credential.
+  // Say "reconnect" and stop: spending the request would surface a provider 401,
+  // which reads to a user as "my key is wrong" and sends them to the wrong fix.
+  if (isLocalRuntime() && process.env.BZ_MANAGED_EXPIRED === "1") {
+    return {
+      ok: false,
+      reply:
+        "Your BeeZilla sign-in has expired. Reconnect from Settings (BeeZilla → Settings) and I'll pick up where we left off — nothing was sent.",
+      error: "managed token expired",
+      code: "managed_expired",
+    };
+  }
+
   // ── Validate model against catalog (client sends a label; resolve to id) ──
   let resolvedModel: string | undefined;
   if (model) {
@@ -437,13 +454,11 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   // The work item's own title. A follow-up turn must not rename the folder to
   // whatever the latest chat message happened to be.
   let previousTitle: string | null = null;
-  // A conversation that began in chat has no jobId in the request: the client
-  // only knows a job id from ?job= on the URL (it reads res.d.paper, which this
-  // server never sends), and the draft block below files the work under
-  // `recordId = jobId || sessionId`. Looking up only `jobId` therefore reported
-  // "no draft on file" for exactly the conversations that had one, so a revision
-  // to a chat-born draft would not version. Look up the session's item too.
-  const draftLookupId = jobId || sessionId || null;
+  // Only the job the caller named. This used to fall back to the session id because
+  // the job row was keyed by the session; now that a job has its own id, the client
+  // must pass it (Talk and chat.js do) — a lookup by session would re-create the
+  // #238 behaviour, where a new matter revised the previous one.
+  const draftLookupId = jobId || null;
   if (draftLookupId) {
     const jrows = await sql`SELECT data->>'draft' AS draft, title FROM buzzy_jobs WHERE id = ${draftLookupId} AND user_id = ${userId}`;
     const prev = jrows[0] && jrows[0].draft ? String(jrows[0].draft).trim() : null;
@@ -510,6 +525,83 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   // and the regex behind isDraftRequest is only ever an approximation of one.
   const requestedDraft = isDraftRequest(message) || req.execute === true;
 
+  // ── Persist user message ───────────────────────────────────────────
+  // Written BEFORE the policy/model calls: a refused or interrupted turn
+  // must still leave the owner's words on the record (and in the transcript).
+  await sql`
+    INSERT INTO buzzy_chat_messages (user_id, job_id, session_id, role, content)
+    VALUES (${userId}, ${jobId}, ${sessionId}, 'user', ${message})
+  `;
+
+  // Enforce saved inference controls BEFORE any extraction or generation.
+  // Extracting first already sent the owner's words before a local-only refusal.
+  const draftGateOpen = wereAllFilled || requestedDraft || hasExistingDraft;
+  // Sharpen the draft for the detected job type (guidance only, never a gate).
+  const jobType = classifyJobType(
+    [message, ...history.filter((h) => h.role === "user").map((h) => h.content), ...Object.values(slotValues)].join(" "),
+  );
+  let savedPrefs: Awaited<ReturnType<typeof readModelPrefs>>;
+  let routedModel: string | undefined;
+  try {
+    // BZ-F012 / BZ-F041 / BZ-F043: versioned, reasoned model-selection policy.
+    // The operator's saved controls are read here (ownership-scoped to this
+    // turn's userId) and validated before use — a stale or hand-edited pref
+    // must not change routing silently, so the fallback is recorded.
+    savedPrefs = await readModelPrefs(sql, userId);
+    const decision = selectModel({
+      jobType,
+      phase: draftGateOpen ? "deliverable" : "discovery",
+      overrideModel: resolvedModel,
+      preference: savedPrefs.preference,
+      provider: savedPrefs.provider,
+      localOnly: savedPrefs.localOnly,
+      budgetCapCents: savedPrefs.budgetCapCents,
+      spentCents: savedPrefs.spentCents,
+    });
+    if (jobId) {
+      try {
+        await sql`
+          INSERT INTO buzzy_job_events (job_id, user_id, actor, action, detail)
+          VALUES (${jobId}, ${userId}, ${userId}, 'model_decision',
+                  ${JSON.stringify({
+                    policyVersion: decision.policyVersion,
+                    phase: decision.phase,
+                    label: decision.label,
+                    provider: decision.provider ?? null,
+                    reason: decision.reason,
+                    refused: decision.refused ?? false,
+                    refusedReason: decision.refusedReason ?? null,
+                    preference: savedPrefs.preference,
+                    preferenceSource: savedPrefs.preferenceSource,
+                    degradation: savedPrefs.degradation,
+                    budget: decision.budget
+                      ? { verdict: decision.budget.verdict, spentCents: decision.budget.spentCents, capCents: decision.budget.capCents }
+                      : null,
+                  })})
+        `;
+      } catch { /* decision logging never blocks the turn */ }
+    }
+    // A refusal routes nowhere: say why instead of quietly using the default.
+    if (decision.refused) {
+      return {
+        ok: false,
+        reply: "",
+        error: decision.reason,
+        code: decision.refusedReason ?? "model_refused",
+      };
+    }
+    routedModel = decision.model || undefined;
+    turnModel = routedModel || "";
+  } catch (err) {
+    console.error("[buzzy/chat] model policy failed:", err instanceof Error ? err.message : err);
+    return {
+      ok: false,
+      reply: "I couldn't check your model settings. Nothing was sent to an inference provider.",
+      error: err instanceof Error ? err.message : "Model settings unavailable",
+      code: "model_policy_error",
+    };
+  }
+
   // ── Extract this turn's newly-revealed decisions (fills the box) ────
   // Structural, separate from the reply turn: a dedicated JSON extraction
   // populates the Decisions Made box whether or not the reply model emits
@@ -526,7 +618,13 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
     .slice(-6)
     .map((h) => String(h.content).slice(0, 400))
     .join("\n");
-  const extractPromise = extractDecisions(message, resolvedModel, slotValues, ownerTurns);
+  const extractPromise = extractDecisions(
+    message,
+    savedPrefs.localOnly ? routedModel : resolvedModel,
+    slotValues,
+    ownerTurns,
+    savedPrefs.localOnly,
+  );
   let newlyExtracted: Record<string, string> = {};
   const mergeExtracted = async (found: Record<string, string>) => {
     for (const [slotId, val] of Object.entries(found)) {
@@ -568,10 +666,6 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   const knownCompany = companyName
     ? " Confirmed company facts are already known — do not ask for them again."
     : "";
-  // Sharpen the draft for the detected job type (guidance only, never a gate).
-  const jobType = classifyJobType(
-    [message, ...history.filter((h) => h.role === "user").map((h) => h.content), ...Object.values(slotValues)].join(" "),
-  );
   const typeHint = TYPE_DRAFT_HINTS[jobType] ? `\n\nThis is ${jobType} work — ${TYPE_DRAFT_HINTS[jobType]}` : "";
   // A plan-then-confirm round trip is exactly what "just do it" forbids.
   const planFirst = shouldPlanFirst(message) && !isExecuteCommand(message) ? PLAN_FIRST_INSTRUCTION : "";
@@ -617,7 +711,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   // Music is a tool call, not a description. Without this rule the model answered
   // "Your ambient pad is done — the player is attached below" in 6.9 s without ever
   // calling generate_music, because prose was cheaper than a tool call.
-  // Same three signals draftGateOpen is built from, which is declared further down.
+  // Use the same three signals as the draft gate above.
   const audioRule = (wereAllFilled || requestedDraft || hasExistingDraft)
     ? "\n\nAUDIO: if the owner asks for music or audio — a song, track, pad, loop, score, jingle, " +
       "soundtrack or soundscape — your FIRST action is to call generate_music with the full brief in " +
@@ -807,20 +901,11 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
     ]) + TOOL_OVERHEAD_TOKENS;
   const ctx: ContextState = contextState(usedTokens, ctxLimit, compacted, droppedCount);
 
-  // ── Persist user message ───────────────────────────────────────────
-  // Written BEFORE the model call: a turn that times out or dies mid-stream
-  // must still leave the owner's words on the record (and in the transcript).
-  await sql`
-    INSERT INTO buzzy_chat_messages (user_id, job_id, session_id, role, content)
-    VALUES (${userId}, ${jobId}, ${sessionId}, 'user', ${message})
-  `;
-
   // ── Call LLM ───────────────────────────────────────────────────────
   // Phase 1 (plan doc 23): when the draft gate is satisfied, the model gets
   // the render_document tool and may run a bounded loop (max 3 iterations).
   // Read-only tool execution only — render-to-memory is autonomous per the
   // side-effect classification; the artifact itself stays approval-gated.
-  const draftGateOpen = wereAllFilled || requestedDraft || hasExistingDraft;
   // The registry is the single source of truth for what may be called. No
   // hand-assembled arrays here: adding a tool must not require editing this
   // function, and a gated tool must never leak into the offered set.
@@ -853,55 +938,6 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   let renderedDocText: string | null = null;
   let renderedDocTitle: string | null = null;
   try {
-    // BZ-F012 / BZ-F041 / BZ-F043: versioned, reasoned model-selection policy.
-    // The operator's saved controls are read here (ownership-scoped to this
-    // turn's userId) and validated before use — a stale or hand-edited pref
-    // must not change routing silently, so the fallback is recorded.
-    const savedPrefs = await readModelPrefs(sql, userId);
-    const decision = selectModel({
-      jobType,
-      phase: draftGateOpen ? "deliverable" : "discovery",
-      overrideModel: resolvedModel,
-      preference: savedPrefs.preference,
-      provider: savedPrefs.provider,
-      localOnly: savedPrefs.localOnly,
-      budgetCapCents: savedPrefs.budgetCapCents,
-      spentCents: savedPrefs.spentCents,
-    });
-    if (jobId) {
-      try {
-        await sql`
-          INSERT INTO buzzy_job_events (job_id, user_id, actor, action, detail)
-          VALUES (${jobId}, ${userId}, ${userId}, 'model_decision',
-                  ${JSON.stringify({
-                    policyVersion: decision.policyVersion,
-                    phase: decision.phase,
-                    label: decision.label,
-                    provider: decision.provider ?? null,
-                    reason: decision.reason,
-                    refused: decision.refused ?? false,
-                    refusedReason: decision.refusedReason ?? null,
-                    preference: savedPrefs.preference,
-                    preferenceSource: savedPrefs.preferenceSource,
-                    degradation: savedPrefs.degradation,
-                    budget: decision.budget
-                      ? { verdict: decision.budget.verdict, spentCents: decision.budget.spentCents, capCents: decision.budget.capCents }
-                      : null,
-                  })})
-        `;
-      } catch { /* decision logging never blocks the turn */ }
-    }
-    // A refusal routes nowhere: say why instead of quietly using the default.
-    if (decision.refused) {
-      return {
-        ok: false,
-        reply: "",
-        error: decision.reason,
-        code: decision.refusedReason ?? "model_refused",
-      };
-    }
-    const routedModel = decision.model || undefined;
-    turnModel = routedModel || "";
     // The voice lane speaks: text AND audio stream from one call, so the
     // avatar talks on the first audio chunk instead of after the whole reply.
     // Deliverable turns stay on the text lane — a draft is announced, not
@@ -912,7 +948,9 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
     // onto the slow lane — that is what made a two-second answer take 21 seconds.
     const toolTurnNeeded = explicitDocumentRequest || (mode === "work" && draftGateOpen);
     const useVoiceLane =
-      surface === "voice" && !!req.speech && voiceAvailable() && !toolTurnNeeded;
+      // The separate audio model has no local-only routing contract. Keep this
+      // turn on the constrained text lane instead of silently sending it there.
+      !savedPrefs.localOnly && surface === "voice" && !!req.speech && voiceAvailable() && !toolTurnNeeded;
     if (useVoiceLane) { spokeThisTurn = true; lane = "audio"; }
     if (surface === "voice" && !useVoiceLane) {
       // Say WHY the audio lane was skipped — otherwise a slow text turn looks
@@ -920,7 +958,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
       console.log(
         `[buzzy/voice] audio lane skipped: mode=${mode} gate=${draftGateOpen} requestedDraft=${requestedDraft} ` +
           `allFilled=${wereAllFilled} existing=${hasExistingDraft} docRequest=${explicitDocumentRequest} ` +
-          `speechSink=${!!req.speech} available=${voiceAvailable()}`,
+          `speechSink=${!!req.speech} available=${voiceAvailable()} localOnly=${savedPrefs.localOnly}`,
       );
     }
     const llmStarted = Date.now();
@@ -950,7 +988,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
       let firstDelta = true;
       reply = await chatCompletionStream(
         messages,
-        { model: routedModel, maxTokens: undefined },
+        { model: routedModel, maxTokens: undefined, localOnly: savedPrefs.localOnly },
         (delta) => {
           if (firstDelta) { ttftMs = Date.now() - llmStarted; firstDelta = false; }
           req.onText!(delta);
@@ -958,7 +996,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
       );
       llmMs = Date.now() - llmStarted;
     } else {
-      reply = await chatCompletionFull(messages, { model: routedModel, tools: loopTools, toolChoice, maxTokens: loopTools ? 4096 : undefined });
+      reply = await chatCompletionFull(messages, { model: routedModel, tools: loopTools, toolChoice, maxTokens: loopTools ? 4096 : undefined, localOnly: savedPrefs.localOnly });
       llmMs = Date.now() - llmStarted;
     }
 
@@ -1174,7 +1212,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
           bytes: out.bytes ?? null, path: out.path ?? null,
         });
       }
-      reply = await chatCompletionFull(followUpMessages, { model: routedModel, maxTokens: loopTools ? 4096 : undefined });
+      reply = await chatCompletionFull(followUpMessages, { model: routedModel, maxTokens: loopTools ? 4096 : undefined, localOnly: savedPrefs.localOnly });
     }
     // ── Guard: a tool name is not an answer ────────────────────────────
     // Observed live: after a search the model returned
@@ -1197,7 +1235,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
               "using what the tools returned. No tool names, no bare URLs, no JSON.",
           },
         ],
-        { model: routedModel, maxTokens: 1200 },
+        { model: routedModel, maxTokens: 1200, localOnly: savedPrefs.localOnly },
       );
       if (reply.toolCalls.length === 0 && (TOOL_ECHO.test(reply.content) || URL_ONLY.test(reply.content))) {
         console.error("[buzzy/chat] reply stayed a tool echo after retry");
@@ -1396,7 +1434,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   // has no audio. The client used to fall back to the browser's speech engine,
   // so the owner heard a different (robotic) voice mid-conversation. Read the
   // settled reply through the audio model instead, so the voice never changes.
-  if (surface === "voice" && !spokeThisTurn && req.speech && voiceAvailable() && cleanReply.trim()) {
+  if (!savedPrefs.localOnly && surface === "voice" && !spokeThisTurn && req.speech && voiceAvailable() && cleanReply.trim()) {
     try {
       const spokenText = deliversThisTurn
         ? `Saved it — the document is ready for your approval. ${cleanReply}`.slice(0, 700)
@@ -1469,7 +1507,9 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   // list readable — refreshed every few messages, never blocking this turn.
   if (sessionId) {
     await touchSession(sql, sessionId, userId);
-    void maybeSummarizeSession(sql, sessionId, userId);
+    // This helper has a separate default model and no local-only contract yet.
+    // Do not schedule unconstrained background inference from a constrained turn.
+    if (!savedPrefs.localOnly) void maybeSummarizeSession(sql, sessionId, userId);
   }
 
   // ── Sync to Honcho (off the critical path) ─────────────────────────
@@ -1635,7 +1675,14 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
     // Persist the draft as a durable job so it surfaces in Work/Library and
     // can wait on the owner's approval (needs-input), instead of living only in
     // this chat. A chat with no job id gets one now (stable per session).
-    const recordId = jobId || sessionId || `job_${Date.now()}`;
+    // #238: `jobId || sessionId` made the session id the job's primary key, so every
+    // turn in one conversation wrote the SAME job row — a second matter silently
+    // extended the first, and its title, slots and draft were overwritten. Absent a
+    // jobId the turn now starts a new item; continuation is when the caller names the
+    // item it is continuing (Talk and chat.js both echo `response.jobId`). The
+    // session still records a pointer to its latest item below — a pointer, not
+    // identity.
+    const recordId = jobId || `job_${Date.now().toString(36)}`;
     response.jobId = recordId;
     if (previousDraft) response.previousDraft = previousDraft;
     // Title source order matters. The renderer derives its title from THIS
@@ -1665,7 +1712,19 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
         ${JSON.stringify({ draft: cleanReply, slots: slotValues, approved: false, previous_draft: previousDraft, artifact: renderedDocument })}::jsonb, now()
       )
       ON CONFLICT (id) DO UPDATE SET
-        title = EXCLUDED.title, status = EXCLUDED.status, data = EXCLUDED.data, updated_at = now()
+        title = EXCLUDED.title,
+        -- A follow-up turn that renders nothing must not demote a finished item. The
+        -- project page said "Deliverable ready, 1 deliverable" until the owner asked a
+        -- follow-up question, which rewrote status to "In progress" and cleared
+        -- data.artifact — the deliverable vanished from its own project.
+        status = CASE WHEN EXCLUDED.status = 'In progress'
+                      THEN COALESCE(NULLIF(buzzy_jobs.status, 'Empty'), 'In progress')
+                      ELSE EXCLUDED.status END,
+        data = COALESCE(buzzy_jobs.data, '{}'::jsonb) ||
+               (CASE WHEN EXCLUDED.data->>'artifact' IS NULL
+                     THEN EXCLUDED.data - 'artifact'
+                     ELSE EXCLUDED.data END),
+        updated_at = now()
     `;
     // Link the conversation to the work it produced. Without this, a file made
     // from a plain conversation was reachable from the Library but the chat had
@@ -1786,5 +1845,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
     }
   }
 
+  // Every turn names the item it is about, so a client never has to remember it.
+  if (jobId && !response.jobId) response.jobId = jobId;
   return response;
 }

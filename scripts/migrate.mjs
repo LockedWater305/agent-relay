@@ -2,19 +2,27 @@
 /**
  * Deploy-time database migrator (node-postgres, `pg`).
  *
- * Runs during `npm run build` — on every Vercel deploy — applying pending files
+ * Runs before the server in `npm start`, applying pending files
  * in ../migrations to DATABASE_URL. Each file is applied in one transaction and
  * recorded in a `_migrations` table, so it runs once and is safe to re-run.
  *
- * No DATABASE_URL (local / preview builds) -> skip; the PGLite fallback applies
+ * Local runtime or no DATABASE_URL -> skip; the PGLite backend applies
  * the same files at startup instead (see src/lib/db.ts).
  */
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import pg from "pg";
 
-const databaseUrl = process.env.DATABASE_URL;
+// Match the application DB boundary even when invoked directly by `npm start`
+// rather than the local launcher. Never let an inherited hosted URL migrate a
+// remote database before the isolated local server has a chance to start.
+const localRuntime = (process.env.BZ_RUNTIME ?? "").trim().toLowerCase() === "local";
+if (localRuntime) {
+  console.log("[migrate] local runtime — skipping remote migrations (PGLite migrates itself).");
+  process.exit(0);
+}
+
+const databaseUrl = process.env.DATABASE_URL?.trim();
 if (!databaseUrl) {
   console.log(
     "[migrate] DATABASE_URL not set — skipping (the PGLite fallback migrates itself).",
@@ -25,6 +33,7 @@ if (!databaseUrl) {
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
 
 async function main() {
+  const { default: pg } = await import("pg");
   const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
   const client = await pool.connect();
   try {
