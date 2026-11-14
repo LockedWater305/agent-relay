@@ -918,7 +918,8 @@
       if (btn) { btn.click(); paint(); return; }
       // Talk is not mounted in this session: go there, then start.
       if (window.BeeZillaShell) {
-        window.BeeZillaShell.go("/buzzy/talk").then(function () {
+        window.BeeZillaShell.go("/buzzy/talk").then(function (navigated) {
+          if (!navigated) return;
           setTimeout(function () {
             if (engine() && engine().toggle) engine().toggle();
             else { var b = document.getElementById("micBtn"); if (b) b.click(); }
@@ -1003,6 +1004,12 @@
   var KEEP_ALIVE = ["/buzzy/talk"];
   var cache = Object.create(null); // key -> { el, title, styles }
   var busy = false;
+  var currentReady = true;
+  var navigationId = 0;
+  var pendingNavigation = null;
+  // Fetches may overlap, but a mounted page must finish its scripts before a
+  // newer page replaces its DOM. Otherwise a late script binds to the new page.
+  var commitQueue = Promise.resolve();
   // popstate fires AFTER location has changed, so "which page am I stashing?" must
   // come from our own record, never from location.href.
   var currentKey = keyOf(location.href);
@@ -1102,6 +1109,11 @@
 
   function runScripts(root) {
     var scripts = Array.prototype.slice.call(root.querySelectorAll("script"));
+    // The optional guard cancels unstarted work after a newer navigation. In
+    // particular, an old Library bootstrap must not redirect the new URL back
+    // to Talk. The normal inline batch bytes and external-script order stay
+    // unchanged (the desktop CSP generator also runs this function).
+    var isCurrent = arguments[1] || function () { return true; };
     // One document runs every page's scripts, so a top-level `const` on page B collides
     // with page A's — "Identifier 'QUESTIONS' has already been declared" killed the
     // whole Library script on a soft navigation out of Talk (BZ-16). Each run of
@@ -1111,6 +1123,7 @@
     // tags keep their own file scope and their position in the order.
     var batch = [];
     function flush() {
+      if (!isCurrent()) { batch = []; return Promise.resolve(); }
       if (!batch.length) return Promise.resolve();
       var src = batch.join("\n;\n");
       batch = [];
@@ -1121,9 +1134,11 @@
     }
     return scripts.reduce(function (chain, s) {
       return chain.then(function () {
+        if (!isCurrent()) { s.remove(); return; }
         if (s.src && /\/buzzy\/nav\.js(\?|$)/.test(s.src)) { s.remove(); return; }
         if (s.src) {
           return flush().then(function () {
+            if (!isCurrent()) { s.remove(); return; }
             return new Promise(function (resolve) {
               var n = document.createElement("script");
               Array.prototype.forEach.call(s.attributes, function (a) { n.setAttribute(a.name, a.value); });
@@ -1183,7 +1198,26 @@
   }
 
   function finish(key, title, scrollY) {
+    // Talk consumes ?job / ?expert with replaceState during bootstrap. Adopt
+    // that same-page canonical URL, or Back later misses its live DOM cache.
+    var canonicalKey = keyOf(location.href);
+    if (canonicalKey !== key && canonicalKey.replace(/\?.*$/, "") === key.replace(/\?.*$/, "")) {
+      var page = document.getElementById("bzPage");
+      var previous = cache[canonicalKey];
+      if (previous && previous.el !== page) previous.el.remove();
+      delete cache[canonicalKey];
+      Array.prototype.forEach.call(document.querySelectorAll('[data-bz-style="' + canonicalKey + '"]'), function (el) {
+        el.remove();
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-bz-style="' + key + '"]'), function (el) {
+        el.setAttribute("data-bz-style", canonicalKey);
+      });
+      if (cache[key]) { cache[canonicalKey] = cache[key]; delete cache[key]; }
+      if (page) page.setAttribute("data-bz-path", canonicalKey);
+      key = canonicalKey;
+    }
     currentKey = key;
+    currentReady = true;
     adoptStyles(null, key);
     setTitle(title);
     if (window.BeeZillaChrome) window.BeeZillaChrome.boot();
@@ -1191,14 +1225,13 @@
     // soft navigation; a synthetic event keeps their boot code honest.
     try { document.dispatchEvent(new Event("DOMContentLoaded")); } catch (e) {}
     try { window.scrollTo(0, scrollY || 0); } catch (e) {}
-    busy = false;
   }
 
   function stashCurrent() {
     var page = document.getElementById("bzPage");
     if (!page) return;
     var key = page.getAttribute("data-bz-path") || currentKey;
-    if (keepAlive(key)) {
+    if (keepAlive(key) && currentReady) {
       // The chrome is rebuilt on restore, so the cached copy must not keep a
       // second #bzNav / #bzVoiceDock / #bzPlanChip alive: duplicate ids make
       // getElementById return the hidden copy and the visible control "vanish".
@@ -1217,6 +1250,9 @@
       // a page's own code can end up measuring the hidden copy. restore() puts it back.
       page.removeAttribute("id");
     } else {
+      // A cancelled bootstrap is not a live Talk session. Do not restore an
+      // unfinished page later without rerunning its skipped scripts.
+      if (cache[key] && cache[key].el === page) delete cache[key];
       page.parentNode && page.parentNode.removeChild(page);
     }
   }
@@ -1230,46 +1266,80 @@
     finish(key, entry.title, entry.scrollY);
   }
 
+  // Resolves true only for a completed/current page, false if superseded or
+  // handed to a hard navigation. Continuations must check this result.
   function go(href, opts) {
     opts = opts || {};
     var url;
-    try { url = new URL(href, location.href); } catch (e) { return Promise.resolve(); }
-    if (!isShellPath(url)) { location.href = url.href; return Promise.resolve(); }
+    try { url = new URL(href, location.href); } catch (e) { return Promise.resolve(false); }
+    if (!isShellPath(url)) {
+      navigationId++;
+      pendingNavigation = null;
+      busy = false;
+      location.href = url.href;
+      return Promise.resolve(false);
+    }
     var key = keyOf(url);
-    if (key === keyOf(location.href)) return Promise.resolve();
-    if (busy) return Promise.resolve();
+    var atUrl = key === keyOf(location.href);
+    if (atUrl && pendingNavigation && pendingNavigation.key === key) return pendingNavigation.promise;
+    // popstate has already changed location. Compare with the mounted page,
+    // not just the address, and never drop a newer request because we are busy.
+    if (atUrl && key === currentKey && currentReady && !busy) return Promise.resolve(true);
+    var id = ++navigationId;
     busy = true;
-
-    ensurePageWrapper();
-    var target = document.getElementById("bzPage");
-    if (target) target.setAttribute("data-bz-path", currentKey);
-    stashCurrent();
-    currentKey = key;
     // Default is to push; only popstate passes push:false (history already moved).
-    if (opts.push !== false) history.pushState({ bzShell: key }, "", url.pathname + url.search);
+    if (opts.push !== false && !atUrl) history.pushState({ bzShell: key }, "", url.pathname + url.search);
 
-    if (cache[key]) { restore(key); return Promise.resolve(); }
-
-    return fetch(url.href, { credentials: "same-origin", headers: { "x-bz-shell": "1" } })
-      .then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.text();
-      })
-      .then(function (html) {
-        var doc = new DOMParser().parseFromString(html, "text/html");
-        var page = buildFromDoc(doc, key);
-        document.body.insertBefore(page, document.getElementById("bzPageCache"));
-        adoptStyles(doc, key);
-        return runScripts(page).then(function () {
-          finish(key, doc.title, 0);
+    // Keep the current DOM alive until the latest destination is ready. A stale
+    // fetch cannot mount, run scripts, overwrite the Talk cache, or redirect us.
+    var ready = (key === currentKey && currentReady) || cache[key] ? Promise.resolve(null) :
+      fetch(url.href, { credentials: "same-origin", headers: { "x-bz-shell": "1" } })
+        .then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.text();
         });
+    var failed = false;
+    var promise = ready
+      .then(function (html) {
+        if (id !== navigationId) return;
+        var commit = commitQueue.then(function () {
+          if (id !== navigationId || (key === currentKey && currentReady)) return;
+          ensurePageWrapper();
+          var target = document.getElementById("bzPage");
+          if (target) target.setAttribute("data-bz-path", currentKey);
+          stashCurrent();
+          if (cache[key]) { restore(key); return; }
+          var doc = new DOMParser().parseFromString(html, "text/html");
+          var page = buildFromDoc(doc, key);
+          document.body.insertBefore(page, document.getElementById("bzPageCache"));
+          currentKey = key;
+          currentReady = false;
+          adoptStyles(doc, key);
+          return runScripts(page, function () { return id === navigationId; }).then(function () {
+            if (id !== navigationId) return;
+            finish(key, doc.title, 0);
+          });
+        });
+        commitQueue = commit.catch(function () {});
+        return commit;
       })
       .catch(function () {
+        if (id !== navigationId) return;
+        failed = true;
         // A shell that cannot fetch must not trap the user: fall back to a real
-        // navigation, which is the old behaviour and always works.
+        // navigation of the existing entry, without adding another Back stop.
+        location.replace(url.href);
+      })
+      .then(function () {
+        if (id !== navigationId) return false;
         busy = false;
-        location.href = url.href;
+        pendingNavigation = null;
+        // Callers opening a job or starting voice must not act on a cancelled
+        // navigation after the owner has already chosen a different page.
+        return !failed && currentReady && currentKey === keyOf(location.href);
       });
+    pendingNavigation = { key: key, promise: promise };
+    return promise;
   }
 
   document.addEventListener(

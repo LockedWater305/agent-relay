@@ -1145,7 +1145,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // place instead of re-running its own boot from a ?job= URL (BZ-19).
       // No hard fallback: a /buzzy/ URL assigned to location.href is a document
       // load and costs the mic (BZ-16).
-      return softGo("/buzzy/talk").then(() => {
+      return softGo("/buzzy/talk").then((navigated) => {
+        if (!navigated) return;
         if (!(window.BeeZillaTalk && window.BeeZillaTalk.openJob(j.id))) {
           softGo("/buzzy/talk?job=" + encodeURIComponent(j.id));
         }
