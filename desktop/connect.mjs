@@ -28,6 +28,20 @@
  */
 export const CONNECT_PATH = "/login";
 
+/**
+ * This desktop capability controls only starting the managed-account Connect
+ * flow. It does not revoke stored credentials or block other network features.
+ * The main command enforces it; the Settings copy/menu only reflect it.
+ */
+export function managedAccountConnectCapability(env = process.env) {
+  const enabled = env.BZ_CONNECT_DISABLED !== "1";
+  return {
+    enabled,
+    reason: enabled ? null : "BeeZilla account connection is disabled for this desktop session (BZ_CONNECT_DISABLED=1). You can still use your own key.",
+  };
+}
+
+
 /** What we ask the cloud page to do. Kept as one string so it is auditable. */
 export const MINT_SCRIPT = `(async () => {
   try {

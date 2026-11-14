@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { RuntimeSupervisor } from "./supervisor.mjs";
 import { ROOT, runtimeLib } from "./paths.mjs";
 import { installLogging, logLine, logPaths } from "./logger.mjs";
-import { connectAccount, cloudBaseUrl } from "./connect.mjs";
+import { connectAccount, cloudBaseUrl, managedAccountConnectCapability } from "./connect.mjs";
 import { createDesktopCsp, loadCspManifest } from "./csp.mjs";
 import {
   allowAudioPermission, connectBaseUrl, createRuntimeAuth, isAppDownload, isAppPage,
@@ -356,9 +356,9 @@ function installMenu() {
           },
           {
             label: "Connect BeeZilla account…",
-            // On by default: a normal install must be able to connect. Only an explicit
-            // BZ_CONNECT_DISABLED=1 turns it off (air-gapped or white-label builds).
-            enabled: process.env.BZ_CONNECT_DISABLED !== "1",
+            // UI affordance only. The command checks the same capability for
+            // every entry path, including Settings IPC and the native test hook.
+            enabled: managedAccountConnectCapability().enabled,
             click: () => void connectManagedAccount(),
           },
           { type: "separator" },
@@ -427,6 +427,13 @@ function settingsWindowFor(url) {
  */
 let connecting = null;
 function connectManagedAccount() {
+  // Authoritative boundary: check before joining an in-flight request, creating
+  // a session/window, resolving a cloud URL, minting tokens or writing stores.
+  // Renderer payloads and the menu's enabled state cannot grant this capability.
+  const capability = managedAccountConnectCapability();
+  if (!capability.enabled) {
+    return Promise.resolve({ ok: false, code: "connect_disabled", error: capability.reason });
+  }
   if (connecting) return connecting;
   connecting = performConnect().catch((error) => {
     console.warn("[desktop] connect failed:", error.message);

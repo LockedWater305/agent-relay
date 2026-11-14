@@ -118,8 +118,8 @@
           </span>
         </label>
         <div id="managed-fields">
-          <button id="connect-account" class="secondary">Connect BeeZilla account…</button>
-          <p class="hint" id="connect-hint">A short-lived token is issued to this computer; your password never reaches the app.</p>
+          <button id="connect-account" class="secondary" disabled aria-describedby="connect-hint">Connect BeeZilla account…</button>
+          <p class="hint" id="connect-hint">Checking whether account connection is available…</p>
         </div>
         <label class="opt">
           <input type="radio" name="provider" value="byok" id="provider-byok" />
@@ -259,6 +259,18 @@
       };
 
       let lastState = null;
+      let connectingAccount = false;
+      const connectHint = "A short-lived token is issued to this computer; your password never reaches the app.";
+      const connectCapability = () => lastState?.capabilities?.managedAccountConnect;
+      function paintConnectButton() {
+        // Unavailable until main has reported its capability. This is only UX:
+        // direct bridge calls are independently refused by the main command.
+        const capability = connectCapability();
+        $("connect-account").disabled = connectingAccount || capability?.enabled !== true;
+        if (capability?.enabled === false) {
+          $("connect-hint").textContent = capability.reason || "Account connection is disabled for this desktop session.";
+        }
+      }
 
       // The status line has to agree with the radio the user just picked.
       // "BeeZilla inference — nothing to configure" next to "no key, answers will
@@ -267,13 +279,26 @@
       function selectionNote(state) {
         const selected = document.querySelector('input[name="provider"]:checked')?.value;
         if (selected === "beezilla") {
+          if (state?.capabilities?.managedAccountConnect?.enabled === false) {
+            return "Nothing configured yet. Account connection is disabled; pick “My own key” to start working.";
+          }
           return "Nothing configured yet. Connect your BeeZilla account, or pick “My own key” to start working.";
         }
         return "Nothing configured yet. Paste your key above and choose Save intelligence.";
       }
 
       function renderStatus(state) {
+        const wasConnectEnabled = connectCapability()?.enabled === true;
         lastState = state ?? lastState;
+        paintConnectButton();
+        const capability = connectCapability();
+        if (capability?.enabled === false) {
+          $("connect-hint").textContent = capability.reason || "Account connection is disabled for this desktop session.";
+        } else if (capability?.enabled !== true) {
+          $("connect-hint").textContent = "Account connection is unavailable until its status can be read. Reopen Settings to try again.";
+        } else if (!wasConnectEnabled) {
+          $("connect-hint").textContent = connectHint;
+        }
         const inf = state?.inference;
         $("inference-current").innerHTML = inf
           ? `Now: <strong>${inf.provider === "beezilla" ? "BeeZilla inference" : "your own key"}</strong> · ${inf.key}` +
@@ -296,13 +321,17 @@
         // signed-in user hunting for a key they were never meant to need.
         if (state?.searchNeedsReconnect) {
           $("search-current").innerHTML =
-            "Now: <strong>BeeZilla search</strong> · session expired — <strong>Connect your account again</strong> to keep citing sources. Your own Brave key works meanwhile.";
+            capability?.enabled === false
+              ? "Now: <strong>BeeZilla search</strong> · session expired. Account connection is disabled; you can use your own Brave key."
+              : "Now: <strong>BeeZilla search</strong> · session expired — <strong>Connect your account again</strong> to keep citing sources. Your own Brave key works meanwhile.";
         } else if (search) {
           $("search-current").innerHTML = search.provider === "beezilla"
             ? "Now: <strong>BeeZilla search</strong> · included with your account (renews when you connect)."
             : `Now: <strong>${search.provider}</strong> · your own key · from ${search.source}`;
         } else {
-          $("search-current").innerHTML = "Now: off — answers will not cite sources. Connect your account or paste a Brave key.";
+          $("search-current").innerHTML = capability?.enabled === false
+            ? "Now: off — answers will not cite sources. You can paste your own Brave key; account connection is disabled."
+            : "Now: off — answers will not cite sources. Connect your account or paste a Brave key.";
         }
 
         // Music is its own account: a key can be present and still be refused by the
@@ -381,15 +410,36 @@
       // "Connect BeeZilla account": the token is minted inside our own sign-in
       // window and stored here — the app never sees the password or the cookie.
       $("connect-account").addEventListener("click", async () => {
-        await withBusy($("connect-account"), "Waiting for sign-in…", async () => {
-          const res = await window.beezilla.settings.connect();
+        if (connectingAccount || connectCapability()?.enabled !== true) return;
+        const button = $("connect-account");
+        const original = button.textContent;
+        connectingAccount = true;
+        paintConnectButton();
+        button.textContent = "Waiting for sign-in…";
+        try {
+          const res = await bridge.connect();
           if (!res?.ok || res.data?.ok === false) {
-            $("connect-hint").textContent = res?.error || res?.data?.error || "Could not connect.";
+            const error = res?.error || res?.data?.error || "Could not connect.";
+            // A stale enabled snapshot cannot override a refusal from main.
+            if (res?.data?.code === "connect_disabled") {
+              // contextBridge snapshots may be frozen; keep renderer state local.
+              lastState = {
+                ...lastState,
+                capabilities: { ...lastState?.capabilities, managedAccountConnect: { enabled: false, reason: error } },
+              };
+            }
+            $("connect-hint").textContent = error;
             return;
           }
-          $("connect-hint").textContent = "Connected. BeeZilla started.";
           await refresh();
-        });
+          $("connect-hint").textContent = "Connected.";
+        } catch {
+          $("connect-hint").textContent = "Could not connect. Reopen Settings to try again.";
+        } finally {
+          connectingAccount = false;
+          paintConnectButton();
+          button.textContent = original;
+        }
       });
 
       $("save-inference").addEventListener("click", async () => {
@@ -458,9 +508,15 @@
 
       if (!bridge) {
         $("nobridge").style.display = "block";
+        $("connect-hint").textContent = "Account connection is available only inside the BeeZilla desktop app.";
         document.querySelectorAll("button").forEach((b) => (b.disabled = true));
       } else {
-        refresh().catch(() => say($("inference-status"), "Could not read current settings.", "err"));
+        refresh().then((res) => {
+          if (!res?.ok) throw new Error("Settings unavailable");
+        }).catch(() => {
+          $("connect-hint").textContent = "Account connection is unavailable until settings can be read. Reopen Settings to try again.";
+          say($("inference-status"), "Could not read current settings.", "err");
+        });
       }
 
       // Diagnostics — desktop only. `window.beezilla.app` exists only under the

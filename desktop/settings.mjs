@@ -12,6 +12,7 @@
  * and a wrapper around a CLI.
  */
 import { runtimeLib } from "./paths.mjs";
+import { managedAccountConnectCapability } from "./connect.mjs";
 
 // Loaded from the runtime tree, not by a relative path: inside app.asar a
 // `../scripts/...` import resolves to <install>/resources/scripts, which the
@@ -48,6 +49,8 @@ export function createSettingsHandlers({ dataDir, supervisor, cipher = {}, befor
     const search = resolveSearch(dir, cipher);
     const music = resolveMusicKey(dir, cipher);
     return {
+      // Additive, non-secret status for the UI. Enforcement remains in main.
+      capabilities: { managedAccountConnect: managedAccountConnectCapability() },
       inference: inf
         ? {
             provider: inf.provider,
