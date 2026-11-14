@@ -212,3 +212,34 @@ Prioritize the concrete unverified acceptance gates below. Do not reopen passed 
 | Exact-head hosted CI and release status | Exact published head `875b00d` had **zero GitHub Actions runs** at verification; passing isolated Mac commands are not hosted CI. | Obtain an exact-head CI result through the normal authorized workflow; verify any later merge, release or deployment separately. |
 
 The optional native child-frame/hosted-mode probes can add targeted confidence, but do not replace these real acceptance gaps. No merge, release, deployment or full phase-one acceptance is claimed here.
+
+
+### Talk and Memory workflow repairs: 2026-11-14
+
+The following source commits were published and verified against their independently reviewed, Mac-tested bytes. Each passed full `npm run verify` and a rebuilt unsigned macOS arm64 package gate. Counts below describe separate tests or native runs, not unique totals to add across checkpoints; interrupted observer prefixes are not counted as complete passes.
+
+- **New chat and History, [3996417](https://github.com/LockedWater305/agent-relay/commit/399641740e83a50b9327666d03ae30baa593c37a):** explicit New chat creates a fresh session; History restores the matching session, job, company and transcript. Same-origin reload restores the selected session, while failed or late selections cannot silently redirect Send or repaint a newer conversation. Actual H3/PGLite checks passed **42/42**; two complete native runs passed **46/46** and **60/60**. The selected-session pointer remains origin-bound, although stored conversations can be selected again from History after a port change.
+- **Authentication/active-turn race, [fd14997](https://github.com/LockedWater305/agent-relay/commit/fd14997b94001dc4a6e4dc7614717379bfd4ca48):** delayed identity checks no longer unlock a running typed turn for duplicate Send or overwrite a newer selection. Turn ownership also preserves intentional speech interruption and Stop/retry behavior. Separate native typed and synthetic-voice runs passed **95/95** and **99/99**. Synthetic voice lifecycle checks are not microphone, speech-service or provider validation.
+- **Thinking-indicator cleanup, [7deb3bb](https://github.com/LockedWater305/agent-relay/commit/7deb3bb80c536517e8e2b7017f56e25a4fd48c93):** terminal request/stream errors remove only their own spinner or partial response, without removing a newer turn's UI. A complete packaged run passed **217/217**, including malformed JSON and chunked-reader failures. Buffered fallback and the actual 120-second deadline retain portable-only coverage; Stop does not recall work already accepted by the server.
+- **Company Memory history, [bed8dea4](https://github.com/LockedWater305/agent-relay/commit/bed8dea4e6f6e5e7adb384a9bcdebe17b45b9712):** Memory now displays session-only Talk, archived-job and verifiable legacy history within the selected owned company. Ambiguous/foreign associations are not guessed into that company, and catalogue failures do not broaden the request to the whole account. Actual H3/PGLite runs passed **55 seed** and **31 reopen** checks with 584 fixture rows unchanged; separate native runs passed **124 primary**, **55 relaunch** and **48 empty-account** checks. This repairs reads, not data reassignment or an immutable company-at-message-time audit trail; existing result limits remain.
+
+**Add company remains pending:** the visible header previously led to a Talk URL with no reachable creation form. The tested candidate provides an in-place, name-only dialog with stale-result/cancel safeguards and fixes detached-page company subscriptions. Native testing passed, but final independent artifact review and verified source publication are still pending; this is not yet recorded as shipped. It does not add website import or team sharing. Existing oldest-50 company listing, non-idempotent create outcomes and active-Library auto-filing are not claimed fixed.
+
+These gates used synthetic records/responses, disposable profiles and the official mock Keychain. Real Keychain behavior, live providers, microphone/media and private commercial features remain unverified. Memory tests do not establish Library write-sync behavior, and current stored associations are not historical provenance. Test audits preserved source/package bytes and the original checkout. Exact-head GitHub Actions queries returned **zero runs** at publication verification; isolated Mac verification is not hosted CI.
+
+Supplemental frame checks after the Library checkpoint confirmed no child-owned bridge and inherited CSP enforcement, not a naturally dispatched child-sender IPC denial. The earlier Library figure of 303 describes selected overlapping assertions across six segments, including two observer-interrupted prefixes, not one complete end-to-end run. Neither clarification expands the product acceptance claim.
+
+### Phase-one acceptance status after these repairs
+
+This matrix supersedes the earlier status snapshot, not its evidence or limits. Prioritize the remaining concrete gates rather than treating repeated synthetic passes as full-product acceptance.
+
+| Area | Verified scope / remaining gap | Next bounded acceptance step |
+|---|---|---|
+| Talk, Memory, Library and Settings | The named local workflow repairs passed their exact-source gates. Full every-screen/product parity, cross-origin selected-session restoration and arbitrary crash recovery are not established. | Retain the documented limits; investigate another workflow only when a concrete gap is demonstrated. |
+| Header Add company | Native-tested candidate; final artifact review and verified publication pending. | Complete that review and publish only the exact accepted bytes. |
+| Real credentials and media | Mock storage and synthetic responses only. | Run an authorized real-Keychain/provider/audio smoke with appropriate credentials and permissions. |
+| Release and supported platforms | Unsigned macOS arm64 public-stub builds tested; signing/notarization and Windows/Linux installed behavior unverified. | Confirm release targets and verify each intended artifact's installation and running version. |
+| Hosted/private-feature parity | Actual deployed commit/configuration and private commercial behavior remain unknown or untested. | Obtain authorized operator/source inputs and compare the supported flows; do not infer deployment from upstream source. |
+| CI and delivery | Published source verified; exact-head Actions had no runs. No main merge, release or deployment verified. | Obtain the exact-head CI result and verify any later release/deployment separately. |
+
+**Full phase-one acceptance remains open.** These repairs do not authorize or prove private-feature access, live-service parity, a signed release or deployment.
