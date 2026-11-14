@@ -21,7 +21,9 @@ const talkSource = readFileSync(new URL("../public/buzzy/talk.html", import.meta
 const talkParamsStart = talkSource.indexOf("    var expertFromUrl =");
 const talkParamsEnd = talkSource.indexOf("    // ── Form tab", talkParamsStart);
 assert.ok(talkParamsStart > 0 && talkParamsEnd > talkParamsStart, "exercise Talk's actual query consumption");
-const talkParams = talkSource.slice(talkParamsStart, talkParamsEnd);
+const storeChatSession = talkSource.match(/^    function storeChatSession\([^]*?^    }/m)?.[0];
+assert.ok(storeChatSession, "query consumption uses the actual selected-session storage helper");
+const talkParams = storeChatSession + "\n" + talkSource.slice(talkParamsStart, talkParamsEnd);
 const openJobStart = librarySource.indexOf("    function openJobChat(id) {");
 const openJobEnd = librarySource.indexOf("    /* ── Documents:", openJobStart);
 assert.ok(openJobStart > 0 && openJobEnd > openJobStart, "exercise Library's actual job continuation");

@@ -2044,6 +2044,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // Resumed on load: without this every reload started a NEW session, and a
       // new session means a new job — 56 copies of one lullaby in Work.
       sessionId: (function () { try { return localStorage.getItem("bz_session_id") || null; } catch (_) { return null; } })(),
+      sessionVerified: false,
       slots: {},
       messages: [],
       draftReady: false,
@@ -2062,6 +2063,103 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       workOfferDismissed: false,
     };
 
+    // Selection owns all asynchronous session/transcript results. A failed
+    // selection leaves the current conversation intact; an older response can
+    // never replace a newer New chat, History, company or job choice.
+    var chatNavigation = { generation: 0, pending: null, ensure: null, restore: 0, history: 0, sendClaim: null };
+
+    function chatContextSnapshot() {
+      return { generation: chatNavigation.generation, state: chatState,
+        sessionId: chatState.sessionId || null, jobId: chatState.jobId || null,
+        companyId: activeCompanyId() || null };
+    }
+
+    function chatContextCurrent(context) {
+      return !!context && context.generation === chatNavigation.generation && context.state === chatState &&
+        context.sessionId === (chatState.sessionId || null) && context.jobId === (chatState.jobId || null) &&
+        context.companyId === (activeCompanyId() || null);
+    }
+
+    function beginChatNavigation(kind, key) {
+      speechContextChanged();
+      chatNavigation.generation++;
+      chatNavigation.restore++;
+      chatNavigation.ensure = null;
+      chatNavigation.sendClaim = null;
+      paperOperation = (paperOperation || 0) + 1;
+      paperBusy = false;
+      // Selecting a conversation relinquishes the old turn's UI/audio, not
+      // the microphone. The network may already have accepted that turn; late
+      // chunks/replies are ignored below and its saved reply remains in History.
+      if (typeof voice !== "undefined" && voice && (voice.sending || voice.speaking)) {
+        voice.cutTurn = voice.turnSeq;
+        voice.turnSeq++;
+        voice.sending = false;
+        stopSpeaking();
+        rearmListening();
+      }
+      if (window.__bzStopThinkingClock) window.__bzStopThinkingClock();
+      document.querySelectorAll("#thinkingIndicator, #chatMessages .streaming").forEach(function (node) { node.remove(); });
+      if (window.__bzStageTimer) { clearInterval(window.__bzStageTimer); window.__bzStageTimer = null; }
+      var input = document.getElementById("chatInput");
+      if (input) input.disabled = !!chatState._signedOut;
+      var send = document.getElementById("chatSend");
+      if (send) send.disabled = true;
+      var request = { kind: kind, key: key, context: chatContextSnapshot(), promise: null };
+      chatNavigation.pending = request;
+      return request;
+    }
+
+    function chatNavigationCurrent(request) {
+      return chatNavigation.pending === request && chatContextCurrent(request.context);
+    }
+
+    function finishChatNavigation(request) {
+      if (chatNavigation.pending !== request) return;
+      chatNavigation.pending = null;
+      var send = document.getElementById("chatSend");
+      if (send) send.disabled = !!chatState._signedOut;
+    }
+
+    function validChatSession(session) {
+      return !!session && typeof session.id === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(session.id) &&
+        (session.jobId == null || typeof session.jobId === "string") &&
+        (session.companyId == null || typeof session.companyId === "string");
+    }
+
+    function storeChatSession(id) {
+      try {
+        if (id) localStorage.setItem("bz_session_id", id);
+        else localStorage.removeItem("bz_session_id");
+      } catch (_) { /* storage-disabled sessions remain usable in this visit */ }
+    }
+
+    function selectChatSession(session, messages, slots, jobContext) {
+      speechContextChanged();
+      chatState = {
+        jobId: session.jobId || null, sessionId: session.id, sessionVerified: true,
+        boundCompanyId: session.companyId || null,
+        jobContext: jobContext && jobContext.jobId === session.jobId ? jobContext : null,
+        messages: messages, slots: slots || {},
+        draftReady: false, draftText: "", draftVersion: 1, approvedText: null,
+        outwardConfirmed: false, moneyBlocks: false, promiseBlocks: false,
+        acceptedPromises: {}, paper: null, workOfferDismissed: false,
+        userId: chatState.userId, _signedOut: chatState._signedOut,
+        model: chatState.model, mode: chatState.mode || "chat",
+      };
+      storeChatSession(session.id);
+      renderPaper(null);
+      resetContextMeter();
+      resetDraftGate();
+      document.getElementById("chatError").classList.add("hidden");
+    }
+
+    function showChatFailure(message) {
+      var error = document.getElementById("chatError");
+      error.textContent = message;
+      error.classList.remove("hidden");
+    }
+
     // ── Expert query param ─────────────────────────────────────────────
     var expertFromUrl = new URLSearchParams(window.location.search).get("expert");
     if (expertFromUrl) {
@@ -2074,6 +2172,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     // context; the ?job= param identifies the job for transcript restore.
     var jobFromUrl = new URLSearchParams(window.location.search).get("job");
     if (jobFromUrl) {
+      // A direct job link is an explicit selection, not the last session from
+      // another job. Session-first restoration below must not override it.
+      chatState.sessionId = null;
+      storeChatSession(null);
       chatState.jobId = jobFromUrl;
       try {
         var jobCtx = JSON.parse(sessionStorage.getItem("bz_open_job") || "null");
@@ -2228,6 +2330,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
      * it plays or shows, and it can be downloaded.
      */
     function submitMedia(file) {
+      if (chatNavigation.pending) return Promise.resolve();
+      if (chatState.sessionId && !chatState.sessionVerified) {
+        showChatFailure("Wait for this conversation to restore before adding a file. Your file has not been uploaded.");
+        return Promise.resolve();
+      }
+      var context = chatContextSnapshot();
       var label = file.name || "file";
       chatState.messages.push({ role: "user", content: "Added " + label });
       renderChatMessages();
@@ -2242,6 +2350,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       })
         .then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j || {} }; }); })
         .then(function (res) {
+          if (!chatContextCurrent(context)) return;
           if (!res.j.ok) {
             chatState.messages.push({ role: "assistant", content: "That file did not upload: " + (res.j.error || ("HTTP " + res.s)) });
             renderChatMessages();
@@ -2255,6 +2364,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           renderChatMessages();
         })
         .catch(function () {
+          if (!chatContextCurrent(context)) return;
           chatState.messages.push({ role: "assistant", content: "Couldn't upload that file — check the connection." });
           renderChatMessages();
         });
@@ -2558,6 +2668,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
     var paperLoad = 0;
     var paperBusy = false;
+    var paperOperation = 0;
 
     function renderPaper(paper) {
       chatState.paper = paper || null;
@@ -2659,7 +2770,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     function postPaperLine(lineId, action, value) {
       var paper = chatState.paper;
       var note = document.getElementById("paperNote");
-      if (!paper || paperBusy) return;
+      if (!paper || paperBusy || chatNavigation.pending) return;
+      var context = chatContextSnapshot();
+      var operation = ++paperOperation;
+      function current() { return operation === paperOperation && chatContextCurrent(context); }
       paperBusy = true;
       if (note) note.textContent = "";
       fetch("/api/buzzy/papers/" + encodeURIComponent(paper.id) + "/lines", {
@@ -2668,9 +2782,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lineId: lineId, action: action, value: value || undefined }),
       }).then(function (r) {
+        if (!current()) return null;
         if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
         return r.json().then(function (d) { return { ok: r.ok, d: d }; });
       }).then(function (res) {
+        if (!res || !current()) return;
         if (!res.ok || !res.d.paper) {
           if (note) note.textContent = (res.d && res.d.error) || "Couldn't update that line.";
           return;
@@ -2678,12 +2794,14 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         paperLoad++;
         renderPaper(res.d.paper);
       }).catch(function (e) {
+        if (!current()) return;
         if (e && e.message === "signed_out") return;
         if (note) note.textContent = "Couldn't update that line.";
-      }).finally(function () { paperBusy = false; });
+      }).finally(function () { if (operation === paperOperation) paperBusy = false; });
     }
 
     function loadCompanyPaper(companyId) {
+      var context = chatContextSnapshot();
       var token = ++paperLoad;
       if (!companyId) { renderPaper(null); return; }
       var q = "/api/buzzy/papers?companyId=" + encodeURIComponent(companyId);
@@ -2691,13 +2809,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       fetch(q, { credentials: "same-origin" })
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (d) {
-          if (token !== paperLoad) return;
+          if (token !== paperLoad || !chatContextCurrent(context)) return;
           if (!d || !d.paper) { renderPaper(null); return; }
           if (d.paper.companyId && d.paper.companyId !== companyId) { renderPaper(null); return; }
-          if (d.paper.jobId && !chatState.jobId) chatState.jobId = d.paper.jobId;
+          if (d.paper.jobId && !chatState.jobId && !chatState.sessionId) chatState.jobId = d.paper.jobId;
           renderPaper(d.paper);
         })
-        .catch(function () { if (token === paperLoad) renderPaper(null); });
+        .catch(function () { if (token === paperLoad && chatContextCurrent(context)) renderPaper(null); });
     }
 
     function bytesToBase64(bytes) {
@@ -2746,6 +2864,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
     function submitPaper(payload, speechRequest) {
       if (speechRequest && !speechRequestCurrent(speechRequest)) return Promise.resolve();
+      if (chatNavigation.pending) {
+        if (speechRequest) finishSpeechRequest(speechRequest, "Choose a conversation before asking me to read a paper.");
+        return Promise.resolve();
+      }
       var note = document.getElementById("paperNote");
       var co = activeCompanyId();
       if (!co) {
@@ -2757,16 +2879,27 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (speechRequest) finishSpeechRequest(speechRequest, "A paper is still being read. Try again when it finishes.");
         return Promise.resolve();
       }
+      var generation = chatNavigation.generation;
+      var state = chatState;
+      var operation = ++paperOperation;
+      var context = null;
+      function current() { return operation === paperOperation && context && chatContextCurrent(context); }
       paperBusy = true;
       if (note) note.textContent = "Reading…";
       var userLine = payload.filename ? "Read this — " + payload.filename : "Read this.";
-      chatState.messages.push({ role: "user", content: userLine });
-      renderChatMessages();
-      return ensureChatSession(speechRequest).then(function () {
+      return ensureChatSession(speechRequest).then(function (sessionId) {
+        if (!sessionId || generation !== chatNavigation.generation || state !== chatState || operation !== paperOperation) {
+          if (speechRequest && speechRequestCurrent(speechRequest)) finishSpeechRequest(speechRequest);
+          if (operation === paperOperation && note) note.textContent = "Paper not sent. Choose a conversation and try again.";
+          return null;
+        }
+        context = chatContextSnapshot();
         if (speechRequest) {
           if (!speechRequestCurrent(speechRequest)) return null;
           voice.speechRequest = null;
         }
+        chatState.messages.push({ role: "user", content: userLine });
+        renderChatMessages();
         return fetch("/api/buzzy/papers", {
           method: "POST",
           credentials: "same-origin",
@@ -2782,11 +2915,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           }),
         });
       }).then(function (r) {
-        if (!r) return null;
+        if (!r || !current()) return null;
         if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
         return r.json().then(function (d) { return { ok: r.ok, d: d }; });
       }).then(function (res) {
-        if (!res) return;
+        if (!res || !current()) return;
         if (!res.ok || !res.d.paper) {
           if (note) note.textContent = (res.d && res.d.error) || "Couldn't read that.";
           return;
@@ -2803,9 +2936,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (file) file.value = "";
         if (note) note.textContent = "These lines are proposed. Nothing is confirmed until you accept one.";
       }).catch(function (e) {
+        if (!current()) return;
         if (e && e.message === "signed_out") return;
         if (note) note.textContent = (e && e.message) || "Couldn't read that.";
-      }).finally(function () { paperBusy = false; });
+      }).finally(function () { if (operation === paperOperation) paperBusy = false; });
     }
 
     function readThisBody(text) {
@@ -2931,6 +3065,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function saveSlotEdit(slotId, newValue) {
+      if (chatNavigation.pending || (chatState.sessionId && !chatState.sessionVerified)) return;
+      var context = chatContextSnapshot();
       setBriefEditWidth(false);
       if (!newValue) {
         renderSlotChecklist();
@@ -2961,11 +3097,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           model: selectedModel(),
         }),
       }).then(function (r) { return r.json(); }).then(function (data) {
+        if (!chatContextCurrent(context)) return;
         if (data.ok && data.slots) {
           Object.assign(chatState.slots, data.slots);
           renderSlotChecklist();
         }
       }).catch(function () {}).finally(function () {
+        if (!chatContextCurrent(context)) return;
         document.getElementById("chatInput").disabled = false;
         document.getElementById("chatSend").disabled = false;
       });
@@ -4911,12 +5049,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     function loadContext() {
       // Works with no session too — the window size is knowable before the
       // first turn, and the meter should not appear out of nowhere later.
+      var context = chatContextSnapshot();
       var q = chatState.sessionId ? "?sessionId=" + encodeURIComponent(chatState.sessionId) : "?";
       if (selectedModel()) q += (q === "?" ? "" : "&") + "model=" + encodeURIComponent(selectedModel());
       fetch("/api/buzzy/context" + q,
             { credentials: "same-origin", signal: AbortSignal.timeout(8000) })
         .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (d) { if (d && d.ok && d.context) paintContext(d.context); })
+        .then(function (d) { if (chatContextCurrent(context) && d && d.ok && d.context) paintContext(d.context); })
         .catch(function () {});
     }
 
@@ -5052,7 +5191,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       window.BeeZillaTalk = {
         openJob: function (id, provided) {
           if (!id) return false;
-          speechContextChanged();
+          finishChatNavigation(beginChatNavigation("job", id));
           var ctx = null;
           try {
             var jc = JSON.parse(sessionStorage.getItem("bz_open_job") || "null");
@@ -5069,6 +5208,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           chatState.slots = {};
           chatState.messages = [];
           chatState.paper = null;
+          renderPaper(null);
           resetDraftGate();
           setBackVisible(true);
           try { history.replaceState(null, "", "/buzzy/talk"); } catch (_) {}
@@ -5184,6 +5324,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
      *   error → surfaces the failure instead of hanging on a dead stream
      */
     function streamVoiceTurn(sendBody, metrics, sendStarted, myTurn) {
+      var conversation = chatContextSnapshot();
       var liveBubble = null;
       var liveText = "";
       return fetch(CHAT_BASE, {
@@ -5259,6 +5400,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
         function pump() {
           return reader.read().then(function (r) {
+            if (!chatContextCurrent(conversation)) {
+              reader.cancel().catch(function () {});
+              if (liveBubble && liveBubble.parentNode) liveBubble.parentNode.removeChild(liveBubble);
+              return null;
+            }
             if (r.done) {
               if (liveBubble && liveBubble.parentNode) liveBubble.parentNode.removeChild(liveBubble);
               if (!finalData) throw new Error("The voice turn ended without a reply.");
@@ -5282,6 +5428,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     // reply paints nothing until the whole answer exists. Same SSE contract,
     // no audio.
     function streamTextTurn(sendBody, metrics, sendStarted) {
+      var conversation = chatContextSnapshot();
       var liveBubble = null;
       var liveText = "";
       return fetch(CHAT_BASE, {
@@ -5333,6 +5480,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
         function pump() {
           return reader.read().then(function (r) {
+            if (!chatContextCurrent(conversation)) {
+              reader.cancel().catch(function () {});
+              if (liveBubble && liveBubble.parentNode) liveBubble.parentNode.removeChild(liveBubble);
+              return null;
+            }
             if (r.done) {
               if (liveBubble && liveBubble.parentNode) liveBubble.parentNode.removeChild(liveBubble);
               if (!finalData) throw new Error("The turn ended without a reply.");
@@ -5797,22 +5949,43 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     async function restoreTranscript() {
+      var context = chatContextSnapshot();
+      var restore = ++chatNavigation.restore;
+      if (context.sessionId) chatState.sessionVerified = false;
+      var originalMessages = chatState.messages;
+      var originalLength = originalMessages.length;
+      function current() {
+        return restore === chatNavigation.restore && chatContextCurrent(context) &&
+          chatState.messages === originalMessages && chatState.messages.length === originalLength;
+      }
       try {
-        const q = chatState.jobId
-        ? "?jobId=" + encodeURIComponent(chatState.jobId)
-        : chatState.sessionId
-          ? "?sessionId=" + encodeURIComponent(chatState.sessionId)
-          : "";
+        const q = context.sessionId
+          ? "?sessionId=" + encodeURIComponent(context.sessionId)
+          : context.jobId ? "?jobId=" + encodeURIComponent(context.jobId) : "";
         // Timeout so a hung request can't leave the transcript blank forever
         // (seen live: stuck chat with no welcome message).
         const r = await fetch("/api/buzzy/transcript" + q, {
           credentials: "same-origin",
           signal: AbortSignal.timeout(8000),
         });
+        if (!current()) return;
+        if (r.status === 401) { window.location.href = "/buzzy/landing"; return; }
         if (!r.ok) throw new Error("no transcript");
         const data = await r.json();
-        const msgs = (data.messages || []).map((m) => ({ role: m.role, content: m.content }));
-        if (msgs.length >= 2) {
+        if (!current()) return;
+        if (!Array.isArray(data.messages)) throw new Error("invalid transcript");
+        if (context.sessionId) {
+          if (!validChatSession(data.session) || data.session.id !== context.sessionId) throw new Error("invalid session");
+          if (context.companyId && (data.session.companyId || null) !== context.companyId) throw new Error("different company");
+          chatState.jobId = data.session.jobId || null;
+          chatState.boundCompanyId = data.session.companyId || null;
+          chatState.sessionVerified = true;
+          if (chatState.jobContext && chatState.jobContext.jobId !== chatState.jobId) chatState.jobContext = null;
+          context = chatContextSnapshot();
+        }
+        const msgs = data.messages.map((m) => ({ role: m.role, content: m.content }));
+        if (data.slots && typeof data.slots === "object") chatState.slots = data.slots;
+        if (msgs.length > 0) {
           chatState.messages = msgs;
           // BZ-F004: restore the structured Decisions captured so far — the
           // box must show server state on reopen, not wait for the next turn.
@@ -5824,7 +5997,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           setChatMascot("12-content");
           return;
         }
-      } catch (_) { /* signed out, empty, or unreachable — fall through */ }
+      } catch (_) {
+        if (!current()) return;
+        showChatFailure("Couldn't restore this conversation. Reload to try again, or choose a conversation from History.");
+        return;
+      }
+      if (!current()) return;
       setChatMascot("17-attentive");
       // No transcript for this job (most jobs are shells created by Sketch or
       // Studio and never held a conversation). A bare ?job= link carries no
@@ -5837,12 +6015,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             credentials: "same-origin",
             signal: AbortSignal.timeout(8000),
           });
+          if (!current()) return;
           if (jr.ok) {
             var jd = await jr.json();
+            if (!current()) return;
             if (jd && jd.job) chatState.jobContext = bzJobCtx(jd.job);
           }
         } catch (_) { /* keep the plain greeting */ }
       }
+      if (!current()) return;
       // Job context opener — the Chat button on a Jobs card carries the
       // project here; greet with context instead of the generic welcome.
       var jc = chatState.jobContext;
@@ -5941,18 +6122,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function goBackToRecent() {
-      speechContextChanged();
+      finishChatNavigation(beginChatNavigation("recent", ""));
       chatState.sessionId = null;
-      try { localStorage.removeItem("bz_session_id"); } catch (_) {}
-      try { localStorage.removeItem("bz_session_id"); } catch (_) {}
-      try { localStorage.removeItem("bz_session_id"); } catch (_) {}
-      try { localStorage.removeItem("bz_session_id"); } catch (_) {}
-      try { localStorage.removeItem("bz_session_id"); } catch (_) {}
+      storeChatSession(null);
       chatState.jobId = null;
       chatState.jobContext = null;
       chatState.slots = {};
       chatState.messages = [];
       chatState.paper = null;
+      renderPaper(null);
       resetDraftGate();
       try { history.replaceState(null, "", window.location.pathname); } catch (_) {}
       updateChrome();
@@ -5964,20 +6142,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function newChatNow() {
-      speechContextChanged();
-      resetContextMeter();
-      chatState.sessionId = null;
-      chatState.jobId = null;
-      chatState.jobContext = null;
-      chatState.slots = {};
-      chatState.messages = [{ role: "assistant", content: welcomeMessage() }];
-      setBackVisible(true);
-      resetDraftGate();
-      setChatMascot("17-attentive");
-      renderChatMessages();
-      updateChrome();
-      renderSlotChecklist();
-      document.getElementById("chatInput").focus();
+      // The recent-work landing starts an unscoped conversation. The header
+      // and History drawer keep their documented current-job scope instead.
+      return startNewChat({ keepJob: false });
     }
 
     var rwShowAll = false;
@@ -6324,9 +6491,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         container.querySelectorAll(".rw-ex").forEach(function (el) {
           el.addEventListener("click", function () {
             var ex = el.getAttribute("data-ex") || "";
-            newChatNow();
-            var input = document.getElementById("chatInput");
-            if (input) input.value = ex;
+            newChatNow().then(function (session) {
+              if (!session || chatState.sessionId !== session.id) return;
+              var input = document.getElementById("chatInput");
+              if (input) input.value = ex;
+            });
           });
         });
         bindWorkSearchBox(container);
@@ -6335,34 +6504,53 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
     function ensureChatSession(speechRequest) {
       if (speechRequest && !speechRequestCurrent(speechRequest)) return Promise.resolve(null);
-      if (chatState.sessionId) return Promise.resolve(chatState.sessionId);
-      var coId = activeCompanyId();
-      return fetch(SESSIONS_BASE, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ companyId: coId || undefined }),
-      }).then(function (r) {
-        if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
-        return r.ok ? r.json() : null;
-      }).then(function (data) {
-        if (speechRequest && !speechRequestCurrent(speechRequest)) return null;
-        var s = data && data.session;
-        if (s && s.id) {
-          chatState.sessionId = s.id;
-          try { localStorage.setItem("bz_session_id", s.id); } catch (_) {}
-          if (s.companyId) chatState.boundCompanyId = s.companyId;
-          // This request created the session without changing conversations.
-          if (speechRequest) {
-            speechRequest.sessionId = chatState.sessionId;
-            speechRequest.companyId = chatState.boundCompanyId || null;
-          }
+      if (chatNavigation.pending) return Promise.resolve(null);
+      if (chatState.sessionId) {
+        if (chatState.sessionVerified && (chatState.boundCompanyId || null) === (activeCompanyId() || null)) {
+          return Promise.resolve(chatState.sessionId);
         }
-        return chatState.sessionId;
-      }).catch(function (e) {
-        if (e && e.message === "signed_out") throw e;
-        return chatState.sessionId;
-      });
+        showChatFailure("This conversation has not finished restoring. Retry after it loads, or choose History or New chat.");
+        return Promise.resolve(null);
+      }
+      var current = chatNavigation.ensure;
+      if (current && chatContextCurrent(current.context)) return current.promise;
+      var request = { context: chatContextSnapshot(), promise: null };
+      chatNavigation.ensure = request;
+      request.promise = fetch(SESSIONS_BASE, {
+        method: "POST", credentials: "same-origin", signal: AbortSignal.timeout(8000),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ companyId: request.context.companyId || undefined, jobId: request.context.jobId || undefined }),
+      }).then(function (r) {
+        if (!chatContextCurrent(request.context)) return null;
+        if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
+        if (!r.ok) throw new Error("session_failed");
+        return r.json();
+      }).then(function (data) {
+        if (!chatContextCurrent(request.context) || (speechRequest && !speechRequestCurrent(speechRequest))) return null;
+        var session = data && data.session;
+        if (!validChatSession(session) ||
+            (request.context.companyId && (session.companyId || null) !== request.context.companyId) ||
+            (request.context.jobId && (session.jobId || null) !== request.context.jobId)) throw new Error("invalid_session");
+        chatState.sessionId = session.id;
+        chatState.sessionVerified = true;
+        // The server resumes this exact job when one was explicitly opened.
+        // An ordinary landing-page resume recovers its own job instead.
+        chatState.jobId = session.jobId || null;
+        chatState.boundCompanyId = session.companyId || null;
+        storeChatSession(session.id);
+        if (speechRequest) {
+          speechRequest.sessionId = chatState.sessionId;
+          speechRequest.jobId = chatState.jobId || null;
+          speechRequest.companyId = chatState.boundCompanyId || null;
+        }
+        return session.id;
+      }).catch(function (error) {
+        if (chatContextCurrent(request.context) && (!error || error.message !== "signed_out")) {
+          showChatFailure("Couldn't open a conversation. Your message is still in the composer. Try again in a moment.");
+        }
+        return null;
+      }).finally(function () { if (chatNavigation.ensure === request) chatNavigation.ensure = null; });
+      return request.promise;
     }
 
     // The composer's "Do it" control. A pressed button is a clearer instruction
@@ -6371,7 +6559,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     var pendingExecute = false;
     async function sendChatMessage(event, speechRequest) {
       if (speechRequest && !speechRequestCurrent(speechRequest)) return;
+      if (chatNavigation.pending) {
+        if (speechRequest) finishSpeechRequest(speechRequest, "Finish choosing a conversation, then speak again.");
+        return;
+      }
+      if (chatState.sessionId && !chatState.sessionVerified) {
+        if (speechRequest) finishSpeechRequest(speechRequest, "Wait for this conversation to restore, then speak again.");
+        showChatFailure("This conversation has not finished restoring. Retry after it loads, or choose History or New chat.");
+        return;
+      }
+      var selectionGeneration = chatNavigation.generation;
       const input = document.getElementById("chatInput");
+      if (!speechRequest && (input.disabled || chatNavigation.sendClaim)) return;
       const text = input.value.trim();
       if (!text) return;
       var pastedPaper = readThisBody(text);
@@ -6390,9 +6589,16 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         submitPaper({ filename: "", fileKind: "paste", text: pastedPaper }, speechRequest);
         return;
       }
-      try { await ensureChatSession(speechRequest); } catch (e) {
-        if (e && e.message === "signed_out") return;
+      var claim = !speechRequest ? {} : null;
+      if (claim) chatNavigation.sendClaim = claim;
+      var sessionId;
+      try { sessionId = await ensureChatSession(speechRequest); }
+      finally { if (claim && chatNavigation.sendClaim === claim) chatNavigation.sendClaim = null; }
+      if (!sessionId || selectionGeneration !== chatNavigation.generation || chatNavigation.pending) {
+        if (speechRequest && speechRequestCurrent(speechRequest)) finishSpeechRequest(speechRequest);
+        return;
       }
+      var conversation = chatContextSnapshot();
       if (speechRequest) {
         if (!speechRequestCurrent(speechRequest)) return;
         voice.speechRequest = null;
@@ -6541,6 +6747,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           metrics.turnMs = Math.round(performance.now() - sendStarted);
         }
 
+        if (!chatContextCurrent(conversation)) return;
         if (!data.ok) {
           setChatMascot("18-unimpressed");
           // FIX #5: show error and disable input if signed out
@@ -6595,7 +6802,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           setChatMascot("12-content");
           openDraftReview(data.reply || "");
           setDraftWarning(data.warning);
-          if (data.jobId) chatState.jobId = data.jobId;
+          if (data.jobId) {
+            chatState.jobId = data.jobId;
+            conversation = chatContextSnapshot();
+          }
           if (data.previousDraft) {
             chatState.previousDraft = data.previousDraft;
             var rpBtn = document.getElementById("restorePrevious");
@@ -6638,6 +6848,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (!metrics.spoken && voice.cutTurn !== myTurn && (voice.mic || voice.replies)) maybeSpeak(data);
 
       } catch (err) {
+        if (!chatContextCurrent(conversation)) return;
         setChatMascot("18-unimpressed");
         document.getElementById("chatError").textContent =
           err && err.name === "TimeoutError"
@@ -6649,7 +6860,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         // land here AFTER the next turn has already started. Only the newest
         // turn owns the shared state; a stale finally that cleared it re-armed
         // the mic over its own follow-up and re-enabled the composer mid-turn.
-        if (myTurn === voice.turnSeq) {
+        clearInterval(elapsedTimer);
+        if (myTurn === voice.turnSeq && chatContextCurrent(conversation)) {
           voice.sending = false;
           // A spoken turn ended without a reply: go back to listening.
           if (voice.mic && !voice.speaking) setTimeout(function () {
@@ -6760,8 +6972,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var file = fileInput && fileInput.files && fileInput.files[0];
       var pasted = (document.getElementById("paperPaste").value || "").trim();
       if (file) {
-        readDroppedFile(file).then(function (payload) { return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload); }).catch(function (e) {
-          if (note) note.textContent = e.message || "Couldn't read that file.";
+        var context = chatContextSnapshot();
+        readDroppedFile(file).then(function (payload) {
+          if (!chatContextCurrent(context)) return;
+          return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload);
+        }).catch(function (e) {
+          if (chatContextCurrent(context) && note) note.textContent = e.message || "Couldn't read that file.";
         });
         return;
       }
@@ -6790,8 +7006,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
         var note = document.getElementById("paperNote");
         if (!file) return;
-        readDroppedFile(file).then(function (payload) { return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload); }).catch(function (err) {
-          if (note) note.textContent = err.message || "Couldn't read that file.";
+        var context = chatContextSnapshot();
+        readDroppedFile(file).then(function (payload) {
+          if (!chatContextCurrent(context)) return;
+          return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload);
+        }).catch(function (err) {
+          if (chatContextCurrent(context) && note) note.textContent = err.message || "Couldn't read that file.";
         });
       });
     })();
@@ -6850,6 +7070,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       list.innerHTML = '<p class="sessions-error">' + msg + "</p>";
     }
     async function loadSessions() {
+      var historyRequest = ++chatNavigation.history;
+      var company = activeCompanyId() || null;
+      function current() { return historyRequest === chatNavigation.history && company === (activeCompanyId() || null); }
       const list = document.getElementById("sessionsList");
       list.innerHTML = '<p class="sessions-empty">Loading…</p>';
       try {
@@ -6858,9 +7081,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           sessionsCo ? SESSIONS_BASE + "?companyId=" + encodeURIComponent(sessionsCo) : SESSIONS_BASE,
           { credentials: "same-origin" },
         );
+        if (!current()) return;
         if (r.status === 401) { sessionsError("signed_out"); return; }
         if (!r.ok) { sessionsError("Couldn't load your sessions. Try again in a moment."); return; }
         const data = await r.json();
+        if (!current()) return;
         var sessions = data.sessions || [];
         if (sessionsCo) sessions = sessions.filter(function (s) { return s.companyId === sessionsCo; });
         if (!sessions.length) {
@@ -6889,38 +7114,40 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           list.appendChild(card);
         });
       } catch (e) {
-        sessionsError("Couldn't reach the server. Check your connection and try again.");
+        if (current()) sessionsError("Couldn't reach the server. Check your connection and try again.");
       }
     }
-    async function openSession(s) {
-      speechContextChanged();
-      try {
-        const r = await fetch("/api/buzzy/transcript?sessionId=" + encodeURIComponent(s.id), {
-          credentials: "same-origin",
-        });
-        if (r.status === 401) { sessionsError("signed_out"); return; }
-        if (!r.ok) { sessionsError("Couldn't open that session."); return; }
-        const data = await r.json();
-        const msgs = (data.messages || []).map(function (m) {
-          return { role: m.role, content: m.content };
-        });
-        speechContextChanged();
-        chatState.sessionId = s.id;
-        chatState.boundCompanyId = s.companyId || chatState.boundCompanyId;
-        chatState.messages = msgs;
-        // BZ-F004: restore structured Decisions from the server instead of
-        // blanking the box until the next turn.
-        chatState.slots = (data.slots && typeof data.slots === "object") ? data.slots : {};
-        setBackVisible(true);
-        resetDraftGate();
-        document.getElementById("chatError").classList.add("hidden");
-        setChatMascot(msgs.length >= 2 ? "12-content" : "17-attentive");
-        renderChatMessages();
-        renderSlotChecklist();
+    function openSession(session) {
+      if (!validChatSession(session)) return Promise.resolve(null);
+      var pending = chatNavigation.pending;
+      if (pending && pending.kind === "history" && pending.key === session.id && chatNavigationCurrent(pending)) return pending.promise;
+      var request = beginChatNavigation("history", session.id);
+      request.promise = fetch("/api/buzzy/transcript?sessionId=" + encodeURIComponent(session.id), {
+        credentials: "same-origin", signal: AbortSignal.timeout(8000),
+      }).then(function (r) {
+        if (!chatNavigationCurrent(request)) return null;
+        if (r.status === 401) { sessionsError("signed_out"); return null; }
+        if (!r.ok) throw new Error("open_session_failed");
+        return r.json();
+      }).then(function (data) {
+        if (!chatNavigationCurrent(request) || !data) return null;
+        // Use the authenticated session record, never a stale History card's
+        // job/company fields. Reload uses this same metadata contract.
+        if (!validChatSession(data.session) || data.session.id !== session.id || !Array.isArray(data.messages)) {
+          throw new Error("invalid_transcript");
+        }
+        var companyId = request.context.companyId;
+        if (companyId && (data.session.companyId || null) !== companyId) throw new Error("different_company");
+        var messages = data.messages.map(function (m) { return { role: m.role, content: m.content }; });
+        selectChatSession(data.session, messages, data.slots && typeof data.slots === "object" ? data.slots : {}, null);
         closeSessionsDrawer();
-      } catch (e) {
-        sessionsError("Couldn't open that session. Try again in a moment.");
-      }
+        showChatScreen();
+        return data.session;
+      }).catch(function () {
+        if (chatNavigationCurrent(request)) sessionsError("Couldn't open that session. Your current conversation is unchanged. Try again in a moment.");
+        return null;
+      }).finally(function () { finishChatNavigation(request); });
+      return request.promise;
     }
     function renameSession(s, card) {
       const current = s.title || "";
@@ -6963,52 +7190,46 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
     // Start a truly new chat: create a real session, then reset local state.
-    function startNewChat() {
-      speechContextChanged();
-      var coId = window.BZCompanies && BZCompanies.activeId && BZCompanies.activeId();
-      return fetch(SESSIONS_BASE, {
+    function startNewChat(options) {
+      var keepJob = !(options && options.keepJob === false);
+      var coId = activeCompanyId() || null;
+      var jobId = keepJob ? (chatState.jobId || null) : null;
+      var key = JSON.stringify([coId, jobId]);
+      var pending = chatNavigation.pending;
+      if (pending && pending.kind === "new" && pending.key === key && chatNavigationCurrent(pending)) return pending.promise;
+      var request = beginChatNavigation("new", key);
+      var jobContext = keepJob ? chatState.jobContext : null;
+      var expert = keepJob ? chatState.expert : null;
+      request.promise = fetch(SESSIONS_BASE, {
         method: "POST",
         credentials: "same-origin",
+        signal: AbortSignal.timeout(8000),
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jobId: chatState.jobId || undefined,
-          companyId: coId || undefined,
-        }),
+        body: JSON.stringify({ fresh: true, jobId: jobId || undefined, companyId: coId || undefined }),
       }).then(function (r) {
+        if (!chatNavigationCurrent(request)) return null;
         if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
+        if (!r.ok) throw new Error("new_session_failed");
         return r.json();
       }).then(function (data) {
-        const s = data.session;
-        speechContextChanged();
-        chatState = {
-          jobId: chatState.jobId, // keep job-scoped behavior when a job is present
-          sessionId: s ? s.id : null,
-          slots: {},
-          messages: [],
-          draftReady: false,
-          draftText: "",
-          draftVersion: 1,
-          approvedText: null,
-          outwardConfirmed: false,
-          moneyBlocks: false,
-          paper: null,
-          userId: chatState.userId,
-          _signedOut: chatState._signedOut,
-          jobContext: chatState.jobContext,
-          boundCompanyId: (s && s.companyId) || coId || null,
-          expert: chatState.expert,
-        };
-        document.getElementById("chatError").classList.add("hidden");
+        if (!chatNavigationCurrent(request)) return null;
+        var session = data && data.session;
+        if (!validChatSession(session) || (session.jobId || null) !== jobId || (coId && (session.companyId || null) !== coId)) {
+          throw new Error("invalid_session");
+        }
+        selectChatSession(session, [], {}, jobContext);
+        if (expert) chatState.expert = expert;
         closeSessionsDrawer();
         showChatScreen();
-        return s;
-      }).catch(function (e) {
-        if (e && e.message === "signed_out") return null;
-        document.getElementById("chatError").textContent =
-          "Couldn't start a new chat. Try again in a moment.";
-        document.getElementById("chatError").classList.remove("hidden");
+        document.getElementById("chatInput").focus();
+        return session;
+      }).catch(function (error) {
+        if (chatNavigationCurrent(request) && (!error || error.message !== "signed_out")) {
+          showChatFailure("Couldn't start a new chat. Your current conversation is unchanged. Try again in a moment.");
+        }
         return null;
-      });
+      }).finally(function () { finishChatNavigation(request); });
+      return request.promise;
     }
     document.getElementById("newChatBtn").onclick = () => { startNewChat(); };
     document.getElementById("sessionsToggle").onclick = () => { openSessionsDrawer(); };
@@ -7038,16 +7259,21 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (briefCo) briefCo.textContent = name ? "For " + name : "";
       if (line) line.textContent = co && co.oneLiner ? co.oneLiner : "";
       var id = co ? co.id : null;
-      if (chatState.boundCompanyId && id && chatState.boundCompanyId !== id) {
-        speechContextChanged();
+      if ((chatState.boundCompanyId && chatState.boundCompanyId !== id) ||
+          (chatNavigation.pending && chatNavigation.pending.context.companyId !== id) ||
+          (chatNavigation.ensure && chatNavigation.ensure.context.companyId !== id)) {
+        finishChatNavigation(beginChatNavigation("company", id));
         chatState.boundCompanyId = id;
         chatState.sessionId = null;
+        storeChatSession(null);
         chatState.jobId = null;
         chatState.jobContext = null;
+        chatState.paper = null;
+        renderPaper(null);
         chatState.slots = {};
         chatState.messages = [{
           role: "assistant",
-          content: "This chat is for " + co.name + ". Describe the job — what needs to be done.",
+          content: co ? "This chat is for " + co.name + ". Describe the job — what needs to be done." : welcomeMessage(),
         }];
         resetDraftGate();
         if (document.getElementById("chatMessages")) {
@@ -7056,6 +7282,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         }
       } else if (!chatState.boundCompanyId) {
         chatState.boundCompanyId = id;
+        // Companies may hydrate after Talk's initial transcript request. Retry
+        // the selected session under that now-known scope instead of leaving
+        // the stale request's empty view on screen.
+        if (id && chatState.sessionId && !chatState.messages.length) restoreTranscript();
       }
       // Load after a switch clears the previous job, so the other company's paper cannot follow.
       loadCompanyPaper(id);

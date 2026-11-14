@@ -472,6 +472,15 @@ export default defineEventHandler(async (event) => {
       return { messages: [] };
     }
     const sql = await getSql();
+    const sessionRows = sessionId ? await sql<{ id: string; job_id: string | null; company_id: string | null }>`
+      SELECT id, job_id, company_id FROM buzzy_sessions
+      WHERE id = ${sessionId} AND user_id = ${user.id} LIMIT 1
+    ` : [];
+    if (sessionId && !sessionRows.length) {
+      setResponseStatus(event, 404);
+      return { error: "Session not found", code: "not_found" };
+    }
+    const session = sessionRows[0];
     const rows = sessionId
       ? await sql`
           SELECT role, content, created_at FROM buzzy_chat_messages
@@ -487,14 +496,8 @@ export default defineEventHandler(async (event) => {
     // Decisions (buzzy_user_memory) alongside the messages, so reopening a
     // job/session re-fills the Decisions box instead of showing it empty
     // until the next chat turn.
-    let resolvedJobId = jobId;
-    if (!resolvedJobId && sessionId) {
-      const sj = await sql<{ job_id: string | null }>`
-        SELECT job_id FROM buzzy_sessions
-        WHERE id = ${sessionId} AND user_id = ${user.id} LIMIT 1
-      `;
-      resolvedJobId = sj[0]?.job_id ?? null;
-    }
+    // Explicit session identity wins over a simultaneous legacy job filter.
+    const resolvedJobId = sessionId ? (session?.job_id ?? null) : jobId;
     const slots: Record<string, string> = {};
     if (resolvedJobId) {
       const slotRows = await sql<{ key: string; value: string }>`
@@ -509,6 +512,7 @@ export default defineEventHandler(async (event) => {
       }
     }
     return {
+      ...(session ? { session: { id: session.id, jobId: session.job_id, companyId: session.company_id } } : {}),
       messages: rows.map((r) => ({
         jobId: ("job_id" in r && typeof r.job_id === "string") ? r.job_id : null,
         role: r.role,
@@ -4602,14 +4606,41 @@ export default defineEventHandler(async (event) => {
     }
     const id = `sess_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
     const sql = await getSql();
+    // A requested job is an explicit conversation scope, not a hint to attach
+    // to whichever company-wide session happened to be touched most recently.
+    if (jobId) {
+      const jobs = await sql<{ company_id: string | null }>`
+        SELECT company_id FROM buzzy_jobs WHERE id = ${jobId} AND user_id = ${user.id} LIMIT 1
+      `;
+      if (!jobs.length) {
+        setResponseStatus(event, 404);
+        return { error: "Job not found", code: "not_found" };
+      }
+      const jobCompany = jobs[0]!.company_id ?? null;
+      if (jobCompany && companyId && companyId !== jobCompany) {
+        setResponseStatus(event, 400);
+        return { error: "Choose this job's company before opening its conversation.", code: "bad_company" };
+      }
+      // Older Talk-created jobs have no company_id even when their sessions
+      // do. Retain an explicitly requested, separately owner-checked company
+      // for those legacy jobs without rewriting or reassigning the job.
+      companyId = jobCompany || companyId;
+    }
     // Resume, don't multiply. Every POST used to mint a new session, and a new
     // session mints its own job: one lullaby request left 56 identical work items
     // in the list. An open thread for this account (same company scope, touched in
     // the last 12 hours) IS the thread the next turn belongs to. `fresh: true`
     // is the explicit opt-out, which is what the New chat button sends.
     if (body.fresh !== true) {
-      const recent = companyId
+      const recent = jobId
         ? await sql<{ id: string; job_id: string | null; title: string; company_id: string | null }>`
+            SELECT id, job_id, title, company_id FROM buzzy_sessions
+            WHERE user_id = ${user.id} AND job_id = ${jobId}
+              AND company_id IS NOT DISTINCT FROM ${companyId}
+              AND updated_at > now() - interval '12 hours'
+            ORDER BY updated_at DESC LIMIT 1
+          `
+        : companyId ? await sql<{ id: string; job_id: string | null; title: string; company_id: string | null }>`
             SELECT id, job_id, title, company_id FROM buzzy_sessions
             WHERE user_id = ${user.id} AND company_id = ${companyId}
               AND updated_at > now() - interval '12 hours'
