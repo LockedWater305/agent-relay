@@ -5422,6 +5422,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           });
         }
         return pump();
+      }).finally(function () {
+        // Errors can bypass the EOF path. Remove this stream's own partial
+        // bubble, never a later turn's in-progress UI.
+        if (liveBubble && liveBubble.parentNode) liveBubble.parentNode.removeChild(liveBubble);
       });
     }
 
@@ -5502,6 +5506,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           });
         }
         return pump();
+      }).finally(function () {
+        // Errors can bypass the EOF path. Remove this stream's own partial
+        // bubble, never a later turn's in-progress UI.
+        if (liveBubble && liveBubble.parentNode) liveBubble.parentNode.removeChild(liveBubble);
       });
     }
 
@@ -6872,6 +6880,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         // turn owns the shared state; a stale finally that cleared it re-armed
         // the mic over its own follow-up and re-enabled the composer mid-turn.
         clearInterval(elapsedTimer);
+        // A rejected request/JSON body never re-renders the transcript. The
+        // captured node belongs to this turn even after a newer turn starts.
+        if (thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
         if (chatNavigation.turn === turn) chatNavigation.turn = null;
         if (myTurn === voice.turnSeq && chatContextCurrent(conversation)) {
           voice.sending = false;

@@ -830,3 +830,219 @@ for (const outcome of ["Stop", "error", "empty"]) {
     h.requests[2].resolve(response({ ok: true, reply: "retry reply" })); await retry;
   });
 }
+
+// Real sender, renderer and stream functions against a small connected DOM.
+// Unlike the general speech fixture, innerHTML detaches old children and an
+// absent spinner ID really returns null. This reproduces the native error UI.
+function thinkingHarness({ lane = "buffered" } = {}) {
+  const h = authHarness();
+  const all = [], intervals = new Map(); let nextInterval = 1;
+  function domElement() {
+    const el = element(); el.children = []; el.parentNode = null;
+    el.removeChild = child => {
+      const i = el.children.indexOf(child);
+      if (i < 0) throw new Error("not a child");
+      el.children.splice(i, 1); child.parentNode = null; return child;
+    };
+    el.remove = () => { if (el.parentNode) el.parentNode.removeChild(el); };
+    el.appendChild = child => {
+      child.remove(); el.children.push(child); child.parentNode = el; return child;
+    };
+    el.insertBefore = (child, next) => {
+      child.remove(); const i = next ? el.children.indexOf(next) : el.children.length;
+      assert.ok(i >= 0); el.children.splice(i, 0, child); child.parentNode = el; return child;
+    };
+    Object.defineProperty(el, "firstChild", { get: () => el.children[0] || null });
+    let html = "";
+    Object.defineProperty(el, "innerHTML", {
+      get: () => html,
+      set(value) {
+        for (const child of [...el.children]) el.removeChild(child);
+        html = value;
+        // Only the four fixed indicator IDs need child-node lookup here.
+        for (const match of String(value).matchAll(/id="([^"]+)"/g)) {
+          const child = domElement(); child.id = match[1]; el.appendChild(child);
+        }
+      },
+    });
+    el.querySelectorAll = () => [];
+    all.push(el); return el;
+  }
+  const container = domElement(); container.id = "chatMessages";
+  function connected(el) { return el === container || !!el.parentNode && connected(el.parentNode); }
+  const busyIds = new Set(["thinkingIndicator", "thinkingElapsed", "bzStageLabel", "bzStageBar"]);
+  const thinking = () => all.filter(el => el.id === "thinkingIndicator" && connected(el));
+  const streaming = () => all.filter(el => /(?:^|\s)streaming(?:\s|$)/.test(el.className || "") && connected(el));
+  h.c.document.createElement = domElement;
+  h.c.document.getElementById = id => id === "chatMessages" ? container : busyIds.has(id)
+    ? all.find(el => el.id === id && connected(el)) || null : h.node(id);
+  h.c.document.querySelectorAll = selector => {
+    assert.equal(selector, "#thinkingIndicator, #chatMessages .streaming");
+    return [...thinking(), ...streaming()];
+  };
+  h.c.setInterval = callback => { const id = nextInterval++; intervals.set(id, callback); return id; };
+  h.c.clearInterval = id => intervals.delete(id);
+  h.c.shouldOfferWork = () => false;
+  runInNewContext(fn("renderChatMessages"), h.c);
+  if (lane !== "buffered") h.c.ReadableStream = function () {};
+  h.c.voice.mic = lane === "voice";
+  return { ...h, container, thinking, streaming, intervals };
+}
+async function startThinking(h, text = "synthetic question") {
+  h.node("chatInput").value = text;
+  const sending = h.c.sendChatMessage(); await settle();
+  assert.equal(h.requests.at(-1).url, "/chat");
+  assert.equal(h.thinking().length, 1, "live turn has a real attached indicator");
+  assert.equal(h.node("chatSend").disabled, true);
+  return { sending, request: h.requests.at(-1), indicator: h.thinking()[0] };
+}
+function assertTurnSettled(h) {
+  assert.equal(h.thinking().length, 0, "finished turn leaves no thinking indicator");
+  assert.equal(h.streaming().length, 0, "finished turn leaves no in-progress partial bubble");
+  assert.equal(h.intervals.size, 0, "elapsed clock has stopped");
+  assert.ok(!h.c.chatNavigation.turn);
+  assert.equal(h.node("chatInput").disabled, false);
+  assert.equal(h.node("chatSend").disabled, false);
+}
+function streamFixture(request) {
+  const reads = []; let cancelled = 0;
+  request.resolve({ ok: true, headers: new Headers({ "content-type": "text/event-stream" }), body: {
+    getReader: () => ({ read: () => { const next = deferred(); reads.push(next); return next.promise; },
+      cancel: async () => { cancelled++; } }),
+  } });
+  return { reads, get cancelled() { return cancelled; },
+    frame(event, data) { reads.at(-1).resolve({ done: false, value: new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`) }); },
+  };
+}
+for (const outcome of ["JSON parse", "transport", "timeout", "abort"]) {
+  test(`thinking cleanup: buffered ${outcome} releases its indicator and permits retry`, async () => {
+    const h = thinkingHarness(); const first = await startThinking(h);
+    if (outcome === "JSON parse") {
+      first.request.resolve({ ok: true, status: 200, json: async () => { throw new SyntaxError("synthetic bad JSON"); } });
+    } else {
+      const error = new Error("synthetic failed request");
+      error.name = outcome === "timeout" ? "TimeoutError" : outcome === "abort" ? "AbortError" : "TypeError";
+      first.request.reject(error); await settle();
+      assert.equal(h.requests.length, 2, "buffered transport retry remains bounded");
+      assert.equal(h.requests[1].init.body, h.requests[0].init.body, "retry keeps the same attempt ID");
+      h.requests[1].reject(error);
+    }
+    await first.sending;
+    assert.match(h.node("chatError").textContent, outcome === "timeout" ? /too long/ : /Couldn't reach/);
+    assertTurnSettled(h);
+    const retry = await startThinking(h, "retry after error");
+    retry.request.resolve(response({ ok: true, reply: "synthetic retry reply" })); await retry.sending;
+    assertTurnSettled(h);
+  });
+}
+for (const lane of ["text", "voice"]) {
+  for (const outcome of ["SSE error", "reader rejection", "reader abort", "missing final reply"]) {
+    test(`thinking cleanup: ${lane} ${outcome} removes spinner and its partial stream`, async () => {
+      const h = thinkingHarness({ lane }); const first = await startThinking(h);
+      const stream = streamFixture(first.request); await settle();
+      stream.frame("text", { t: "partial synthetic text" }); await settle();
+      assert.equal(h.streaming().length, 1, "actual stream function paints its partial bubble");
+      if (outcome === "SSE error") stream.frame("error", { error: "synthetic stream error" });
+      else if (outcome === "missing final reply") stream.reads.at(-1).resolve({ done: true });
+      else {
+        const error = new Error("synthetic reader failure");
+        if (outcome === "reader abort") error.name = "AbortError";
+        stream.reads.at(-1).reject(error);
+      }
+      await first.sending;
+      assert.match(h.node("chatError").textContent, /Couldn't reach/);
+      assert.equal(h.streaming().length, 0, "failed stream removes its unfinished partial bubble");
+      assertTurnSettled(h);
+    });
+  }
+  test(`thinking cleanup: successful ${lane} stream remains rendered as a completed reply`, async () => {
+    const h = thinkingHarness({ lane }); const first = await startThinking(h);
+    const stream = streamFixture(first.request); await settle();
+    stream.frame("text", { t: "partial text" }); await settle();
+    stream.frame("done", { ok: true, reply: "complete reply" }); await settle();
+    stream.reads.at(-1).resolve({ done: true }); await first.sending;
+    assertTurnSettled(h);
+    assert.match(h.container.innerHTML, /complete reply/);
+  });
+  for (const outcome of ["late chunk", "late rejection"]) {
+    test(`thinking cleanup: ${lane} selection cancellation and ${outcome} cannot remove a newer spinner`, async () => {
+      const h = thinkingHarness({ lane }); const first = await startThinking(h);
+      const stream = streamFixture(first.request); await settle();
+      stream.frame("text", { t: "old partial" }); await settle();
+      const selecting = h.c.startNewChat();
+      assert.equal(h.thinking().length, 0, "selection removes old busy UI at intent");
+      assert.equal(h.streaming().length, 0);
+      h.requests.at(-1).resolve(response({ error: "synthetic selection failed" }, false)); await selecting;
+      const next = await startThinking(h, "new question");
+      if (outcome === "late chunk") stream.frame("text", { t: "old late text" });
+      else stream.reads.at(-1).reject(new Error("old delayed failure"));
+      await first.sending;
+      assert.deepEqual(h.thinking(), [next.indicator], "older cleanup touches only its captured node");
+      assert.equal(h.node("chatSend").disabled, true);
+      assert.equal(h.intervals.size, 1, "new elapsed clock remains live");
+      if (outcome === "late chunk") assert.equal(stream.cancelled, 1);
+      const current = streamFixture(next.request); await settle();
+      current.frame("done", { ok: true, reply: "current reply" }); await settle();
+      current.reads.at(-1).resolve({ done: true }); await next.sending;
+      assertTurnSettled(h);
+    });
+  }
+}
+for (const outcome of ["JSON parse", "transport"]) {
+  test(`thinking cleanup: interrupted older ${outcome} cannot remove the newer speech turn's spinner`, async () => {
+    const h = thinkingHarness(); const first = await startThinking(h);
+    h.c.voice.mic = true;
+    const speech = h.start(); speech.resolve(response({ ok: true, text: "spoken follow up" })); await settle();
+    assert.equal(h.requests.at(-1).url, "/chat");
+    const next = { request: h.requests.at(-1), indicator: h.thinking()[0] };
+    assert.notEqual(next.indicator, first.indicator, "real render detaches the previous indicator");
+    if (outcome === "JSON parse") first.request.resolve({ json: async () => { throw new SyntaxError("old invalid JSON"); } });
+    else {
+      first.request.reject(new Error("old transport")); await settle();
+      h.requests.at(-1).reject(new Error("old retry transport"));
+    }
+    await first.sending;
+    assert.deepEqual(h.thinking(), [next.indicator]);
+    assert.equal(h.node("chatSend").disabled, true);
+    assert.equal(h.intervals.size, 1);
+    next.request.resolve(response({ ok: true, reply: "new speech reply" })); await settle();
+    assertTurnSettled(h);
+  });
+}
+for (const outcome of ["SSE error", "reader rejection"]) {
+  test(`thinking cleanup: interrupted older ${outcome} preserves the newer stream's partial bubble and spinner`, async () => {
+    const h = thinkingHarness({ lane: "text" }); const first = await startThinking(h);
+    const oldStream = streamFixture(first.request); await settle();
+    oldStream.frame("text", { t: "old partial" }); await settle();
+    h.c.voice.mic = true;
+    const speech = h.start(); speech.resolve(response({ ok: true, text: "spoken follow up" })); await settle();
+    const currentIndicator = h.thinking()[0];
+    assert.notEqual(currentIndicator, first.indicator);
+    const currentStream = streamFixture(h.requests.at(-1)); await settle();
+    currentStream.frame("text", { t: "new partial" }); await settle();
+    const currentBubble = h.streaming()[0];
+    assert.equal(h.streaming().length, 1);
+    if (outcome === "SSE error") oldStream.frame("error", { error: "old failed stream" });
+    else oldStream.reads.at(-1).reject(new Error("old failed reader"));
+    await first.sending;
+    assert.deepEqual(h.thinking(), [currentIndicator]);
+    assert.deepEqual(h.streaming(), [currentBubble]);
+    assert.equal(h.node("chatSend").disabled, true);
+    assert.equal(h.intervals.size, 1);
+    currentStream.frame("done", { ok: true, reply: "current speech reply" }); await settle();
+    currentStream.reads.at(-1).resolve({ done: true }); await settle();
+    assertTurnSettled(h);
+  });
+}
+test("thinking cleanup: voice Stop keeps an accepted turn pending until its stream ends", async () => {
+  const h = thinkingHarness({ lane: "voice" }); const first = await startThinking(h);
+  const stream = streamFixture(first.request); await settle();
+  stream.frame("text", { t: "pending reply" }); await settle();
+  h.stop();
+  assert.equal(h.c.voice.mic, false);
+  assert.deepEqual(h.thinking(), [first.indicator], "Stop ends Listen, not an accepted chat request");
+  assert.equal(h.node("chatSend").disabled, true);
+  stream.reads.at(-1).reject(Object.assign(new Error("stream aborted"), { name: "AbortError" }));
+  await first.sending;
+  assertTurnSettled(h);
+});
