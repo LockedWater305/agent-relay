@@ -1,10 +1,11 @@
 /** Desktop trust boundaries. Pure functions keep the policy testable without Electron. */
 import { randomUUID } from "node:crypto";
-const UI_PAGES = new Set([
+export const UI_PAGE_NAMES = Object.freeze([
   "index", "talk", "memory", "remember", "experts", "library", "profile", "landing",
   "login", "recipes", "wallet", "upload", "graph", "settings", "capabilities",
   "project", "sketch", "studio",
 ]);
+const UI_PAGES = new Set(UI_PAGE_NAMES);
 
 export function webUrl(value) {
   if (typeof value !== "string" || value.length > 8192 || /[\u0000-\u0020\u007f\\]/.test(value)) return null;

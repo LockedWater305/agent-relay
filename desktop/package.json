@@ -30,7 +30,8 @@
       "connect.mjs",
       "paths.mjs",
       "logger.mjs",
-      "security.mjs"
+      "security.mjs",
+      "csp.mjs"
     ],
     "extraResources": [
       {

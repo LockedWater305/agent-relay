@@ -18,6 +18,7 @@ import { RuntimeSupervisor } from "./supervisor.mjs";
 import { ROOT, runtimeLib } from "./paths.mjs";
 import { installLogging, logLine, logPaths } from "./logger.mjs";
 import { connectAccount, cloudBaseUrl } from "./connect.mjs";
+import { createDesktopCsp, loadCspManifest } from "./csp.mjs";
 import {
   allowAudioPermission, connectBaseUrl, createRuntimeAuth, isAppDownload, isAppPage,
   isConnectNavigation, isTrustedSender, retargetAppPage, safeExternalUrl, sameOrigin,
@@ -760,18 +761,37 @@ function installMediaPermissions() {
 app.whenReady().then(async () => {
   installMenu();
   installMediaPermissions();
-  // A single listener uses the current endpoint/token after each restart. The
-  // cloud sign-in window has a different session and never receives this hook.
-  session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ["<all_urls>"] }, (details, callback) => {
-    try {
-      if (!supervisor.runtime) runtimeAuth.clear();
-      callback(runtimeAuth.headers(details));
-    } catch {
-      callback({ cancel: true });
-    }
-  });
-
   try {
+    // A stale/missing build manifest must stop startup, never silently remove
+    // the policy. This hook is exclusive to local application main frames;
+    // cloud sign-in lives in a separate session and hosted HTTP is unchanged.
+    const desktopCsp = createDesktopCsp({
+      manifest: loadCspManifest(ROOT),
+      getRuntime: () => supervisor.runtime,
+      getContents: trustedContents,
+    });
+    // Bind CSP to the same actual request authorization, before the runtime
+    // can stop/restart while a main-document response is still in flight.
+    // The cloud sign-in window has a different session and never uses this.
+    session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ["<all_urls>"] }, (details, callback) => {
+      try {
+        if (!supervisor.runtime) runtimeAuth.clear();
+        callback(desktopCsp.authorizeRequest(details, runtimeAuth.headers(details)));
+      } catch {
+        callback({ cancel: true });
+      }
+    });
+    session.defaultSession.webRequest.onHeadersReceived({ urls: ["http://127.0.0.1:*/*"] }, (details, callback) => {
+      try { callback(desktopCsp.headers(details)); }
+      catch (err) {
+        console.error("[desktop] could not enforce the script policy:", err.message);
+        callback({ cancel: true });
+      }
+    });
+    // Include redirected/error endpoints for cleanup; these listeners only
+    // discard request records and never modify responses or grant authority.
+    session.defaultSession.webRequest.onCompleted((details) => desktopCsp.finished(details));
+    session.defaultSession.webRequest.onErrorOccurred((details) => desktopCsp.finished(details));
     applyIdentityToEnv();
     await applyStoredInferenceToEnv();
     await applyStoredMusicToEnv();

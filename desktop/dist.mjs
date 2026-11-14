@@ -22,6 +22,7 @@ import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeCspManifest } from "../scripts/build-desktop-csp.mjs";
 
 const DESKTOP = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(DESKTOP, "..");
@@ -35,7 +36,7 @@ function run(cmd, args, opts = {}) {
   execFileSync(cmd, args, { cwd: ROOT, stdio: "inherit", ...opts });
 }
 
-function stage() {
+async function stage() {
   rmSync(STAGE, { recursive: true, force: true });
   mkdirSync(APP, { recursive: true });
 
@@ -45,6 +46,9 @@ function stage() {
   // publisher keys while the shipped publishers.json had one.
   log("building the runtime (vite build)…");
   run("npx", ["vite", "build"], { env: { ...process.env, NODE_ENV: "production" } });
+  // dist uses Vite directly, so npm's postbuild hook does not run here.
+  // Generate from the exact trees that will be copied, before staging anything.
+  await writeCspManifest(ROOT);
 
   // `migrations/` is not optional: the schema comes from those .sql files at
   // boot. A stage without them starts, listens, and fails every DB route with
@@ -378,7 +382,7 @@ function unpackedResources() {
 
 const mode = process.argv[2] ?? "stage";
 if (mode === "dir") localTestBanner();
-if (mode === "stage" || mode === "all" || mode === "dir") stage();
+if (mode === "stage" || mode === "all" || mode === "dir") await stage();
 if (mode === "all") {
   log("running electron-builder…");
   execFileSync("npx", ["electron-builder", "--win", "nsis", "--publish", "never"], {
