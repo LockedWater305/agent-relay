@@ -108,6 +108,7 @@
         <button id="savePlan">Save brief</button>
         <button class="primary" id="renderBtn">Create track</button>
       </div>
+      <p class="muted" id="draftStatus" role="status"></p>
     </section>
 
     <section class="card">
@@ -144,15 +145,105 @@
     var selection = null; // {fromMs,toMs}
     var audioCtx = null;
 
-    var $ = function (id) { return document.getElementById(id); };
+    // The shell can mount another Studio while this page's requests are pending.
+    // Capture this page's controls once, never resolve a late response by global ID.
+    var controls = {};
+    Array.prototype.forEach.call((document.getElementById("bzPage") || document).querySelectorAll("[id]"), function (el) {
+      controls[el.id] = el;
+    });
+    var $ = function (id) { return controls[id]; };
     var player = $("player");
     var wave = $("wave");
     var statusEl = $("status");
+    var pageHidden = false;
+    var formFields = ["prompt", "lyrics", "tempo", "key", "seconds"];
+    var planFields = formFields.concat(["instruments"]);
+    var draftInstruments = [];
+    var confirmedForm = null;
+    var pendingWrite = null;
+    var writeEpoch = 0;
+    var refreshing = false;
+    var loading = false;
+
+    function currentPage() {
+      return !pageHidden && $("prompt").isConnected && document.getElementById("prompt") === $("prompt") &&
+        /^\/buzzy\/studio(?:\.html)?\/?$/.test(location.pathname) &&
+        new URLSearchParams(location.search).get("job") === jobId;
+    }
+    window.addEventListener("pagehide", function () { pageHidden = true; });
+    function resumeLoad() {
+      // Back can retain this DOM after the shell temporarily changed the URL.
+      // Retry only its initial read; never replay cold-project creation POSTs.
+      if (jobId && !state && currentPage()) load();
+    }
+    window.addEventListener("pageshow", function () { pageHidden = false; resumeLoad(); });
+    window.addEventListener("popstate", resumeLoad);
 
     function setStatus(text, kind) {
+      if (!currentPage()) return;
       statusEl.textContent = text || "";
       statusEl.className = "status" + (kind ? " " + kind : "");
     }
+
+    function formOf(plan) {
+      return {
+        prompt: plan.prompt || "", lyrics: plan.lyrics || "", tempo: plan.tempo || "", key: plan.key || "",
+        seconds: String(plan.seconds || 30), instruments: (plan.instruments || []).slice(),
+      };
+    }
+    function captureForm() {
+      var form = { instruments: draftInstruments.slice() };
+      formFields.forEach(function (field) { form[field] = $(field).value; });
+      return form;
+    }
+    function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+    function hasDraft() {
+      var form = captureForm();
+      return confirmedForm && planFields.some(function (field) { return !same(form[field], confirmedForm[field]); });
+    }
+    function paintDraft() { $("draftStatus").textContent = hasDraft() ? "Unsaved plan changes." : ""; }
+    function validPlan(plan) {
+      return plan && typeof plan === "object" && !Array.isArray(plan) &&
+        typeof plan.prompt === "string" && typeof plan.lyrics === "string" &&
+        (plan.tempo === undefined || typeof plan.tempo === "string") &&
+        (plan.key === undefined || typeof plan.key === "string") &&
+        Array.isArray(plan.instruments) && plan.instruments.every(function (v) { return typeof v === "string"; }) &&
+        typeof plan.seconds === "number" && Number.isFinite(plan.seconds);
+    }
+    function adoptPlan(plan, submitted) {
+      var before = captureForm(), next = formOf(plan);
+      planFields.forEach(function (field) {
+        // A save acknowledges its submitted snapshot, not edits typed afterward.
+        // A poll (or an omitted partial-save field) may replace only clean fields.
+        var reference = submitted && Object.prototype.hasOwnProperty.call(submitted, field)
+          ? submitted[field] : confirmedForm && confirmedForm[field];
+        if (!confirmedForm || same(before[field], reference)) {
+          if (field === "instruments") draftInstruments = next.instruments.slice();
+          else $(field).value = next[field];
+        }
+      });
+      confirmedForm = next;
+      renderInstruments();
+      paintDraft();
+    }
+    function metadataOf(value) {
+      return JSON.stringify(value && [value.title, value.musicConfigured, value.asset, value.versions, value.edits]);
+    }
+    function adoptState(next, submitted) {
+      if (!next || next.jobId !== jobId || !validPlan(next.plan)) throw new Error("Invalid track response.");
+      var changed = metadataOf(state) !== metadataOf(next);
+      state = next;
+      adoptPlan(next.plan, submitted);
+      if (changed) renderRows();
+      enableControls();
+    }
+    function enableControls() {
+      formFields.concat(["instInput"]).forEach(function (id) { $(id).disabled = !state; });
+      ["savePlan", "saveLyrics", "renderBtn"].forEach(function (id) { $(id).disabled = !state || !!pendingWrite; });
+      $("editBtn").disabled = !state || !!pendingWrite || !selection;
+    }
+    formFields.forEach(function (id) { $(id).addEventListener("input", paintDraft); });
+    enableControls();
 
     function fmt(ms) {
       if (ms == null) return "";
@@ -256,7 +347,7 @@
       $("selLabel").textContent = selection
         ? "Selected " + fmt(selection.fromMs) + " – " + fmt(selection.toMs) + " (" + ((selection.toMs - selection.fromMs) / 1000).toFixed(1) + "s)"
         : "Selection too short — drag a longer passage.";
-      $("editBtn").disabled = !selection;
+      $("editBtn").disabled = !selection || !!pendingWrite;
       $("playSel").disabled = !selection;
       drawWave(peaksCache);
     });
@@ -283,17 +374,8 @@
     window.addEventListener("resize", function () { drawWave(peaksCache); });
 
     // ── render ──────────────────────────────────────────────────────────
-    function renderRows() {
-      if (!state) return;
-      $("title").textContent = state.title || "Studio";
-      $("prompt").value = state.plan.prompt || "";
-      $("lyrics").value = state.plan.lyrics || "";
-      $("tempo").value = state.plan.tempo || "";
-      $("key").value = state.plan.key || "";
-      $("seconds").value = state.plan.seconds || 30;
-      $("planLine").textContent = state.musicConfigured === false ? "music provider not configured" : "";
-
-      var inst = state.plan.instruments || [];
+    function renderInstruments() {
+      var inst = draftInstruments;
       var list = $("instList");
       list.innerHTML = "";
       inst.forEach(function (name) {
@@ -304,12 +386,20 @@
         x.textContent = "×";
         x.title = "Remove";
         x.addEventListener("click", function () {
-          state.plan.instruments = inst.filter(function (n) { return n !== name; });
-          renderRows();
+          if (!currentPage() || !state) return;
+          draftInstruments = draftInstruments.filter(function (n) { return n !== name; });
+          renderInstruments();
+          paintDraft();
         });
         chip.appendChild(x);
         list.appendChild(chip);
       });
+    }
+
+    function renderRows() {
+      if (!state) return;
+      $("title").textContent = state.title || "Studio";
+      $("planLine").textContent = state.musicConfigured === false ? "music provider not configured" : "";
 
       var versions = $("versions");
       versions.innerHTML = "";
@@ -367,6 +457,7 @@
     }
 
     function load() {
+      if (!currentPage() || state || loading) return;
       if (!jobId) {
         // A studio opened cold still needs a project, or the first render has nowhere
         // to land. Create one, then reload with ?job= so the URL is shareable.
@@ -376,6 +467,7 @@
           method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" },
           body: JSON.stringify({ id: id, title: "Untitled track", status: "In progress", data: {} }),
         }).then(function (r) {
+          if (!currentPage()) return;
           if (!r.ok) throw new Error("could not create the project");
           // Soft hop: same URL, loaded into the shell, so a live mic in the
           // stashed Talk document survives. location.replace would be a full
@@ -384,15 +476,17 @@
         }).catch(function (e) { setStatus("Could not start a track: " + e.message, "bad"); });
         return;
       }
+      loading = true;
       api("GET").then(function (res) {
+        if (!currentPage()) return;
         if (!res.ok) { setStatus(res.body.error || "Could not load this track.", "bad"); return; }
-        state = res.body;
-        renderRows();
+        adoptState(res.body);
         if (window.BeeZillaChat) mountAI();
         else { var s2 = document.createElement("script"); s2.src = "/buzzy/chat.js"; s2.onload = mountAI; document.head.appendChild(s2); }
         if (state.asset) setStatus("Loaded " + (state.versions || []).length + " version(s).", "good");
         else setStatus("No track yet — fill in the brief and press Create track.");
-      });
+      }).catch(function () { setStatus("Could not load this track. Reload to try again.", "bad"); })
+        .then(function () { loading = false; });
     }
 
     function planFromForm() {
@@ -402,97 +496,133 @@
         tempo: $("tempo").value.trim() || undefined,
         key: $("key").value.trim() || undefined,
         seconds: Number($("seconds").value || 30),
-        instruments: (state && state.plan.instruments) || [],
+        instruments: draftInstruments.slice(),
       };
     }
 
     $("instInput").addEventListener("keydown", function (e) {
       if (e.key !== "Enter") return;
       e.preventDefault();
+      if (!currentPage() || !state) return;
       var v = e.target.value.trim();
       if (!v) return;
-      if (!state) state = { plan: { instruments: [] } };
-      state.plan.instruments = (state.plan.instruments || []).concat([v]);
+      draftInstruments = draftInstruments.concat([v]);
       e.target.value = "";
-      renderRows();
+      renderInstruments();
+      paintDraft();
     });
 
-    function busy(btn, label) {
-      btn.disabled = true;
-      var old = btn.textContent;
+    function beginWrite(btn, label) {
+      if (!currentPage() || !state || pendingWrite) return null;
+      var ticket = { button: btn, label: btn.textContent, form: captureForm() };
+      pendingWrite = ticket;
+      writeEpoch++; // A GET begun before this write must not roll its result back.
       btn.textContent = label;
-      return function () { btn.disabled = false; btn.textContent = old; };
+      enableControls();
+      return ticket;
+    }
+    function ownsWrite(ticket) { return pendingWrite === ticket && currentPage(); }
+    function endWrite(ticket) {
+      if (pendingWrite !== ticket) return;
+      pendingWrite = null;
+      // Release only the captured controls, even if a pending shell navigation
+      // temporarily changed the URL and Back returns to this still-mounted page.
+      ticket.button.textContent = ticket.label;
+      enableControls();
+      paintDraft();
+    }
+    function saveDraft(btn, lyricsOnly) {
+      var ticket = beginWrite(btn, "Saving…");
+      if (!ticket) return;
+      var submitted = lyricsOnly ? { lyrics: ticket.form.lyrics } : ticket.form;
+      var plan = lyricsOnly ? { lyrics: ticket.form.lyrics } : planFromForm();
+      api("POST", { action: "save", jobId: jobId, plan: plan }).then(function (r) {
+        if (!ownsWrite(ticket)) return;
+        if (!r.ok || r.body.ok !== true || !validPlan(r.body.plan)) {
+          setStatus((r.body.error || "Save was not confirmed.") + " Your edits are kept; try saving again.", "bad");
+          return;
+        }
+        state.plan = r.body.plan;
+        adoptPlan(r.body.plan, submitted);
+        setStatus((lyricsOnly ? "Lyrics saved." : "Brief saved.") +
+          (hasDraft() ? " Other or newer plan changes are not saved yet." : ""), "good");
+      }).catch(function () {
+        if (ownsWrite(ticket)) setStatus("Save was not confirmed. Your edits are kept; try saving again.", "bad");
+      }).then(function () { endWrite(ticket); });
     }
 
     $("savePlan").addEventListener("click", function () {
-      var done = busy(this, "Saving…");
-      api("POST", { action: "save", jobId: jobId, plan: planFromForm() }).then(function (r) {
-        done();
-        setStatus(r.ok ? "Brief saved." : (r.body.error || "Could not save."), r.ok ? "good" : "bad");
-      });
+      saveDraft(this, false);
     });
 
     $("saveLyrics").addEventListener("click", function () {
-      var done = busy(this, "Saving…");
-      api("POST", { action: "save", jobId: jobId, plan: { lyrics: $("lyrics").value } }).then(function (r) {
-        done();
-        setStatus(r.ok ? "Lyrics saved." : (r.body.error || "Could not save lyrics."), r.ok ? "good" : "bad");
-      });
+      saveDraft(this, true);
     });
 
     $("renderBtn").addEventListener("click", function () {
       var btn = this;
-      var done = busy(btn, "Composing…");
+      var ticket = beginWrite(btn, "Composing…");
+      if (!ticket) return;
       setStatus("Composing the track — this takes as long as the track is long…");
       api("POST", { action: "render", jobId: jobId, plan: planFromForm(), actor: "user" }).then(function (r) {
-        done();
+        if (!ownsWrite(ticket)) return;
         if (!r.ok) { setStatus(r.body.error || "Could not create the track.", "bad"); return; }
-        state = r.body.state;
-        renderRows();
+        adoptState(r.body.state, ticket.form);
         setStatus("Track created — " + Math.round((r.body.bytes || 0) / 1024) + " KB.", "good");
-      });
+      }).catch(function () {
+        if (ownsWrite(ticket)) setStatus("Track creation was not confirmed. Your plan edits are kept.", "bad");
+      }).then(function () { endWrite(ticket); });
     });
 
     $("editBtn").addEventListener("click", function () {
+      if (!currentPage() || !state || pendingWrite) return;
       var instruction = $("instruction").value.trim();
       if (!instruction) { setStatus("Say what should change in the selection.", "bad"); return; }
       if (!selection) { setStatus("Select a passage on the waveform first.", "bad"); return; }
       var btn = this;
-      var done = busy(btn, "Re-rendering…");
+      var ticket = beginWrite(btn, "Re-rendering…");
+      if (!ticket) return;
       setStatus("Applying \u201c" + instruction + "\u201d to " + fmt(selection.fromMs) + "–" + fmt(selection.toMs) + "…");
       api("POST", {
         action: "edit", jobId: jobId, plan: planFromForm(), actor: "user",
         instruction: instruction, fromMs: selection.fromMs, toMs: selection.toMs,
       }).then(function (r) {
-        done();
+        if (!ownsWrite(ticket)) return;
         if (!r.ok) { setStatus(r.body.error || "Could not change that passage.", "bad"); return; }
-        state = r.body.state;
-        renderRows();
+        adoptState(r.body.state, ticket.form);
         selection = null;
         $("editBtn").disabled = true;
         $("playSel").disabled = true;
         $("selLabel").textContent = "Drag on the waveform to select a passage.";
         setStatus("Changed " + fmt(r.body.state && r.body.state.edits && r.body.state.edits[0] ? r.body.state.edits[0].fromMs : null) + " — new version created.", "good");
-      });
+      }).catch(function () {
+        if (ownsWrite(ticket)) setStatus("The track change was not confirmed. Your plan edits are kept.", "bad");
+      }).then(function () { endWrite(ticket); });
     });
 
     var aiMounted = false;
     function mountAI() {
-      if (aiMounted || !jobId || !window.BeeZillaChat) return;
+      if (aiMounted || !jobId || !window.BeeZillaChat || !currentPage()) return;
       aiMounted = true;
-      window.BeeZillaChat.mount(document.getElementById("aiSlot"), {
+      window.BeeZillaChat.mount($("aiSlot"), {
         title: "BeeZilla",
         jobId: jobId,
         placeholder: "e.g. make the second verse darker, or add a cello line",
       });
       // The agent edits the track server-side; refresh so its change shows up here.
-      setInterval(function () {
+      var poll = setInterval(function () {
+        if (!$("prompt").isConnected || document.getElementById("prompt") !== $("prompt")) { clearInterval(poll); return; }
+        if (!currentPage()) return;
+        if (pendingWrite || refreshing) return;
+        refreshing = true;
+        var epoch = writeEpoch;
         api("GET").then(function (res) {
-          if (!res.ok) return;
-          var before = (state && state.edits || []).length;
-          state = res.body;
-          if ((state.edits || []).length !== before) renderRows();
-        });
+          if (!currentPage() || epoch !== writeEpoch || pendingWrite || !res.ok) return;
+          adoptState(res.body);
+        }).catch(function () {
+          // A failed refresh is not a replacement plan or an acknowledgement.
+          // Keep the current draft and retry at the next scheduled refresh.
+        }).then(function () { refreshing = false; });
       }, 5000);
     }
 
