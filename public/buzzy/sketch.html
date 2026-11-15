@@ -177,8 +177,13 @@
         if (ownsPage() && revision === savedRevision) el.textContent = "";
       }, 2500);
     }
+    function snapshotJson() {
+      // Selection belongs to this exact ordered snapshot, not a reused live
+      // array index or a legacy ID that another entry may share.
+      return JSON.stringify({ strokes: strokes, images: images, selectedImage: images.indexOf(selected) });
+    }
     function snapshot() {
-      undoStack.push(JSON.stringify({ strokes: strokes, images: images }));
+      undoStack.push(snapshotJson());
       if (undoStack.length > 50) undoStack.shift();
       redoStack.length = 0;
     }
@@ -289,13 +294,17 @@
       var d = JSON.parse(json);
       strokes = d.strokes || [];
       images = d.images || [];
+      // Rebind only the selection captured with these records. Retire a drag
+      // whose object belonged to the replaced snapshot.
+      selected = Number.isInteger(d.selectedImage) && d.selectedImage >= 0 ? images[d.selectedImage] || null : null;
+      drag = null;
       renderImages();
       redraw();
     }
     function undo() {
       if (!editable()) return;
       if (!undoStack.length) { setStatus("Nothing to undo."); return; }
-      redoStack.push(JSON.stringify({ strokes: strokes, images: images }));
+      redoStack.push(snapshotJson());
       applySnapshot(undoStack.pop());
       changed();
       setStatus("Undone.");
@@ -303,7 +312,7 @@
     function redo() {
       if (!editable()) return;
       if (!redoStack.length) { setStatus("Nothing to redo."); return; }
-      undoStack.push(JSON.stringify({ strokes: strokes, images: images }));
+      undoStack.push(snapshotJson());
       applySnapshot(redoStack.pop());
       changed();
       setStatus("Redone.");
@@ -524,12 +533,12 @@
       layers.innerHTML = "";
       images.forEach(function (im) {
         var wrap = document.createElement("div");
-        wrap.className = "img-wrap" + (selected === im.id ? " selected" : "");
+        wrap.className = "img-wrap" + (selected === im ? " selected" : "");
         wrap.style.left = im.x + "px";
         wrap.style.top = im.y + "px";
         wrap.style.width = im.w + "px";
         wrap.style.height = im.h + "px";
-        wrap.setAttribute("data-id", im.id);
+        wrap.setAttribute("data-id", typeof im.id === "string" || typeof im.id === "number" ? im.id : "");
         var img = document.createElement("img");
         img.src = im.url;
         img.alt = "";
@@ -538,10 +547,10 @@
         wrap.appendChild(img);
         wrap.appendChild(handle);
         wrap.addEventListener("pointerdown", function (e) {
-          if (tool !== "select" || !editable()) return;
+          if (tool !== "select" || !editable() || !wrap.isConnected || images.indexOf(im) < 0) return;
           e.stopPropagation();
-          selected = im.id;
-          drag = { id: im.id, mode: e.target === handle ? "resize" : "move", sx: e.clientX, sy: e.clientY, ox: im.x, oy: im.y, ow: im.w, oh: im.h };
+          selected = im;
+          drag = { image: im, mode: e.target === handle ? "resize" : "move", sx: e.clientX, sy: e.clientY, ox: im.x, oy: im.y, ow: im.w, oh: im.h };
           renderImages();
         });
         layers.appendChild(wrap);
@@ -549,8 +558,8 @@
     }
     window.addEventListener("pointermove", function (e) {
       if (!drag || !editable()) return;
-      var im = images.find(function (x) { return x.id === drag.id; });
-      if (!im) return;
+      var im = drag.image;
+      if (images.indexOf(im) < 0) return;
       var dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
       if (drag.mode === "move") { im.x = drag.ox + dx; im.y = drag.oy + dy; }
       else { im.w = Math.max(40, drag.ow + dx); im.h = Math.max(40, drag.oh + dy); }
@@ -558,7 +567,7 @@
       renderImages();
     });
     function finishImageDrag() {
-      if (drag && drag.changed && hydrated && ownsPage()) changed();
+      if (drag && drag.changed && images.indexOf(drag.image) >= 0 && hydrated && ownsPage()) changed();
       drag = null;
     }
     window.addEventListener("pointerup", finishImageDrag);
@@ -684,7 +693,10 @@
     }
 
     function boardJson() {
-      return { version: 1, strokes: strokes, images: images.map(function (i) { return { x: i.x, y: i.y, w: i.w, h: i.h, url: i.url }; }) };
+      // Images are data-only records, just like strokes. Retain their existing
+      // IDs/metadata exactly; legacy absent or duplicate IDs are not rewritten.
+      // Live selection/drag use the entry itself, never first-match ID lookup.
+      return { version: 1, strokes: strokes, images: images };
     }
 
     $("save").addEventListener("click", function () {

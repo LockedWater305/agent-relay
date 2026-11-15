@@ -260,3 +260,173 @@ test('failure after initial response parsing remains retryable without duplicate
 test('retired page cannot start a delayed retry or emit its pending timer into a remounted board',async t=>{
  const f=await fixture(t),p=await f.mount();await p.draw();await f.h.shell.go('/buzzy/memory');const q=await f.mount();const before=f.posts().length;await f.timers(1200);p.el('save').click();p.el('clear').click();await drain();assert.equal(f.posts().length,before);await q.save();assert.equal(f.posts().length,before);assert.equal(f.data().board.strokes.length,3);
 });
+
+// Image identity is exercised as records/DOM geometry only. Actual <img> I/O is
+// not implemented by this DOM, and the default Image decoder/provider forbid
+// calls. The explicitly marked delayed-placement tests use a metadata-only
+// Image/URL transport double, never image bytes or a generation endpoint.
+const identityImages=()=>[
+ {id:'image_a',url:'/synthetic/first.png',x:10,y:20,w:100,h:80,label:'First — keep é',extra:{original:true,note:'<keep> & "quotes"'}},
+ {id:'image_b',url:'/synthetic/second.png',x:300,y:40,w:120,h:90,label:'Second',extra:{original:true,nested:['unchanged',42]}},
+];
+const identityBoard=images=>({version:1,strokes:[],images});
+const imageWrappers=p=>p.el('layers').children;
+const selectedImages=p=>[...imageWrappers(p)].flatMap((el,index)=>el.className.split(/\s+/).includes('selected')?[index]:[]);
+function imageStart(p,index,mode='move'){
+ p.tools.find(el=>el.getAttribute('data-tool')==='select').click();
+ const wrap=imageWrappers(p)[index];assert.ok(wrap,'chosen image exists');
+ wrap.dispatch('pointerdown',{target:mode==='resize'?wrap.children[1]:wrap,clientX:400,clientY:100});
+}
+async function imageMove(f,p,index,dx,dy,mode='move'){
+ imageStart(p,index,mode);assert.deepEqual(selectedImages(p),[index]);
+ f.event('pointermove',{clientX:400+dx,clientY:100+dy});f.event('pointerup');await drain();
+ assert.deepEqual(selectedImages(p),[index]);
+}
+function metadataImageIO(f){
+ const pending=[];
+ // Each callback is controlled explicitly. Neither src nor this URL adapter
+// reads bytes, performs I/O or decodes media; this is not native image proof.
+ f.h.context.Image=class{set src(value){this.url=value;pending.push(this);}get src(){return this.url;}};
+ f.h.context.URL=class extends URL{static createObjectURL(file){return '/synthetic/'+file.name;}};
+ return pending;
+}
+function metadataDrop(p,name,x=50,y=60){p.stage.dispatch('drop',{clientX:x,clientY:y,dataTransfer:{files:[{type:'image/png',name}]}});}
+
+test('image records including IDs and unknown metadata survive ordinary Save and reload unchanged',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount();
+ assert.equal(f.posts().length,0);await p.draw();await p.save();
+ assert.deepEqual(f.data().board.images,images);assert.equal(f.posts().length,1);
+ assert.equal(Object.hasOwn(f.data().board,'selectedImage'),false,'undo selection is not persisted board authority');
+ await f.h.shell.go('/buzzy/memory');const q=await f.mount();await q.save();
+ assert.equal(f.posts().length,1);assert.deepEqual(f.data().board.images,images);
+});
+
+const idCases=[
+ ['ordinary',['first','second']],['absent',null],['duplicate',['same','same']],
+ ['empty',['','']],['null',[null,null]],['numeric',[7,7]],['mixed',[7,'7']],
+ ['boolean',[false,false]],['object',[{toString:'not callable',valueOf:null},{same:'shape'}]],
+ ['array',[['old'],['old']]],['hostile-looking',['__proto__','constructor']],
+];
+for(const [label,ids]of idCases)test('image '+label+' IDs preserve exact records and target only the chosen move/resize after reload',async t=>{
+ const images=identityImages();images.forEach((im,i)=>{if(ids)im.id=ids[i];else delete im.id;});
+ const f=await fixture(t,identityBoard(images));let p=await f.mount();
+ await imageMove(f,p,1,25,15);await p.save();
+ const expected=plain(images);expected[1].x+=25;expected[1].y+=15;
+ assert.deepEqual(f.data().board.images,expected);
+ await f.h.shell.go('/buzzy/memory');p=await f.mount();
+ await imageMove(f,p,1,30,20,'resize');await p.save();expected[1].w+=30;expected[1].h+=20;
+ assert.deepEqual(f.data().board.images,expected);assert.equal(imageWrappers(p).length,2);
+ await imageMove(f,p,0,-5,8);await p.save();expected[0].x-=5;expected[0].y+=8;
+ assert.deepEqual(f.data().board.images,expected);assert.deepEqual(selectedImages(p),[0]);
+});
+
+test('duplicate IDs keep one selected entry through actual Undo/Redo clones and a new gesture',async t=>{
+ const images=identityImages();images.forEach(im=>im.id='same');const f=await fixture(t,identityBoard(images)),p=await f.mount();
+ imageStart(p,1);f.event('pointerup');await p.draw();
+ p.el('undo').click();await drain();assert.deepEqual(selectedImages(p),[1]);
+ p.el('redo').click();await drain();assert.deepEqual(selectedImages(p),[1]);
+ await imageMove(f,p,1,14,-8);await p.save();const expected=plain(images);expected[1].x+=14;expected[1].y-=8;
+ assert.deepEqual(f.data().board.images,expected);assert.equal(f.data().board.strokes.length,1);
+});
+test('Undo retires an in-progress image object and detached handles cannot redirect the restored clone',async t=>{
+ const images=identityImages();delete images[0].id;delete images[1].id;
+ const f=await fixture(t,identityBoard(images)),p=await f.mount();imageStart(p,1);f.event('pointerup');await p.draw();
+ const stale=imageWrappers(p)[1];imageStart(p,1);f.event('pointermove',{clientX:430,clientY:115});
+ p.el('undo').click();await drain();assert.deepEqual(selectedImages(p),[1]);
+ f.event('pointermove',{clientX:500,clientY:200});f.event('pointerup');
+ stale.dispatch('pointerdown',{clientX:400,clientY:100});f.event('pointermove',{clientX:600,clientY:300});f.event('pointerup');await p.save();
+ assert.deepEqual(f.data().board.images,images);assert.equal(f.data().board.strokes.length,0);
+ await imageMove(f,p,1,9,11);await p.save();const expected=plain(images);expected[1].x+=9;expected[1].y+=11;assert.deepEqual(f.data().board.images,expected);
+});
+
+test('image selection follows each immutable snapshot through reorder/deletion rather than a reused live index',()=>{
+ // No image reorder/delete UI is invented. These direct extracted-function
+ // controls cover the actual snapshot adoption contract for arbitrary order.
+ const snapshotSource=script.slice(script.indexOf('    function snapshotJson()'),script.indexOf('    function snapshot()'));
+ const applySource=script.slice(script.indexOf('    function applySnapshot(json)'),script.indexOf('    function undo()'));
+ assert.ok(snapshotSource.includes('function snapshotJson()'));assert.ok(applySource.includes('function applySnapshot(json)'));
+ const first={id:'duplicate',url:'first',x:1},second={id:'duplicate',url:'second',x:2};
+ const c=vm.createContext({strokes:[],images:[first,second],selected:second,drag:{image:second},renderImages(){},redraw(){}});
+ vm.runInContext(snapshotSource+applySource,c);
+ const ordered=vm.runInContext('snapshotJson()',c);
+ c.images.reverse();assert.equal(c.images.indexOf(c.selected),0);
+ c.snapshotInput=ordered;vm.runInContext('applySnapshot(snapshotInput)',c);
+ assert.equal(c.selected.url,'second');assert.equal(c.images.indexOf(c.selected),1);assert.equal(c.drag,null);
+ c.images=[c.selected];c.drag={image:c.selected};const deleted=vm.runInContext('snapshotJson()',c);
+ c.images=[{id:'duplicate',url:'replacement',x:100}];c.selected=c.images[0];c.snapshotInput=deleted;
+ vm.runInContext('applySnapshot(snapshotInput)',c);assert.equal(c.selected.url,'second');assert.equal(c.drag,null);
+ for(const bad of [-1,20,null,'0',0.5]){c.snapshotInput=JSON.stringify({strokes:[],images:[first],selectedImage:bad});vm.runInContext('applySnapshot(snapshotInput)',c);assert.equal(c.selected,null);}
+});
+
+test('Undo removal, Redo restore, then new image at a reused position cannot be moved by the removed entry',async t=>{
+ const f=await fixture(t,identityBoard(identityImages())),p=await f.mount(),pending=metadataImageIO(f);
+ imageStart(p,0);f.event('pointerup');metadataDrop(p,'third.png',70,80);assert.equal(pending.length,1);pending[0].onerror();await drain();
+ assert.equal(imageWrappers(p).length,3);imageStart(p,2);f.event('pointerup');const removed=imageWrappers(p)[2];
+ p.el('undo').click();await drain();assert.equal(imageWrappers(p).length,2);assert.deepEqual(selectedImages(p),[0]);
+ p.el('redo').click();await drain();assert.equal(imageWrappers(p).length,3);assert.deepEqual(selectedImages(p),[2]);
+ p.el('undo').click();metadataDrop(p,'replacement.png',150,160);pending[1].onerror();await drain();
+ assert.equal(imageWrappers(p).length,3);assert.deepEqual(selectedImages(p),[0]);
+ removed.dispatch('pointerdown',{clientX:400,clientY:100});f.event('pointermove',{clientX:500,clientY:200});f.event('pointerup');await p.save();
+ assert.equal(f.data().board.images[2].url,'/synthetic/replacement.png');assert.equal(f.data().board.images[2].x,150);assert.equal(f.data().board.images[2].y,160);
+ await imageMove(f,p,2,6,7);await p.save();assert.equal(f.data().board.images[2].x,156);assert.equal(f.data().board.images[2].y,167);
+});
+
+test('pending Save owns its immutable image revision while newer moves retain IDs and selection',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount(),gate=f.defer();let first=true;
+ f.transport=async(req,next)=>{if(first&&req.method==='POST'){first=false;await gate.promise;}return next();};
+ await imageMove(f,p,1,20,25);await p.save();assert.equal(f.posts().length,0);
+ await imageMove(f,p,0,-4,-6);await p.save();assert.deepEqual(selectedImages(p),[0]);
+ assert.equal(f.uiRequests.filter(r=>r.method==='POST').length,1);
+ const firstBoard=plain(f.uiRequests.find(r=>r.method==='POST').body.board);assert.deepEqual(firstBoard.images[0],images[0]);
+ gate.resolve();await drain();const expected=plain(images);expected[1].x+=20;expected[1].y+=25;expected[0].x-=4;expected[0].y-=6;
+ assert.equal(f.posts().length,2);assert.deepEqual(f.data().board.images,expected);assert.deepEqual(selectedImages(p),[0]);
+});
+for(const lost of [false,true])test('image '+(lost?'lost acknowledgement':'storage failure')+' retains exact draft and explicit retry does not duplicate records',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount();
+ if(lost)f.transport=async(req,next)=>{const r=await next();if(req.method==='POST')throw Error('Synthetic lost acknowledgement');return r;};else f.failSave(true);
+ await imageMove(f,p,1,18,9);await p.save();assert.match(p.el('savedFlag').textContent,/Not saved/);assert.deepEqual(selectedImages(p),[1]);
+ if(!lost)assert.deepEqual(f.data().board.images,images);
+ f.transport=null;f.failSave(false);await p.save();const expected=plain(images);expected[1].x+=18;expected[1].y+=9;
+ assert.deepEqual(f.data().board.images,expected);assert.equal(f.data().board.images.length,2);assert.deepEqual(selectedImages(p),[1]);
+});
+
+test('out-of-order image callbacks during pending Save append only their own metadata and preserve the chosen entry',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount(),pending=metadataImageIO(f),gate=f.defer();let first=true;
+ imageStart(p,1);f.event('pointerup');metadataDrop(p,'slow-first.png',40,50);metadataDrop(p,'fast-second.png',200,210);assert.equal(pending.length,2);
+ pending[1].naturalWidth=2;pending[1].naturalHeight=1;pending[1].onload();await drain();assert.deepEqual(selectedImages(p),[1]);
+ f.transport=async(req,next)=>{if(first&&req.method==='POST'){first=false;await gate.promise;}return next();};await p.save();
+ pending[0].onerror();await drain();assert.deepEqual(selectedImages(p),[1]);assert.equal(imageWrappers(p).length,4);
+ gate.resolve();await drain();assert.equal(f.posts().length,2);
+ const result=f.data().board.images;assert.deepEqual(result.slice(0,2),images);
+ assert.deepEqual(result.slice(2).map(i=>[i.url,i.x,i.y,i.w,i.h]),[['/synthetic/fast-second.png',200,210,240,120],['/synthetic/slow-first.png',40,50,240,160]]);
+ assert.ok(result.slice(2).every(i=>typeof i.id==='string'&&i.id.startsWith('im_')));
+});
+test('delayed image callback from a retired page cannot append into a new board',async t=>{
+ const f=await fixture(t,identityBoard(identityImages())),p=await f.mount(),pending=metadataImageIO(f),before=plain(f.data());
+ metadataDrop(p,'retired.png');await f.h.shell.go('/buzzy/memory');const q=await f.mount();
+ pending[0].onerror();await drain();await q.save();assert.equal(p.stage.isConnected,false);assert.equal(imageWrappers(q).length,2);assert.equal(f.posts().length,0);assert.deepEqual(f.data(),before);
+});
+test('explicit API reorder/deletion survives reopening without a retired image handle targeting the replacement position',async t=>{
+ // The current UI has no image reorder/delete control. These are deliberate
+ // synthetic API edits, not an automatic repair, migration or UI feature.
+ const images=identityImages();images.forEach(im=>im.id='duplicate');
+ const f=await fixture(t,identityBoard(images)),reordered=plain(images).reverse();
+ const write=board=>f.api('/api/buzzy/art',{method:'POST',body:JSON.stringify({action:'save',jobId:'job_board',board})});
+ assert.equal((await write(identityBoard(reordered))).status,200);
+ const p=await f.mount();await imageMove(f,p,1,4,5);await p.save();reordered[1].x+=4;reordered[1].y+=5;
+ assert.deepEqual(f.data().board.images,reordered);const retired=imageWrappers(p)[0];
+ await f.h.shell.go('/buzzy/memory');const remaining=[plain(reordered[1])];assert.equal((await write(identityBoard(remaining))).status,200);
+ const q=await f.mount();retired.dispatch('pointerdown',{clientX:400,clientY:100});f.event('pointermove',{clientX:500,clientY:200});f.event('pointerup');await q.save();
+ assert.deepEqual(f.data().board.images,remaining);assert.deepEqual(selectedImages(q),[]);
+ await imageMove(f,q,0,6,7);await q.save();remaining[0].x+=6;remaining[0].y+=7;assert.deepEqual(f.data().board.images,remaining);
+});
+test('the existing desktop page drain finishes the exact active image gesture before acknowledging its revision',async t=>{
+ const images=identityImages();images.forEach(im=>im.id='duplicate');const f=await fixture(t,identityBoard(images)),p=await f.mount();
+ imageStart(p,1);f.event('pointermove',{clientX:422,clientY:113});
+ const hook=p.stage.bzDesktopSketch;hook.begin('synthetic-image-drain');assert.equal(p.el('save').disabled,true);
+ assert.equal(await hook.drain('synthetic-image-drain'),true);
+ const expected=plain(images);expected[1].x+=22;expected[1].y+=13;assert.deepEqual(f.data().board.images,expected);
+ assert.equal(hook.state('synthetic-image-drain').dirty,false);assert.equal(f.posts().length,1);
+ f.event('pointermove',{clientX:600,clientY:300});f.event('pointerup');await drain();assert.deepEqual(f.data().board.images,expected);
+ hook.release('synthetic-image-drain');assert.equal(p.el('save').disabled,false);assert.deepEqual(selectedImages(p),[1]);
+});
