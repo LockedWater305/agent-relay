@@ -1410,15 +1410,16 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         document.getElementById("docsBackList").onclick = () => { docsOpenDoc = null; goDocs(); };
         document.getElementById("docDl").onclick = () => downloadText(doc.name, doc.md, "text/markdown");
         document.getElementById("docDlPdf").onclick = () => {
-          if (window.beezillaSowPdf) {
+          try {
             const bytes = window.beezillaSowPdf(doc.md);
             const blob = new Blob([bytes], { type: "application/pdf" });
             const a = document.createElement("a");
             a.href = URL.createObjectURL(blob);
             a.download = doc.name.replace(/\.md$/, "") + ".pdf";
             a.click();
-          } else {
-            downloadText(doc.name, doc.md, "text/markdown");
+          } catch (error) {
+            alert(error && (error.code === "pdf_unsupported_text" || error.code === "pdf_invalid_text")
+              ? error.message : "PDF export failed. No PDF was downloaded.");
           }
         };
         document.getElementById("docDlWord").onclick = () => downloadWord(doc.name, doc.md);
@@ -1920,12 +1921,17 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         a.click();
       };
       document.getElementById("dlpdf").onclick = () => {
-        const bytes = window.beezillaSowPdf(draftDoc());
-        const blob = new Blob([bytes], { type: "application/pdf" });
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = (state.template || "job") + "-draft.pdf";
-        a.click();
+        try {
+          const bytes = window.beezillaSowPdf(draftDoc());
+          const blob = new Blob([bytes], { type: "application/pdf" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = (state.template || "job") + "-draft.pdf";
+          a.click();
+        } catch (error) {
+          alert(error && (error.code === "pdf_unsupported_text" || error.code === "pdf_invalid_text")
+            ? error.message : "PDF export failed. No PDF was downloaded.");
+        }
       };
       document.getElementById("backjobs").onclick = () => { state.screen = "jobs"; render(); };
     }

@@ -2011,12 +2011,17 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         a.click();
       };
       document.getElementById("dlpdf").onclick = () => {
-        const bytes = window.beezillaSowPdf(draftDoc());
-        const blob = new Blob([bytes], { type: "application/pdf" });
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = (state.template || "job") + "-draft.pdf";
-        a.click();
+        try {
+          const bytes = window.beezillaSowPdf(draftDoc());
+          const blob = new Blob([bytes], { type: "application/pdf" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = (state.template || "job") + "-draft.pdf";
+          a.click();
+        } catch (error) {
+          alert(error && (error.code === "pdf_unsupported_text" || error.code === "pdf_invalid_text")
+            ? error.message : "PDF export failed. No PDF was downloaded.");
+        }
       };
       document.getElementById("backjobs").onclick = () => { state.screen = "jobs"; render(); };
     }
@@ -5880,13 +5885,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (!window.beezillaSowPdf) { alert("PDF export isn't available right now."); return; }
       var body = draftBodyEl();
       var text = body ? body.value : (chatState.draftText || "");
-      var bytes = window.beezillaSowPdf(text);
-      var blob = new Blob([bytes], { type: "application/pdf" });
-      var a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "draft-v" + (chatState.draftVersion || 1) + ".pdf";
-      a.click();
-      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+      try {
+        var bytes = window.beezillaSowPdf(text);
+        var blob = new Blob([bytes], { type: "application/pdf" });
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "draft-v" + (chatState.draftVersion || 1) + ".pdf";
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+      } catch (error) {
+        alert(error && (error.code === "pdf_unsupported_text" || error.code === "pdf_invalid_text")
+          ? error.message : "PDF export failed. No PDF was downloaded.");
+      }
     }
 
     function onRestorePrevious() {
