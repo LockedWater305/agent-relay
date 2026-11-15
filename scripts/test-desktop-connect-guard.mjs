@@ -1,3 +1,4 @@
+import { createDocumentTransition } from "../desktop/document-transition.mjs";
 /**
  * Managed-account Connect guard regressions. Node built-ins only.
  * Executes the actual main/Settings/preload/page code with in-memory Electron,
@@ -66,13 +67,13 @@ async function mainFixture(flag, connect = async () => ({ ok: false, error: "fix
       saveMusicKey: (_dir, cfg) => music = store("music", { provider: "elevenlabs", ...cfg }),
     },
   };
-  const historyWindow = {};
+  const historyWindow = {}, historyDocument = {};
   const historyStorage = { length: 0, getItem: () => null, key: () => null };
-  const wc = {
-    executeJavaScript: async (code) => vm.runInNewContext(code, { window: historyWindow, localStorage: historyStorage }),
+  const wc = Object.assign(new EventEmitter(), {
+    executeJavaScript: async (code) => vm.runInNewContext(code, { window: historyWindow, document: historyDocument, location: new URL(wc.getURL()), localStorage: historyStorage }),
     id: 7, mainFrame: { url: `${base}/buzzy/settings` },
     getURL() { return this.mainFrame.url; }, isDestroyed: () => false, send() {},
-  };
+  });
   const win = { webContents: wc, isDestroyed: () => false };
   class FakeWindow {
     constructor() { trace.push("window"); this.webContents = new EventEmitter(); this.webContents.setWindowOpenHandler = () => {}; }
@@ -116,6 +117,7 @@ async function mainFixture(flag, connect = async () => ({ ok: false, error: "fix
     "./logger.mjs": { installLogging() {}, logLine() {}, logPaths: () => ({}) },
     "./connect.mjs": connectExports,
     "./csp.mjs": { createDesktopCsp: unexpected("csp"), loadCspManifest: unexpected("manifest") },
+    "./document-transition.mjs": { createDocumentTransition },
     "./security.mjs": { ...security },
     "./library-vault.mjs": { createLibraryTransition: (deps) => createLibraryTransition({ ...deps, fetchImpl: unexpected("Library network") }) },
   };

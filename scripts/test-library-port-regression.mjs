@@ -53,8 +53,8 @@ async function scenario() {
  vm.runInNewContext(preload,{require:()=>({contextBridge:{exposeInMainWorld(){}},ipcRenderer:{on:(name,fn)=>{listeners[name]=fn;},invoke:async()=>({ok:true})}}),process:{isMainFrame:true},window:{location:{replace:url=>{navigations.push(url);currentUrl=url;}}},URL,setTimeout:fn=>scheduled.push(fn),clearTimeout(){}});
  const wc={id:1,mainFrame:{url:currentUrl},isDestroyed:()=>false,getURL:()=>currentUrl,send:(channel,data)=>listeners[channel]?.({},data),executeJavaScript:async code=>vm.runInContext(code,first.context)};
  const auth=createRuntimeAuth({getContents:()=>[wc]});auth.bind(runtime);
- const mainContext=vm.createContext({runtimeBase:before,runtimeAuth:auth,trustedContents:()=>[wc],settingsWindow:null,testPageUrl:null,retargetAppPage,console});
- vm.runInContext(main.slice(main.indexOf('function bindRuntime('),main.indexOf('function openSafeExternal(')),mainContext);
+ const mainContext=vm.createContext({runtimeBase:before,runtimeAuth:auth,runtimeBinding:null,runtimeBindingGeneration:0,pendingRuntimeRetargets:new Map(),acquireLibraryTransition:{held:()=>false},trustedContents:()=>[wc],settingsWindow:null,testPageUrl:null,retargetAppPage,console});
+ vm.runInContext(main.slice(main.indexOf(main.includes('function currentRuntimeBinding(')?'function currentRuntimeBinding(':'function bindRuntime('),main.indexOf('function openSafeExternal(')),mainContext);
  let transition;
  if(main.includes('await acquireLibraryTransition'))transition=await createLibraryTransition({getContents:()=>[wc],getBase:()=>mainContext.runtimeBase,getRuntime:()=>runtime,fetchImpl:api})();
  runtime={host:'127.0.0.1',port:7332,token:'b'.repeat(43)};

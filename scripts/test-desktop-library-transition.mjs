@@ -179,7 +179,8 @@ test('malformed pending and unauthorized key references cannot become generic st
 test('packaging includes the barrier and actual main places it before authentication clearing and navigation',()=>{
  const main=readFileSync(new URL('../desktop/main.mjs',import.meta.url),'utf8');
  const before=main.slice(main.indexOf('beforeRestart:'),main.indexOf('afterRestart:'));
- assert.ok(before.indexOf('await acquireLibraryTransition')<before.indexOf('runtimeAuth.clear()'));
+ assert.ok(before.indexOf('await acquireLibraryTransition')<before.indexOf('clearRuntimeAuth()'));
+ assert.match(main,/function clearRuntimeAuth\(\) \{\s*runtimeAuth\.clear\(\);\s*runtimeBinding = null;\s*runtimeBindingGeneration\+\+;/);
  assert.ok(before.indexOf('await acquireLibraryTransition')<before.indexOf('await applyStoredInferenceToEnv'));
  const after=main.slice(main.indexOf('afterRestart:'),main.indexOf('afterRestartFinally:'));
  assert.ok(after.indexOf('await settingsHistoryTransition?.flush')<after.indexOf('bindRuntime'));

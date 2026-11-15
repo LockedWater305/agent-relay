@@ -1303,7 +1303,7 @@
           if (!r.ok) throw new Error("HTTP " + r.status);
           return r.text();
         });
-    var failed = false;
+    var failed = false, blocked = false;
     var promise = ready
       .then(function (html) {
         if (id !== navigationId) return;
@@ -1312,17 +1312,40 @@
           ensurePageWrapper();
           var target = document.getElementById("bzPage");
           if (target) target.setAttribute("data-bz-path", currentKey);
-          stashCurrent();
-          if (cache[key]) { restore(key); return; }
-          var doc = new DOMParser().parseFromString(html, "text/html");
-          var page = buildFromDoc(doc, key);
-          document.body.insertBefore(page, document.getElementById("bzPageCache"));
-          currentKey = key;
-          currentReady = false;
-          adoptStyles(doc, key);
-          return runScripts(page, function () { return id === navigationId; }).then(function () {
-            if (id !== navigationId) return;
-            finish(key, doc.title, 0);
+          // A page with durable edits can drain them before its DOM is removed.
+          // Keep this owner captured: a cancelled/late navigation cannot invoke a
+          // newer page's guard or discard its draft. Pages without a guard retain
+          // the existing navigation behavior.
+          var owner = target && target.querySelector("[data-bz-before-leave]");
+          var prepare = owner && typeof owner.bzBeforeLeave === "function"
+            ? Promise.resolve().then(function () { return owner.bzBeforeLeave(); }).catch(function () { return false; })
+            : Promise.resolve(true);
+          return prepare.then(function (allowed) {
+            if (id !== navigationId || !allowed) {
+              if (id === navigationId && !allowed) {
+                blocked = true;
+                // Popstate already moved the address; keep the unsaved mounted
+                // page and its URL together instead of falling back to a reload.
+                // Do not overwrite the traversed history entry on Back/Forward;
+                // restoring the current page appends it after that destination.
+                if (opts.push === false) history.pushState({ bzShell: currentKey }, "", currentKey);
+                else history.replaceState({ bzShell: currentKey }, "", currentKey);
+              }
+              if (owner && typeof owner.bzResume === "function") owner.bzResume();
+              return;
+            }
+            stashCurrent();
+            if (cache[key]) { restore(key); return; }
+            var doc = new DOMParser().parseFromString(html, "text/html");
+            var page = buildFromDoc(doc, key);
+            document.body.insertBefore(page, document.getElementById("bzPageCache"));
+            currentKey = key;
+            currentReady = false;
+            adoptStyles(doc, key);
+            return runScripts(page, function () { return id === navigationId; }).then(function () {
+              if (id !== navigationId) return;
+              finish(key, doc.title, 0);
+            });
           });
         });
         commitQueue = commit.catch(function () {});
@@ -1341,7 +1364,7 @@
         pendingNavigation = null;
         // Callers opening a job or starting voice must not act on a cancelled
         // navigation after the owner has already chosen a different page.
-        return !failed && currentReady && currentKey === keyOf(location.href);
+        return !failed && !blocked && currentReady && currentKey === keyOf(location.href);
       });
     pendingNavigation = { key: key, promise: promise };
     return promise;

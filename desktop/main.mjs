@@ -20,6 +20,7 @@ import { installLogging, logLine, logPaths } from "./logger.mjs";
 import { connectAccount, cloudBaseUrl, managedAccountConnectCapability } from "./connect.mjs";
 import { createDesktopCsp, loadCspManifest } from "./csp.mjs";
 import { createLibraryTransition } from "./library-vault.mjs";
+import { createDocumentTransition } from "./document-transition.mjs";
 import {
   allowAudioPermission, connectBaseUrl, createRuntimeAuth, isAppDownload, isAppPage,
   isConnectNavigation, isTrustedSender, retargetAppPage, safeExternalUrl, sameOrigin,
@@ -76,10 +77,19 @@ const testPageUrl = !app.isPackaged && process.env.BZ_SETTINGS_TEST
   ? pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "test-settings.html")).href
   : null;
 const runtimeAuth = createRuntimeAuth({ getContents: trustedContents, testPageUrl });
-const acquireLibraryTransition = createLibraryTransition({
+const acquireLibraryHistory = createLibraryTransition({
   getContents: trustedContents, getBase: () => runtimeBase,
   getRuntime: () => supervisor.runtime, testPageUrl,
 });
+const pendingRuntimeRetargets = new Map();
+const acquireLibraryTransition = createDocumentTransition({
+  getContents: trustedContents, getBase: () => runtimeBase,
+  getRuntime: () => supervisor.runtime, acquireLibrary: acquireLibraryHistory,
+  onIdle: flushRuntimeRetargets, testPageUrl,
+});
+let runtimeBinding = null;
+let runtimeBindingGeneration = 0;
+let settingsPreviousBinding = null;
 let settingsHistoryTransition = null;
 let quitting = false;
 
@@ -92,40 +102,76 @@ function guardLibraryWindowClose(win) {
     if (quitting || pending) return;
     pending = true;
     void (async () => {
-      let transition;
+      let transition, closed = false;
       try {
         transition = await acquireLibraryTransition();
-        allowed = true;
-        win.close();
+        // close() can be prevented by the renderer. Do not skip its lease
+        // cleanup merely because close() returned or override unload security.
+        closed = await new Promise((resolve) => {
+          const cleanup = () => {
+            win.removeListener("closed", didClose);
+            contents.removeListener("will-prevent-unload", didPrevent);
+          };
+          const didClose = () => { cleanup(); resolve(true); };
+          const didPrevent = () => { cleanup(); allowed = false; resolve(false); };
+          win.once("closed", didClose);
+          contents.once("will-prevent-unload", didPrevent);
+          allowed = true;
+          try { win.close(); } catch (error) { cleanup(); allowed = false; throw error; }
+        });
       } catch (error) {
-        dialog.showErrorBox("Library history still needs to be saved", `${error.message}\n\nBeeZilla stayed open. Retry after the local Library is available; do not force-quit to apply this change.`);
+        allowed = false;
+        dialog.showErrorBox("Changes still need to be saved", `${error.message}\n\nBeeZilla stayed open. Retry after Sketch and Library saves are available; do not force-quit to apply this change.`);
       } finally {
-        if (transition) await transition.release({ skip: allowed ? [contents] : [] });
+        if (transition) await transition.release({ skip: closed ? [contents] : [] });
         pending = false;
       }
     })();
   });
 }
 
+function clearRuntimeAuth() {
+  runtimeAuth.clear();
+  runtimeBinding = null;
+  runtimeBindingGeneration++;
+}
+
+function currentRuntimeBinding(rt) {
+  const proof = runtimeBinding;
+  return proof && proof.rt === rt && proof.base === runtimeBase && proof.generation === runtimeBindingGeneration &&
+    proof.host === rt?.host && proof.port === rt?.port && proof.token === rt?.token ? proof : null;
+}
+
+function flushRuntimeRetargets() {
+  if (acquireLibraryTransition.held()) return;
+  for (const [wc, target] of pendingRuntimeRetargets) {
+    if (wc.isDestroyed() || !trustedContents().includes(wc)) { pendingRuntimeRetargets.delete(wc); continue; }
+    if (!currentRuntimeBinding(target.rt) || target.base !== runtimeBase) continue;
+    // Keep this intent until an actual successful destination document commit.
+    // Preload may defer replace(), and a queued transition may cancel it.
+    try { wc.send("beezilla:runtime:changed", { url: target.url }); }
+    catch (error) { console.warn("[desktop] restart navigation unavailable:", error.message); }
+  }
+}
+
 function bindRuntime(rt, notifyWindows = false) {
   const previousBase = runtimeBase;
   const targets = trustedContents().map((wc) => ({ wc, url: wc.getURL() }));
   runtimeBase = runtimeAuth.bind(rt);
-  if (notifyWindows && previousBase && previousBase !== runtimeBase) {
+  // This proof is created only AFTER the underlying binding accepts authority.
+  // It never leaves main; every clear invalidates it and advances generation.
+  runtimeBinding = Object.freeze({ rt, base: runtimeBase, host: rt.host, port: rt.port, token: rt.token, generation: ++runtimeBindingGeneration });
+  if (notifyWindows && previousBase && (previousBase !== runtimeBase || pendingRuntimeRetargets.size)) {
     for (const { wc, url } of targets) {
       if (wc.isDestroyed() || (testPageUrl && url === testPageUrl)) continue;
       const fallback = wc === settingsWindow?.webContents ? "/buzzy/settings" : "/buzzy/talk";
-      // Preload waits for in-flight IPC replies before navigating, so saving a
-      // key does not destroy the page that is waiting for its save result.
-      try {
-        wc.send("beezilla:runtime:changed", { url: retargetAppPage(url, previousBase, runtimeBase, fallback) });
-      } catch (err) {
-        // Closing a window during Save does not turn a successful backend
-        // restart into a failure. A surviving/new window gets the current base.
-        console.warn("[desktop] restart navigation unavailable:", err.message);
-      }
+      const earlier = pendingRuntimeRetargets.get(wc);
+      if (previousBase === runtimeBase && !earlier) continue;
+      const ownedUrl = earlier?.base === previousBase ? earlier.url : url;
+      pendingRuntimeRetargets.set(wc, { rt, base: runtimeBase, url: retargetAppPage(ownedUrl, previousBase, runtimeBase, fallback) });
     }
   }
+  flushRuntimeRetargets();
   return runtimeBase;
 }
 
@@ -136,6 +182,7 @@ function openSafeExternal(url) {
 }
 
 function handleAppLink(wc, url) {
+  if (acquireLibraryTransition.held()) return;
   if (!isTrustedSender({ sender: wc, senderFrame: wc.mainFrame }, { base: runtimeBase, contents: trustedContents(), testPageUrl })) return;
   if (isAppPage(url, runtimeBase)) {
     void wc.loadURL(url).catch((err) => console.warn("[desktop] navigation failed:", err.message));
@@ -151,6 +198,12 @@ function handleAppLink(wc, url) {
 
 function confineAppWindow(win) {
   const wc = win.webContents;
+  acquireLibraryTransition.register(wc);
+  wc.on("did-navigate", (_event, url, httpResponseCode) => {
+    const target = pendingRuntimeRetargets.get(wc);
+    if (target && currentRuntimeBinding(target.rt) && target.base === runtimeBase && url === target.url && httpResponseCode >= 200 && httpResponseCode < 300) pendingRuntimeRetargets.delete(wc);
+  });
+  wc.on("destroyed", () => pendingRuntimeRetargets.delete(wc));
   const allowed = (url) => isAppPage(url, runtimeBase) || Boolean(testPageUrl && url === testPageUrl);
   wc.on("will-navigate", (event, url) => {
     if (allowed(url)) return;
@@ -349,7 +402,9 @@ function registerSettingsIpc() {
         // Freeze/drain only the current origin’s named Library stores BEFORE
         // clearing auth or stopping the database. No cross-origin storage copy.
         settingsHistoryTransition = await acquireLibraryTransition({ allowDeferred: true });
-        runtimeAuth.clear();
+        const binding = currentRuntimeBinding(supervisor.runtime);
+        clearRuntimeAuth();
+        settingsPreviousBinding = binding ? { binding, clearedGeneration: runtimeBindingGeneration } : null;
         // Identity first: the runtime reads BZ_LOCAL_OWNER_* at spawn.
         applyIdentityToEnv();
         await applyStoredInferenceToEnv();
@@ -363,7 +418,18 @@ function registerSettingsIpc() {
       },
       afterRestartFinally: async () => {
         const transition = settingsHistoryTransition;
+        const previous = settingsPreviousBinding;
         settingsHistoryTransition = null;
+        settingsPreviousBinding = null;
+        // A stop refusal may leave the actual original runtime usable. Restore
+        // ONLY proof captured before this attempt's own clear, not an unbound
+        // replacement retained by the supervisor after an earlier failed handoff.
+        const proof = previous?.binding;
+        if (proof && !runtimeBinding && runtimeBindingGeneration === previous.clearedGeneration &&
+            supervisor.runtime === proof.rt && runtimeBase === proof.base &&
+            proof.rt.host === proof.host && proof.rt.port === proof.port && proof.rt.token === proof.token) {
+          bindRuntime(proof.rt);
+        }
         await transition?.release({ keepRetiredFrozen: true });
       },
     });
@@ -450,7 +516,11 @@ function installMenu() {
               else dialog.showErrorBox("BeeZilla", `Logging is unavailable.\n${file ?? ""}`);
             },
           },
-          { role: "reload" },
+          { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => {
+            if (acquireLibraryTransition.held()) return;
+            const wc = BrowserWindow.getFocusedWindow()?.webContents;
+            if (trustedContents().includes(wc)) wc.reload();
+          } },
           { role: "toggleDevTools" },
           { type: "separator" },
           { role: "quit" },
@@ -467,6 +537,7 @@ function installMenu() {
  * applies and the page can reach the preload bridge.
  */
 function settingsWindowFor(url) {
+  if (acquireLibraryTransition.held()) return null;
   settingsWindow = new BrowserWindow({
     width: 760,
     height: 820,
@@ -622,6 +693,7 @@ async function performConnect() {
 }
 
 async function openSettings() {
+  if (acquireLibraryTransition.held()) return;
   if (settingsWindow) {
     settingsWindow.focus();
     return;
@@ -630,14 +702,17 @@ async function openSettings() {
   // an error page: the user asked to configure the thing that starts it.
   if (!supervisor.runtime) {
     const rt = await supervisor.start();
+    if (acquireLibraryTransition.held()) return;
     bindRuntime(rt, true);
   }
   settingsWindowFor(`${runtimeBase}/buzzy/settings`);
 }
 
 async function createWindow() {
+  if (acquireLibraryTransition.held()) return;
   console.log("[desktop] createWindow: starting runtime");
   const rt = await supervisor.start();
+  if (acquireLibraryTransition.held()) return;
   console.log(`[desktop] runtime ready on ${rt.host}:${rt.port}`);
   const base = bindRuntime(rt);
 
@@ -865,7 +940,8 @@ app.whenReady().then(async () => {
     // The cloud sign-in window has a different session and never uses this.
     session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ["<all_urls>"] }, (details, callback) => {
       try {
-        if (!supervisor.runtime) runtimeAuth.clear();
+        if (!supervisor.runtime) clearRuntimeAuth();
+        if (acquireLibraryTransition.blocksRequest(details)) { callback({ cancel: true }); return; }
         callback(desktopCsp.authorizeRequest(details, runtimeAuth.headers(details)));
       } catch {
         callback({ cancel: true });
@@ -917,10 +993,11 @@ app.on("before-quit", async (event) => {
   try {
     transition = await acquireLibraryTransition();
     await supervisor.stop();
+    clearRuntimeAuth();
     app.exit(0);
   } catch (error) {
     quitting = false;
-    dialog.showErrorBox("BeeZilla stayed open", `${error.message}\n\nRetry when Library history can be saved and the local database can stop safely.`);
+    dialog.showErrorBox("BeeZilla stayed open", `${error.message}\n\nRetry when Sketch and Library changes can be saved and the local database can stop safely.`);
   } finally {
     await transition?.release();
   }

@@ -32,7 +32,7 @@
      This rule travels with this page's stylesheet, which the shell enables only while
      Sketch is the active page. */
   #bzPage { display:flex; flex-direction:column; flex:1 1 auto; min-height:0; }
-  #board { position:absolute; inset:0; touch-action:none; }
+  #board { position:absolute; inset:0; width:100%; height:100%; touch-action:none; }
   #layers { position:absolute; inset:0; pointer-events:none; }
   .img-wrap { position:absolute; pointer-events:auto; cursor:move; border:1px solid transparent; }
   .img-wrap.selected { border-color: var(--bz-yellow); }
@@ -125,13 +125,17 @@
   // to a road IS the instruction, not a description of one.
   (function () {
     var jobId = new URLSearchParams(location.search).get("job");
-    var stage = document.getElementById("stage");
-    var canvas = document.getElementById("board");
-    var layers = document.getElementById("layers");
+    var initialJobId = jobId;
+    var controls = {};
+    Array.prototype.forEach.call((document.getElementById("bzPage") || document).querySelectorAll("[id]"), function (el) { controls[el.id] = el; });
+    function $(id) { return controls[id]; }
+    var stage = $("stage");
+    var canvas = $("board");
+    var layers = $("layers");
     var ctx = canvas.getContext("2d");
-    var statusEl = document.getElementById("status");
-    var promptEl = document.getElementById("prompt");
-    var titleEl = document.getElementById("pTitle");
+    var statusEl = $("status");
+    var promptEl = $("prompt");
+    var titleEl = $("pTitle");
 
     var tool = "select";
     var color = "#ffd40d";
@@ -143,48 +147,144 @@
     var lastRenderUrl = null;   // the newest rendered picture on this board
     var undoStack = [];
     var redoStack = [];
+    var hydrated = !jobId, loading = false, leaving = false, pageHidden = false;
+    var createBusy = false, regionBusy = false, desktopLease = null;
+    var revision = 0, savedRevision = 0, saveTimer = null, pendingSave = null;
+    var toolButtons = Array.prototype.slice.call(document.querySelectorAll("[data-tool]"));
+    function ownsPage() { return stage.isConnected && document.getElementById("stage") === stage; }
+    function currentPage() {
+      var selectedJob = new URLSearchParams(location.search).get("job");
+      return ownsPage() && !pageHidden && /^\/buzzy\/sketch(?:\.html)?\/?$/.test(location.pathname) &&
+        (selectedJob === jobId || (!initialJobId && selectedJob === null));
+    }
+    function editable() { return hydrated && !leaving && !desktopLease && !window.__bzDesktopDocumentLease && currentPage(); }
+    function enableControls() {
+      var disabled = !hydrated || leaving || Boolean(desktopLease);
+      toolButtons.forEach(function (el) { el.disabled = disabled; });
+      ["undo", "redo", "clear", "shot", "svg"].forEach(function (id) { $(id).disabled = disabled; });
+      $("create").disabled = disabled || createBusy;
+      $("regionApply").disabled = disabled || regionBusy;
+      $("save").disabled = loading || leaving || Boolean(desktopLease);
+      $("save").textContent = hydrated ? "Save" : "Retry load";
+    }
+    function setSaved(text, ok) {
+      if (!ownsPage()) return;
+      var el = $("savedFlag");
+      clearTimeout(el._t);
+      el.textContent = text;
+      el.style.color = ok ? "#6ee7a8" : "#ff6b6b";
+      if (ok) el._t = setTimeout(function () {
+        if (ownsPage() && revision === savedRevision) el.textContent = "";
+      }, 2500);
+    }
     function snapshot() {
       undoStack.push(JSON.stringify({ strokes: strokes, images: images }));
       if (undoStack.length > 50) undoStack.shift();
       redoStack.length = 0;
-      // The first mark is the moment this board becomes a project; a page you
-      // merely looked at is not one.
-      ensureJob().then(autoSave, function () { /* a scratch board that cannot be saved is not an error toast */ });
     }
-
-    // The board IS the input of this project, so it is written back without being
-    // asked. Relying on the Save button meant a session of work could live only in
-    // the tab — /buzzy/sketch?job=… then opened an empty project.
-    var saveTimer = null, saving = false, saveAgain = false;
+    function changed() {
+      revision++;
+      setSaved("Unsaved changes", false);
+      autoSave();
+    }
     function autoSave() {
-      if (!jobId) return;
+      if (!hydrated || !ownsPage() || leaving) return;
       clearTimeout(saveTimer);
       saveTimer = setTimeout(function () { flushSave(); }, 1200);
     }
+    // One immutable snapshot per request. A response acknowledges only that
+    // revision, never edits completed while the request was pending.
     function flushSave() {
-      if (!jobId) return;
-      if (saving) { saveAgain = true; return; }
-      saving = true;
-      fetch("/api/buzzy/art", {
-        method: "POST", credentials: "same-origin", keepalive: true,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "save", jobId: jobId, board: boardJson() }),
-      }).then(function (r) { if (!r.ok) throw new Error("save failed"); setSaved(true); })
-        .catch(function () { setSaved(false); })
-        .then(function () {
-          saving = false;
-          if (saveAgain) { saveAgain = false; flushSave(); }
+      clearTimeout(saveTimer);
+      if (!hydrated || !ownsPage()) return Promise.resolve(false);
+      if (pendingSave) return pendingSave.then(function (ok) { return ok ? flushSave() : false; });
+      if (savedRevision === revision) return Promise.resolve(true);
+      var submittedRevision = revision, board = JSON.stringify(boardJson());
+      setSaved("Saving…", false);
+      pendingSave = ensureJob().then(function (id) {
+        if (!ownsPage()) throw new Error("Board is no longer open.");
+        return fetch("/api/buzzy/art", {
+          method: "POST", credentials: "same-origin", keepalive: true,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "save", jobId: id, board: JSON.parse(board) }),
         });
+      }).then(function (r) {
+        if (!r.ok) throw new Error("Save failed.");
+        return r.json();
+      }).then(function (d) {
+        if (!d || d.ok !== true || d.saved !== true) throw new Error("Save was not confirmed.");
+        savedRevision = submittedRevision;
+        if (revision === savedRevision) setSaved("Saved to project", true);
+        else setSaved("Unsaved changes", false);
+        return true;
+      }).catch(function () {
+        setSaved("Not saved. Use Save to retry; keep this board open.", false);
+        return false;
+      }).then(function (ok) {
+        pendingSave = null;
+        if (ok && revision !== savedRevision && ownsPage()) return flushSave();
+        return ok;
+      });
+      return pendingSave;
     }
-    function setSaved(ok) {
-      var el = document.getElementById("savedFlag");
-      if (!el) return;
-      el.textContent = ok ? "Saved to project" : "Not saved — retrying";
-      el.style.color = ok ? "#6ee7a8" : "#ff6b6b";
-      if (ok) { clearTimeout(el._t); el._t = setTimeout(function () { el.textContent = ""; }, 2500); }
-    }
-    window.addEventListener("pagehide", function () { if (jobId) flushSave(); });
+    // The shell drains this page before removing it. A failed save keeps its
+    // draft mounted for retry; cancelling navigation releases the same owner.
+    stage.setAttribute("data-bz-before-leave", "");
+    stage.bzBeforeLeave = function () {
+      if (desktopLease || window.__bzDesktopDocumentLease) return Promise.resolve(false);
+      finishStroke();
+      finishImageDrag();
+      leaving = true;
+      enableControls();
+      clearTimeout(saveTimer);
+      if (!hydrated || revision === savedRevision && !pendingSave) return Promise.resolve(true);
+      return flushSave().then(function (ok) {
+        if (!ok) setStatus("Could not save. Your changes are still here; use Save, then try leaving again.");
+        return ok;
+      });
+    };
+    stage.bzResume = function () { leaving = false; enableControls(); if (!desktopLease) resumeLoad(); };
+    // Fixed desktop-only hook. Main captures this exact element/document and a
+    // nonce; the shell cannot release a desktop lease or read arbitrary state.
+    stage.bzDesktopSketch = Object.freeze({
+      begin: function (nonce) {
+        if (!currentPage() || desktopLease && desktopLease !== nonce) throw new Error("Sketch owner changed.");
+        finishStroke(); finishImageDrag();
+        desktopLease = nonce;
+        clearTimeout(saveTimer); enableControls();
+      },
+      state: function (nonce) {
+        if (desktopLease !== nonce || !currentPage()) throw new Error("Sketch owner changed.");
+        return { lease: nonce, jobId: jobId, dirty: hydrated && (revision !== savedRevision || Boolean(pendingSave)) };
+      },
+      drain: function (nonce) {
+        if (desktopLease !== nonce || !currentPage()) return Promise.reject(new Error("Sketch owner changed."));
+        if (!hydrated) return Promise.resolve(true);
+        return flushSave();
+      },
+      release: function (nonce) {
+        if (desktopLease !== nonce) return;
+        desktopLease = null; enableControls(); resumeLoad();
+      },
+    });
+    window.addEventListener("pagehide", function () {
+      finishStroke(); finishImageDrag();
+      flushSave();
+      pageHidden = true;
+    });
     document.addEventListener("visibilitychange", function () { if (document.hidden) flushSave(); });
+    window.addEventListener("beforeunload", function (event) {
+      if (ownsPage() && hydrated && (revision !== savedRevision || pendingSave)) {
+        event.preventDefault(); event.returnValue = "";
+      }
+    });
+    function resumeLoad() {
+      if (!currentPage()) return;
+      if (!hydrated) load();
+      else if (revision !== savedRevision) autoSave();
+    }
+    window.addEventListener("pageshow", function () { pageHidden = false; resumeLoad(); });
+    window.addEventListener("popstate", resumeLoad);
     function applySnapshot(json) {
       var d = JSON.parse(json);
       strokes = d.strokes || [];
@@ -193,15 +293,19 @@
       redraw();
     }
     function undo() {
+      if (!editable()) return;
       if (!undoStack.length) { setStatus("Nothing to undo."); return; }
       redoStack.push(JSON.stringify({ strokes: strokes, images: images }));
       applySnapshot(undoStack.pop());
+      changed();
       setStatus("Undone.");
     }
     function redo() {
+      if (!editable()) return;
       if (!redoStack.length) { setStatus("Nothing to redo."); return; }
       undoStack.push(JSON.stringify({ strokes: strokes, images: images }));
       applySnapshot(redoStack.pop());
+      changed();
       setStatus("Redone.");
     }
     var drag = null;
@@ -211,7 +315,8 @@
     function resize() {
       var r = stage.getBoundingClientRect();
       var dpr = window.devicePixelRatio || 1;
-      // The canvas BOX is CSS-owned (#board { inset:0 } inside #stage). Pinning
+      // The canvas BOX is CSS-owned (explicit 100% width/height inside #stage).
+      // A replaced canvas with auto dimensions uses its DPR-sized bitmap instead. Pinning
       // style.width/height from a rect measured at parse time froze the box at whatever
       // the stage measured before layout settled — 1034.6px against a 909.6px stage on a
       // soft hop (this page's scripts run before #bzPage's flex applies), 979px against
@@ -346,6 +451,7 @@
 
     var selectedStroke = null;
     canvas.addEventListener("pointerdown", function (e) {
+      if (!editable()) return;
       if (tool === "select") {
         var hit = hitTest(pt(e));
         selectedStroke = hit ? hit.id : null;
@@ -363,6 +469,7 @@
           strokes.push({ id: newId(), tool: "text", color: color, x1: p.x, y1: p.y, text: t,
                          anchor: hit ? hit.id : null });
           redraw();
+          changed();
           setStatus(hit ? "Note attached to that mark." : "Note added.");
         }
         return;
@@ -374,23 +481,27 @@
       redraw();
     });
     canvas.addEventListener("pointermove", function (e) {
-      if (!draft) return;
+      if (!draft || !editable()) return;
       var p = pt(e);
       if (draft.tool === "pen") draft.points.push(p);
       else { draft.x2 = p.x; draft.y2 = p.y; }
       redraw();
     });
-    canvas.addEventListener("pointerup", function () {
-      if (!draft) return;
+    function finishStroke() {
+      if (!draft || !hydrated || !ownsPage()) return;
       draft.id = newId();
       strokes.push(draft);
       draft = null;
       redraw();
+      changed();
       setStatus(strokes.length + " marks on the board");
-    });
+    }
+    canvas.addEventListener("pointerup", finishStroke);
+    canvas.addEventListener("pointercancel", finishStroke);
 
     // ── images: drop, paste, move, resize ─────────────────────────────
     function addImage(url, at) {
+      if (!editable()) return;
       var w = 240, h = 160;
       var img = new Image();
       img.onload = function () {
@@ -402,10 +513,12 @@
       img.src = url;
     }
     function place(url, at, w, h) {
+      if (!editable()) return;
       snapshot();
       var item = { id: "im_" + Math.random().toString(36).slice(2, 9), url: url, x: at.x, y: at.y, w: w, h: h };
       images.push(item);
       renderImages();
+      changed();
     }
     function renderImages() {
       layers.innerHTML = "";
@@ -425,7 +538,7 @@
         wrap.appendChild(img);
         wrap.appendChild(handle);
         wrap.addEventListener("pointerdown", function (e) {
-          if (tool !== "select") return;
+          if (tool !== "select" || !editable()) return;
           e.stopPropagation();
           selected = im.id;
           drag = { id: im.id, mode: e.target === handle ? "resize" : "move", sx: e.clientX, sy: e.clientY, ox: im.x, oy: im.y, ow: im.w, oh: im.h };
@@ -435,21 +548,28 @@
       });
     }
     window.addEventListener("pointermove", function (e) {
-      if (!drag) return;
+      if (!drag || !editable()) return;
       var im = images.find(function (x) { return x.id === drag.id; });
       if (!im) return;
       var dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
       if (drag.mode === "move") { im.x = drag.ox + dx; im.y = drag.oy + dy; }
       else { im.w = Math.max(40, drag.ow + dx); im.h = Math.max(40, drag.oh + dy); }
+      drag.changed = true;
       renderImages();
     });
-    window.addEventListener("pointerup", function () { drag = null; });
+    function finishImageDrag() {
+      if (drag && drag.changed && hydrated && ownsPage()) changed();
+      drag = null;
+    }
+    window.addEventListener("pointerup", finishImageDrag);
+    window.addEventListener("pointercancel", finishImageDrag);
 
     stage.addEventListener("dragover", function (e) { e.preventDefault(); stage.classList.add("drop"); });
     stage.addEventListener("dragleave", function () { stage.classList.remove("drop"); });
     stage.addEventListener("drop", function (e) {
       e.preventDefault();
       stage.classList.remove("drop");
+      if (!editable()) return;
       var at = pt(e);
       for (const f of e.dataTransfer.files) {
         if (!f.type.startsWith("image/")) continue;
@@ -458,6 +578,7 @@
       }
     });
     window.addEventListener("paste", function (e) {
+      if (!editable()) return;
       var items = (e.clipboardData && e.clipboardData.items) || [];
       for (const it of items) {
         if (it.type.indexOf("image") === 0) {
@@ -467,16 +588,18 @@
       }
     });
 
-    document.querySelectorAll("[data-tool]").forEach(function (btn) {
+    toolButtons.forEach(function (btn) {
       btn.addEventListener("click", function () {
+        if (!editable()) return;
         tool = btn.getAttribute("data-tool");
-        document.querySelectorAll("[data-tool]").forEach(function (b) { b.classList.toggle("on", b === btn); });
+        toolButtons.forEach(function (b) { b.classList.toggle("on", b === btn); });
       });
     });
-    document.getElementById("color").addEventListener("input", function (e) { color = e.target.value; });
-    document.getElementById("undo").addEventListener("click", undo);
-    document.getElementById("redo").addEventListener("click", redo);
+    $("color").addEventListener("input", function (e) { color = e.target.value; });
+    $("undo").addEventListener("click", undo);
+    $("redo").addEventListener("click", redo);
     window.addEventListener("keydown", function (e) {
+      if (!editable()) return;
       if (e.key === "Delete" || e.key === "Backspace") {
         if (tool === "select" && selectedStroke) {
           e.preventDefault();
@@ -487,6 +610,7 @@
           strokes.forEach(function (x) { if (x.anchor === selectedStroke) x.anchor = null; });
           selectedStroke = null;
           redraw();
+          changed();
           setStatus("Deleted.");
         }
         return;
@@ -496,13 +620,15 @@
       if (e.key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
       else if ((e.key === "z" && e.shiftKey) || e.key === "y") { e.preventDefault(); redo(); }
     });
-    document.getElementById("clear").addEventListener("click", function () {
+    $("clear").addEventListener("click", function () {
+      if (!editable()) return;
       if (!confirm("Clear every mark you drew? (images stay)")) return;
       snapshot();
       strokes = []; redraw();
+      changed();
     });
 
-    function setStatus(t) { statusEl.textContent = t; }
+    function setStatus(t) { if (ownsPage()) statusEl.textContent = t; }
 
     // ── flatten the board for the model ───────────────────────────────
     function flatten() {
@@ -561,11 +687,14 @@
       return { version: 1, strokes: strokes, images: images.map(function (i) { return { x: i.x, y: i.y, w: i.w, h: i.h, url: i.url }; }) };
     }
 
-    document.getElementById("save").addEventListener("click", function () {
-      if (!jobId) { setStatus("This board is not attached to a project yet — Create once and it will be."); return; }
-      clearTimeout(saveTimer);
-      flushSave();
-      setStatus("Board saved.");
+    $("save").addEventListener("click", function () {
+      if (!currentPage() || leaving) return;
+      if (!hydrated) { load(); return; }
+      finishStroke(); finishImageDrag();
+      if (!jobId && revision === savedRevision) { setStatus("No changes to save."); return; }
+      flushSave().then(function (ok) {
+        if (ok && currentPage() && revision === savedRevision) setStatus("Board saved.");
+      });
     });
 
     // The drawing is already vectors — {tool, colour, width, points} — so an SVG
@@ -611,7 +740,7 @@
         '<rect width="100%" height="100%" fill="#141414"/>' + parts.join("") + "</svg>";
     }
 
-    document.getElementById("svg").addEventListener("click", function () {
+    $("svg").addEventListener("click", function () {
       if (!strokes.length) { setStatus("Nothing drawn yet."); return; }
       var blob = new Blob([svgText()], { type: "image/svg+xml" });
       var a = document.createElement("a");
@@ -622,19 +751,21 @@
       setStatus("SVG exported — " + strokes.length + " vector marks (images excluded).");
     });
 
-    document.getElementById("shot").addEventListener("click", function () {
+    $("shot").addEventListener("click", function () {
       flatten().then(function (url) {
         var a = document.createElement("a");
         a.href = url; a.download = "sketch-" + Date.now() + ".png"; a.click();
       });
     });
 
-    document.getElementById("create").addEventListener("click", function () {
+    $("create").addEventListener("click", function () {
+      if (!editable()) return;
       var prompt = (promptEl.value || "").trim();
       if (!prompt) { setStatus("Describe what to create first."); promptEl.focus(); return; }
-      var btn = document.getElementById("create");
+      var btn = $("create");
+      createBusy = true;
       btn.disabled = true;
-      var iterate = document.getElementById("iterate").checked && !!lastRenderUrl;
+      var iterate = $("iterate").checked && !!lastRenderUrl;
       setStatus(iterate ? "Creating — using the last render as the reference…" : "Creating — flattening the board…");
       (iterate ? toDataUrl(lastRenderUrl) : flatten()).then(function (composite) {
         setStatus("Creating — the model is working…");
@@ -655,7 +786,8 @@
           }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, status: r.status, d: d }; }); });
         });
       }).then(function (res) {
-        btn.disabled = false;
+        createBusy = false;
+        enableControls();
         if (!res.ok) {
           setStatus(res.status === 402 ? "Art is part of the paid plans — " + (res.d.error || "") : (res.d.error || "Could not create."));
           return;
@@ -663,13 +795,14 @@
         var img = res.d.image;
         lastRenderUrl = img.url;
         setStatus("Done in " + Math.round((res.d.ms || 0) / 100) / 10 + "s — added to the board and to the project.");
-        var box = document.getElementById("result");
+        var box = $("result");
         box.style.display = "block";
-        document.getElementById("resultImg").src = img.url;
-        document.getElementById("resultLink").href = img.url;
+        $("resultImg").src = img.url;
+        $("resultLink").href = img.url;
         addImage(img.url, { x: 60 + images.length * 18, y: 60 + images.length * 18 });
       }).catch(function (e) {
-        btn.disabled = false;
+        createBusy = false;
+        enableControls();
         setStatus("Failed: " + e.message);
       });
     });
@@ -680,13 +813,13 @@
     // picture + mask + instruction is what keeps the rest of the frame from being
     // re-rolled, which is the difference between an edit and a fresh guess.
     (function initRegionEdit() {
-      var overlay = document.getElementById("regionOverlay");
-      var rectEl = document.getElementById("regionRect");
-      var img = document.getElementById("resultImg");
-      var box = document.getElementById("result");
-      var input = document.getElementById("regionPrompt");
-      var btn = document.getElementById("regionApply");
-      var note = document.getElementById("regionStatus");
+      var overlay = $("regionOverlay");
+      var rectEl = $("regionRect");
+      var img = $("resultImg");
+      var box = $("result");
+      var input = $("regionPrompt");
+      var btn = $("regionApply");
+      var note = $("regionStatus");
       var dragStart = null;
       var picked = null;   // {x,y,w,h} in CSS pixels relative to the picture
 
@@ -752,11 +885,13 @@
       }
 
       btn.addEventListener("click", function () {
+        if (!editable()) return;
         var instruction = (input.value || "").trim();
         if (!lastRenderUrl) { note.textContent = "Create a picture first, then change part of it."; return; }
         if (!picked) { note.textContent = "Drag a box on the picture first."; return; }
         if (!instruction) { input.focus(); note.textContent = "Say what should change inside the box."; return; }
         var imageId = Number(String(lastRenderUrl).split("/").pop());
+        regionBusy = true;
         btn.disabled = true;
         note.textContent = "Changing that area…";
         fetch("/api/buzzy/art", {
@@ -764,7 +899,8 @@
           body: JSON.stringify({ action: "edit", jobId: jobId || undefined, imageId: imageId, mask: maskDataUrl(), instruction: instruction }),
         }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, status: r.status, d: d }; }); })
           .then(function (res) {
-            btn.disabled = false;
+            regionBusy = false;
+            enableControls();
             if (!res.ok) {
               note.textContent = res.status === 402 ? "Art is part of the paid plans — " + (res.d.error || "")
                 : "Could not change it: " + (res.d.error || "unknown");
@@ -772,50 +908,73 @@
             }
             lastRenderUrl = res.d.image.url;
             img.src = res.d.image.url;
-            document.getElementById("resultLink").href = res.d.image.url;
+            $("resultLink").href = res.d.image.url;
             addImage(res.d.image.url, { x: 60 + images.length * 18, y: 60 + images.length * 18 });
             picked = null;
             rectEl.style.display = "none";
             note.textContent = "Changed in " + Math.round((res.d.ms || 0) / 100) / 10 + "s — saved to this project.";
             flushSave();
           })
-          .catch(function (e) { btn.disabled = false; note.textContent = "Failed: " + e.message; });
+          .catch(function (e) { regionBusy = false; enableControls(); note.textContent = "Failed: " + e.message; });
       });
     })();
 
     // ── load the saved board ──────────────────────────────────────────
+    function validBoard(board) {
+      if (board === null) return true; // owned project with no board yet
+      if (!board || typeof board !== "object" || Array.isArray(board) ||
+          (board.version !== undefined && board.version !== 1) || !Array.isArray(board.strokes) || !Array.isArray(board.images)) return false;
+      function point(p) { return p && Number.isFinite(p.x) && Number.isFinite(p.y); }
+      return board.strokes.every(function (s) {
+        if (!s || typeof s !== "object" || Array.isArray(s)) return false;
+        if (s.tool === "pen") return Array.isArray(s.points) && s.points.every(point);
+        if (s.tool === "text") return Number.isFinite(s.x1) && Number.isFinite(s.y1) && (s.text === undefined || typeof s.text === "string");
+        return ["line", "arrow", "rect"].indexOf(s.tool) >= 0 &&
+          [s.x1, s.y1, s.x2, s.y2].every(Number.isFinite);
+      }) && board.images.every(function (im) {
+        return im && typeof im.url === "string" && [im.x, im.y, im.w, im.h].every(Number.isFinite);
+      });
+    }
     function load() {
-      if (!jobId) { resize(); return; }
-      // The board belongs to a project; show the project's name, not "New board".
-      fetch("/api/buzzy/projects/" + encodeURIComponent(jobId), { credentials: "same-origin" })
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (p) {
-          var t = p && p.project && p.project.title ? String(p.project.title) : "";
-          if (t) {
-            titleEl.textContent = t;
-            document.title = t + " — BeeZilla Sketch";
-          }
-        })
-        .catch(function () {});
-      fetch("/api/buzzy/art?job=" + encodeURIComponent(jobId), { credentials: "same-origin" })
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          if (d && d.board) {
-            strokes = d.board.strokes || [];
-            images = d.board.images || [];
-          }
-          if (d && d.images && d.images.length) {
+      if (loading || hydrated || !currentPage()) { resize(); return; }
+      var requestedJob = jobId;
+      loading = true;
+      enableControls();
+      setStatus("Loading saved board…");
+      fetch("/api/buzzy/art?job=" + encodeURIComponent(requestedJob), { credentials: "same-origin" })
+        .then(function (r) {
+          if (!r.ok) throw new Error("Could not load the board.");
+          return r.json();
+        }).then(function (d) {
+          if (!currentPage() || requestedJob !== jobId) return;
+          if (!d || d.ok !== true || !Object.prototype.hasOwnProperty.call(d, "board") || !validBoard(d.board) ||
+              !Array.isArray(d.images) || !d.images.every(function (im) { return im && typeof im.url === "string"; })) throw new Error("Invalid board response.");
+          strokes = d.board ? d.board.strokes : [];
+          images = d.board ? d.board.images : [];
+          if (d.images.length) {
             var last = d.images[d.images.length - 1];
             lastRenderUrl = last.url;
-            var box = document.getElementById("result");
-            box.style.display = "block";
-            document.getElementById("resultImg").src = last.url;
-            document.getElementById("resultLink").href = last.url;
+            $("result").style.display = "block";
+            $("resultImg").src = last.url;
+            $("resultLink").href = last.url;
           }
-          resize();
-          renderImages();
-        })
-        .catch(function () { resize(); });
+          resize(); renderImages();
+          hydrated = true;
+          setStatus("Board loaded. Changes are saved to this project.");
+          // Title is presentation only; it cannot authorize hydration or writing.
+          fetch("/api/buzzy/projects/" + encodeURIComponent(requestedJob), { credentials: "same-origin" })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (p) {
+              if (!currentPage() || requestedJob !== jobId) return;
+              var t = p && p.project && typeof p.project.title === "string" ? p.project.title : "";
+              if (t) { titleEl.textContent = t; document.title = t + " — BeeZilla Sketch"; }
+            }).catch(function () {});
+        }).catch(function () {
+          if (currentPage()) setStatus("Could not load this board. Use Retry load before editing; the saved board has not been changed.");
+        }).then(function () {
+          loading = false;
+          if (ownsPage()) enableControls();
+        });
     }
 
     // A board with no project gets one when the owner first PUTS something on it —
@@ -824,7 +983,11 @@
     // projects (BZ-13, Nov 2026). One promise, so a burst of strokes still makes one.
     var jobPromise = null;
     function ensureJob() {
-      if (jobId) return Promise.resolve(jobId);
+      if (!ownsPage() || !hydrated) return Promise.reject(new Error("Board is not ready."));
+      if (jobId) {
+        if (!initialJobId && currentPage()) history.replaceState({}, "", "/buzzy/sketch?job=" + encodeURIComponent(jobId));
+        return Promise.resolve(jobId);
+      }
       if (jobPromise) return jobPromise;
       var id = "job_art_" + Date.now().toString(36);
       // POST /api/buzzy/jobs is the upsert (a PUT to /jobs/<id> is a 404 — the
@@ -834,9 +997,9 @@
         body: JSON.stringify({ id: id, title: "Sketch board", status: "In progress", data: {} }),
       }).then(function (r) {
         if (!r.ok) throw new Error("could not open a board");
+        var active = currentPage();
         jobId = id;
-        history.replaceState({}, "", "/buzzy/sketch?job=" + encodeURIComponent(id));
-        setStatus("New board ready. Drop images, draw, then Create.");
+        if (active) history.replaceState({}, "", "/buzzy/sketch?job=" + encodeURIComponent(id));
         return id;
       }).catch(function (e) {
         // One failed attempt must not become one POST per brush stroke: retry on a
@@ -852,6 +1015,7 @@
     // landing, #bzPage gaining its flex on a soft hop) must re-measure the backing
     // store, or the canvas keeps the size it guessed at parse time.
     if (window.ResizeObserver) new ResizeObserver(function () { resize(); }).observe(stage);
+    enableControls();
     load();
   })();
 </script>

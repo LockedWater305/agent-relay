@@ -1,3 +1,4 @@
+import { createDocumentTransition } from "../desktop/document-transition.mjs";
 /**
  * Settings provenance across the actual main/IPC/preload restart lifecycle.
  * Node built-ins only, synthetic credentials and disposable stores. Electron,
@@ -80,6 +81,7 @@ async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDi
     "./logger.mjs": { installLogging() {}, logLine() {}, logPaths: () => ({}) },
     "./connect.mjs": { ...connect, managedAccountConnectCapability: () => connect.managedAccountConnectCapability?.(env), connectAccount: unexpected("Connect"), cloudBaseUrl: unexpected("cloud URL") },
     "./csp.mjs": { createDesktopCsp: unexpected("CSP install"), loadCspManifest: unexpected("manifest") },
+    "./document-transition.mjs": { createDocumentTransition },
     "./security.mjs": security,
     "./library-vault.mjs": { createLibraryTransition: (deps) => createLibraryTransition({ ...deps, fetchImpl: libraryFetch ?? unexpected("Library network") }) },
   };
@@ -126,16 +128,17 @@ export const testApi = {
   function windowFixture(id, route) {
     let bridge;
     const timers = [], ipcRenderer = new EventEmitter();
-    const historyWindow = {}, windowEvents = new Map();
+    const historyWindow = {}, windowEvents = new EventEmitter();
+    let historyDocument = {};
     let destroyed = false;
     const historyStorage = { get length() { return libraryStorage.size; }, getItem: (key) => libraryStorage.get(key) ?? null,
       key: (i) => [...libraryStorage.keys()][i] ?? null, setItem: (key,value) => libraryStorage.set(key,String(value)), removeItem: (key) => libraryStorage.delete(key) };
-    const wc = {
-      executeJavaScript: async (code) => vm.runInNewContext(code, { window: historyWindow, localStorage: historyStorage }),
+    const wc = Object.assign(new EventEmitter(), {
+      executeJavaScript: async (code) => vm.runInNewContext(code, { window: historyWindow, document: historyDocument, location: new URL(wc.getURL()), localStorage: historyStorage }),
       id, mainFrame: { url: `http://127.0.0.1:7331${route}` },
       getURL() { return this.mainFrame.url; }, isDestroyed: () => destroyed,
       send(channel, payload) { notifications.push({ id, channel, payload }); ipcRenderer.emit(channel, {}, payload); },
-    };
+    });
     ipcRenderer.invoke = async (channel, payload) => {
       const result = await ipc.get(channel)({ sender: wc, senderFrame: wc.mainFrame }, payload);
       responses.push({ channel, result });
@@ -147,11 +150,20 @@ export const testApi = {
       require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { bridge = value; } }, ipcRenderer }),
       process: { isMainFrame: true }, URL,
       setTimeout: (fn) => { timers.push(fn); return timers.length; },
-      window: { location: { replace: (value) => { wc.mainFrame.url = value; } } },
+      window: { location: { replace: (value) => {
+        // Actual replace creates a new document: the old document-local leases
+        // do not survive merely because this synthetic storage/bridge is reused.
+        wc.mainFrame = { url: value }; historyDocument = {};
+        delete historyWindow.__bzDesktopDocumentLease;
+        delete historyWindow.__bzLibraryVaultBarrier;
+        wc.emit("did-navigate", {}, value, 200, "OK");
+      } } },
     });
     return { webContents: wc, isDestroyed: () => destroyed, bridge, historyWindow,
-      on: (name,fn) => windowEvents.set(name,fn),
-      close: () => { let prevented = false; windowEvents.get("close")?.({preventDefault: () => { prevented=true; }}); if (!prevented) { destroyed=true; lifecycle.push("closed"); } },
+      on: (name,fn) => windowEvents.on(name,fn),
+      once: (name,fn) => windowEvents.once(name,fn),
+      removeListener: (name,fn) => windowEvents.removeListener(name,fn),
+      close: () => { let prevented = false; windowEvents.emit("close", {preventDefault: () => { prevented=true; }}); if (!prevented) { destroyed=true; lifecycle.push("closed"); windowEvents.emit("closed"); } },
       flush: () => { while (timers.length) timers.shift()(); } };
   }
   const mainWindow = windowFixture(1, "/buzzy/talk?existing=1#chat");

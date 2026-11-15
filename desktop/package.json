@@ -32,7 +32,8 @@
       "logger.mjs",
       "security.mjs",
       "csp.mjs",
-      "library-vault.mjs"
+      "library-vault.mjs",
+      "document-transition.mjs"
     ],
     "extraResources": [
       {

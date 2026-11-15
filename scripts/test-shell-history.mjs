@@ -163,7 +163,7 @@ function pageDocument(key, external = false) {
   return doc;
 }
 
-function harness(initialKey = TALK) {
+export function harness(initialKey = TALK) {
   const document = pageDocument(initialKey);
   // The hard-loaded page has already run its own scripts.
   document.body.querySelector("script").remove();
@@ -243,7 +243,7 @@ function harness(initialKey = TALK) {
 
   const flush = async () => { for (let i = 0; i < 100; i++) await Promise.resolve(); };
   return {
-    context, document, location, history, entries, pushes, replacements, assignments, requests,
+    context, document, location, history, entries, pushes, replacements, assignments, requests, events,
     boots, readyEvents, heldFetches, externalPages, externalScripts, flush,
     get shell() { return context.BeeZillaShell; },
     async idle() { await flush(); assert.equal(this.shell.busy, false, "shell should settle"); },
