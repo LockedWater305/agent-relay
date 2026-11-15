@@ -2270,9 +2270,9 @@ export default defineEventHandler(async (event) => {
         ? (body.fields as Record<string, unknown>)
         : {};
     const sql = await getSql();
-    const { saved, rejected } = await saveProfile(sql, user.id, values);
+    const { saved, cleared, rejected } = await saveProfile(sql, user.id, values);
     const profile = await getProfile(sql, user.id);
-    return { saved, rejected, profile };
+    return { saved, cleared, rejected, profile };
   }
 
   // ── POST /api/buzzy/profile/reuse — copy chosen defaults into a job ─────
