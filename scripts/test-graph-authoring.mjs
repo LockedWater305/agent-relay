@@ -16,6 +16,8 @@ const html = read('public/buzzy/graph.html');
 const routeSource = stripTypeScriptTypes(read('src/lib/buzzy/chat.nitro.ts'));
 const graphSource = stripTypeScriptTypes(read('src/lib/buzzy/graphs.ts'));
 const plain = value => JSON.parse(JSON.stringify(value));
+const initialState = html.match(/^    var state = .*;$/m)?.[0];
+assert.ok(initialState, 'actual canvas initial state');
 
 function functionSource(name) {
   const start = html.indexOf('    function ' + name + '(');
@@ -116,7 +118,18 @@ async function harness(t) {
     });
     return elements.get(id);
   }
-  const requests = [], tasks = [];
+  const requests = [], tasks = [], openReplies = [], saveReplies = [];
+  function holdOpen(stage = 'response', target = 'open') {
+    let ready, accept, reject;
+    const started = new Promise(resolve => { ready = resolve; });
+    const promise = new Promise((resolve, fail) => { accept = resolve; reject = fail; });
+    const hold = { stage, ready, promise, started,
+      release(...args) { accept({ overridden: args.length > 0, data: args[0] }); },
+      reject(error = Error('Synthetic Open transport failure')) { reject(error); },
+    };
+    (target === 'save' ? saveReplies : openReplies).push(hold);
+    return hold;
+  }
   async function request(url, init = {}) {
     assert.match(url, /^\/api\/buzzy\/graphs(?:\/[A-Za-z0-9_-]+)?(?:\?[^#]*)?$/,
       'the fixture never runs a graph or calls a provider');
@@ -127,12 +140,12 @@ async function harness(t) {
       }),
     };
     const data = plain(await route.namespace.default(event));
-    const result = { url, method: init.method || 'GET', status: event.status, data };
+    const result = { url, method: init.method || 'GET',
+      requestBody: init.body ? JSON.parse(init.body) : null, status: event.status, data };
     requests.push(result);
     return result;
   }
   const ui = vm.createContext({
-    state: { graphId: null, nodes: [], edges: [], sel: null, linkFrom: null, seq: 0 },
     document: { getElementById: element, querySelectorAll: selector => {
       assert.equal(selector, '[data-add]');
       return [element('add-gate')];
@@ -140,22 +153,33 @@ async function harness(t) {
     canvas: element('canvas'), statusEl: element('status'),
     draw() {}, inspect() {}, loadList() {},
     fetch(url, init) {
-      const task = request(url, init).then(({ data, status }) => Response.json(data, { status }));
+      const hold = url === '/api/buzzy/graphs' && init?.method === 'POST' ? saveReplies.shift()
+        : /^\/api\/buzzy\/graphs\/[A-Za-z0-9_-]+$/.test(url) && !init?.method ? openReplies.shift() : null;
+      const task = request(url, init).then(({ data, status }) => {
+        if (!hold) return Response.json(data, { status });
+        if (hold.stage === 'json') return { status, json() {
+          hold.ready();
+          return hold.promise.then(reply => reply.overridden ? reply.data : data);
+        } };
+        hold.ready();
+        return hold.promise.then(reply => Response.json(reply.overridden ? reply.data : data, { status }));
+      });
       tasks.push(task);
       return task;
     },
   });
-  vm.runInContext(['say', 'rid', 'byId', 'defaultConfig', 'addNode', 'open'].map(functionSource).join('\n')
+  vm.runInContext(initialState + '\n' + ['say', 'rid', 'byId', 'defaultConfig', 'addNode', 'open'].map(functionSource).join('\n')
     + '\n' + addHandlers + linkHandlers + saveNewHandlers, ui);
+  async function settle() { for (let i = 0; i < 200; i++) await Promise.resolve(); }
   async function flush() {
     for (let pass = 0; pass < 5; pass++) {
-      await Promise.all(tasks);
-      for (let i = 0; i < 50; i++) await Promise.resolve();
+      await Promise.allSettled(tasks);
+      await settle();
     }
   }
   t.after(() => assert.equal(forbiddenCalls, 0, 'no unrelated model/private dependency used'));
   return {
-    db, ui, requests, queries, as: id => { user = id; },
+    db, ui, requests, queries, holdOpen, holdSave: stage => holdOpen(stage, 'save'), settle, flush, as: id => { user = id; },
     status: () => element('status').textContent,
     nodes: () => plain(ui.state.nodes), edges: () => plain(ui.state.edges),
     add() { element('add-gate').fire('click'); return ui.state.sel; },
@@ -173,11 +197,16 @@ async function harness(t) {
       element('del').fire('click');
     },
     async open(id) { ui.open(id); await flush(); },
+    startOpen(id) { ui.open(id); },
     async save(title = 'Synthetic saved workflow') {
       element('title').value = title;
       element('save').fire('click');
       await flush();
       return requests.filter(r => r.method === 'POST').at(-1);
+    },
+    startSave(title = 'Synthetic saved workflow') {
+      element('title').value = title;
+      element('save').fire('click');
     },
     post: body => request('/api/buzzy/graphs', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
@@ -328,4 +357,238 @@ test('signed-out authoring and other-owner loading retain existing isolation', a
   h.as('other_owner');
   assert.equal((await h.request('/api/buzzy/graphs/' + id)).status, 404);
   assert.equal(h.snapshot(), before);
+});
+
+async function describedGraph(h, description, title = 'Described workflow') {
+  const body = { title, description,
+    nodes: [
+      { key: 'n1', kind: 'gate', title: 'Keep first', config: { approval: true, note: 'unchanged' }, x: 40, y: 50 },
+      { key: 'n3', kind: 'gate', title: 'Keep last', config: { approval: true }, x: 240, y: 50 },
+    ], edges: [{ from: 'n1', to: 'n3', kind: 'gate' }],
+  };
+  const saved = await h.post(body);
+  assert.equal(saved.status, 200);
+  return { ...body, id: saved.data.id };
+}
+function storedDescription(h, id) {
+  const row = h.db.prepare('SELECT description, spec, version FROM buzzy_graphs WHERE id=?').get(id);
+  return { description: row.description, specDescription: JSON.parse(row.spec).description, version: row.version };
+}
+function assertDescription(h, id, description, version) {
+  assert.deepEqual(storedDescription(h, id), { description, specDescription: description, version });
+}
+
+for (const [name, description, add] of [
+  ['no-edit', 'Preserve newline\nquotes " & non-ASCII 🐝 日本語', false],
+  ['add/link', 'Existing workflow instructions', true],
+  ['2000-unit boundary', 'é'.repeat(1998) + '🐝', false],
+]) {
+  test(`description survives ${name} Save, reload and unrelated graph isolation`, async t => {
+    const h = await harness(t);
+    const other = await describedGraph(h, 'Unrelated description', 'Other workflow');
+    const graph = await describedGraph(h, description);
+    const otherBefore = h.db.prepare('SELECT * FROM buzzy_graphs WHERE id=?').get(other.id);
+    await h.open(graph.id);
+    const nodesBefore = h.nodes(), edgesBefore = h.edges();
+    if (add) h.link('n3', h.add());
+    const saved = await h.save(graph.title);
+    assert.equal(saved.status, 200);
+    assertDescription(h, graph.id, description, 2);
+    assert.equal(saved.requestBody.description, description);
+    await h.open(graph.id);
+    assert.equal(h.ui.state.description, description);
+    for (const node of nodesBefore) assert.deepEqual(h.nodes().find(n => n.key === node.key), node);
+    assert.deepEqual(h.edges().slice(0, edgesBefore.length), edgesBefore);
+    assert.deepEqual(h.db.prepare('SELECT * FROM buzzy_graphs WHERE id=?').get(other.id), otherBefore);
+    assert.equal((await h.request('/api/buzzy/graphs/' + graph.id)).data.graph.description, description);
+  });
+}
+
+test('description API control: explicit clearing and omitted replacement retain existing semantics', async t => {
+  const h = await harness(t);
+  for (const mode of ['empty', 'null', 'omitted']) {
+    const graph = await describedGraph(h, 'Must be explicitly replaceable');
+    const body = { ...graph, description: mode === 'empty' ? '' : null };
+    if (mode === 'omitted') delete body.description;
+    const saved = await h.post(body);
+    assert.equal(saved.status, 200);
+    assertDescription(h, graph.id, null, 2);
+  }
+});
+
+test('description resets across described, null, empty and New graphs without editing prior work', async t => {
+  const h = await harness(t);
+  const a = await describedGraph(h, 'Description A', 'A');
+  const b = await describedGraph(h, null, 'B');
+  const c = await describedGraph(h, null, 'C');
+  // Legacy empty-string storage is readable, but the unchanged API normalizes
+  // empty description to null on Save. It must never inherit another graph's text.
+  h.db.prepare('UPDATE buzzy_graphs SET description=? WHERE id=?').run('', c.id);
+  await h.open(a.id); assert.equal(h.ui.state.description, 'Description A');
+  await h.open(b.id); assert.equal(h.ui.state.description, null);
+  await h.save(b.title); assertDescription(h, b.id, null, 2);
+  await h.open(a.id); await h.open(c.id); assert.equal(h.ui.state.description, '');
+  await h.save(c.title); assertDescription(h, c.id, null, 2);
+  await h.open(a.id);
+  h.newGraph();
+  assert.equal(h.ui.state.graphId, null);
+  assert.equal(h.ui.state.description, null);
+  h.add(); const fresh = await h.save('New graph');
+  assert.notEqual(fresh.data.id, a.id);
+  assertDescription(h, fresh.data.id, null, 1);
+  assertDescription(h, a.id, 'Description A', 1);
+});
+
+test('description is present as null on the first new canvas save', async t => {
+  const h = await harness(t);
+  assert.equal(h.ui.state.description, null);
+  h.add(); const saved = await h.save();
+  assert.equal(saved.requestBody.description, null);
+  assertDescription(h, saved.data.id, null, 1);
+});
+
+test('failed validation Save preserves current identity/description and retry round-trips it', async t => {
+  const h = await harness(t), graph = await describedGraph(h, 'Keep through failed Save');
+  await h.open(graph.id);
+  const before = h.snapshot();
+  h.ui.state.nodes[1].key = 'n1';
+  const failed = await h.save();
+  assert.equal(failed.status, 400);
+  assert.equal(failed.data.code, 'duplicate_node');
+  assert.equal(h.snapshot(), before);
+  assert.equal(h.ui.state.graphId, graph.id);
+  assert.equal(h.ui.state.description, graph.description);
+  h.ui.state.nodes[1].key = 'n3';
+  const retry = await h.save(graph.title);
+  assert.equal(retry.status, 200);
+  assertDescription(h, graph.id, graph.description, 2);
+});
+
+for (const stage of ['response', 'json']) {
+  for (const newer of ['another graph', 'New']) {
+    test(`stale Open ${stage} cannot replace description/identity after ${newer}`, async t => {
+      const h = await harness(t);
+      const a = await describedGraph(h, 'Old delayed description', 'Old');
+      const b = await describedGraph(h, 'New current description', 'Current');
+      const held = h.holdOpen(stage);
+      h.startOpen(a.id); await held.started;
+      if (newer === 'New') { h.newGraph(); h.add(); }
+      else { h.startOpen(b.id); await h.settle(); }
+      const intended = { graphId: h.ui.state.graphId, description: h.ui.state.description, nodes: h.nodes(), edges: h.edges(), status: h.status() };
+      assert.equal(intended.graphId, newer === 'New' ? null : b.id);
+      held.release(); await h.flush();
+      assert.deepEqual({ graphId: h.ui.state.graphId, description: h.ui.state.description, nodes: h.nodes(), edges: h.edges(), status: h.status() }, intended);
+      const saved = await h.save('Save current only');
+      assert.equal(saved.status, 200);
+      assertDescription(h, saved.data.id, newer === 'New' ? null : b.description, newer === 'New' ? 1 : 2);
+      assertDescription(h, a.id, a.description, 1);
+    });
+  }
+}
+
+for (const stage of ['response', 'json']) {
+  test(`current Open ${stage} rejection preserves previously loaded graph and description`, async t => {
+    const h = await harness(t), a = await describedGraph(h, 'Keep active'), b = await describedGraph(h, 'Failed target');
+    await h.open(a.id);
+    const before = { graphId: h.ui.state.graphId, description: h.ui.state.description, nodes: h.nodes(), edges: h.edges() };
+    const held = h.holdOpen(stage);
+    h.startOpen(b.id); await held.started; held.reject(); await h.flush();
+    assert.deepEqual({ graphId: h.ui.state.graphId, description: h.ui.state.description, nodes: h.nodes(), edges: h.edges() }, before);
+    assert.match(h.status(), /Could not open/);
+    await h.save(a.title);
+    assertDescription(h, a.id, a.description, 2);
+    assertDescription(h, b.id, b.description, 1);
+  });
+  test(`stale Open ${stage} failure cannot repaint a newer successful selection`, async t => {
+    const h = await harness(t), a = await describedGraph(h, 'Delayed'), b = await describedGraph(h, 'Current');
+    const held = h.holdOpen(stage);
+    h.startOpen(a.id); await held.started;
+    h.startOpen(b.id); await h.settle();
+    const currentStatus = h.status();
+    held.reject(); await h.flush();
+    assert.equal(h.ui.state.graphId, b.id);
+    assert.equal(h.ui.state.description, b.description);
+    assert.equal(h.status(), currentStatus);
+  });
+}
+
+for (const malformed of ['not-ok', 'wrong-id', 'bad-description', 'bad-nodes', 'bad-edges', 'broken-node']) {
+  test(`Open ${malformed} payload commits neither identity nor description`, async t => {
+    const h = await harness(t), a = await describedGraph(h, 'Keep A'), b = await describedGraph(h, 'Not B');
+    await h.open(a.id);
+    const before = { graphId: h.ui.state.graphId, description: h.ui.state.description, nodes: h.nodes(), edges: h.edges() };
+    const held = h.holdOpen('json');
+    h.startOpen(b.id); await held.started;
+    const payload = (await h.request('/api/buzzy/graphs/' + b.id)).data;
+    if (malformed === 'not-ok') { payload.ok = false; payload.error = 'Could not open synthetic target'; }
+    if (malformed === 'wrong-id') payload.graph.id = a.id;
+    if (malformed === 'bad-description') payload.graph.description = { unexpected: true };
+    if (malformed === 'bad-nodes') payload.graph.nodes = null;
+    if (malformed === 'bad-edges') payload.graph.edges = null;
+    if (malformed === 'broken-node') payload.graph.nodes = [null];
+    held.release(payload); await h.flush();
+    assert.deepEqual({ graphId: h.ui.state.graphId, description: h.ui.state.description, nodes: h.nodes(), edges: h.edges() }, before);
+    assert.match(h.status(), /Could not open/);
+    await h.save(a.title);
+    assertDescription(h, a.id, a.description, 2);
+    assertDescription(h, b.id, b.description, 1);
+  });
+}
+
+test('missing description in an incomplete Open response cannot erase known metadata', async t => {
+  const h = await harness(t), a = await describedGraph(h, 'Description A'), b = await describedGraph(h, null);
+  await h.open(a.id);
+  const held = h.holdOpen('json'); h.startOpen(b.id); await held.started;
+  const payload = (await h.request('/api/buzzy/graphs/' + b.id)).data;
+  delete payload.graph.description;
+  held.release(payload); await h.flush();
+  assert.equal(h.ui.state.graphId, a.id);
+  assert.equal(h.ui.state.description, a.description);
+  assert.match(h.status(), /Could not open/);
+  await h.save(a.title);
+  assertDescription(h, a.id, a.description, 2);
+  assertDescription(h, b.id, null, 1);
+});
+
+for (const stage of ['response', 'json']) {
+  for (const selection of ['another graph', 'New']) {
+    test(`older Save ${stage} success cannot pair current description with old ID after ${selection}`, async t => {
+      const h = await harness(t), a = await describedGraph(h, 'Old A'), b = await describedGraph(h, 'Current B');
+      await h.open(a.id);
+      const held = h.holdSave(stage); h.startSave(a.title); await held.started;
+      if (selection === 'New') { h.newGraph(); h.add(); }
+      else { h.startOpen(b.id); await h.settle(); }
+      const intended = { graphId: h.ui.state.graphId, description: h.ui.state.description, nodes: h.nodes(), edges: h.edges(), status: h.status() };
+      held.release(); await h.flush();
+      assert.deepEqual({ graphId: h.ui.state.graphId, description: h.ui.state.description, nodes: h.nodes(), edges: h.edges(), status: h.status() }, intended);
+      const current = await h.save('Save intended graph');
+      assert.equal(current.status, 200);
+      assertDescription(h, a.id, a.description, 2);
+      assertDescription(h, current.data.id, selection === 'New' ? null : b.description, selection === 'New' ? 1 : 2);
+    });
+  }
+}
+
+test('older Save failure cannot repaint a newer loaded graph', async t => {
+  const h = await harness(t), a = await describedGraph(h, 'A'), b = await describedGraph(h, 'B');
+  await h.open(a.id);
+  const held = h.holdSave('json'); h.startSave(a.title); await held.started;
+  h.startOpen(b.id); await h.settle(); const status = h.status();
+  held.release({ ok: false, error: 'Old save failed' }); await h.flush();
+  assert.equal(h.ui.state.graphId, b.id); assert.equal(h.ui.state.description, b.description);
+  assert.equal(h.status(), status);
+});
+
+test('failed Open does not retire an accepted Save of the still-current graph', async t => {
+  const h = await harness(t);
+  h.add();
+  const held = h.holdSave('response'); h.startSave('Current new workflow'); await held.started;
+  h.startOpen('graph_missing'); await h.settle();
+  assert.equal(h.ui.state.graphId, null);
+  assert.match(h.status(), /No such graph/);
+  held.release(); await h.flush();
+  assert.ok(h.ui.state.graphId);
+  assert.equal(h.ui.state.description, null);
+  assert.equal(h.status(), 'Saved · version 1');
+  assertDescription(h, h.ui.state.graphId, null, 1);
 });
