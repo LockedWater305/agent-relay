@@ -1518,8 +1518,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     // ── Artifact shelf ───────────────────────────────────────────────
     // Everything the account has actually produced, as usable things: audio with a
     // player, images with a preview, anything else as a named download. Read from
-    // /api/buzzy/assets, which returns name/url/type aliases so a card needs no
-    // special-casing per kind.
+    // /api/buzzy/assets returns owned rows, not public URLs. Always use the
+    // authenticated same-origin content route, never a supplied URL alias.
     function artifactKind(item) {
       var t = String(item.type || item.content_type || "");
       if (t.indexOf("audio/") === 0) return "audio";
@@ -1533,46 +1533,68 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " kB";
       return (b / (1024 * 1024)).toFixed(1) + " MB";
     }
+    function artifactAssetUrl(item) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("Invalid asset row");
+      var id = item.id;
+      if (typeof id !== "number" && typeof id !== "string") throw new Error("Invalid asset id");
+      if (!/^[1-9][0-9]*$/.test(String(id)) || !Number.isSafeInteger(Number(id))) throw new Error("Invalid asset id");
+      return "/api/buzzy/assets/" + id;
+    }
     function loadArtifactShelf() {
       var host = document.getElementById("artifactShelf");
-      if (!host) return; // navigated away before the fetch landed
-      fetch("/api/buzzy/assets?limit=60", { credentials: "same-origin" })
-        .then(function (r) { return r.ok ? r.json() : null; })
+      if (!host || !host.isConnected || !/^\/buzzy\/library(?:\.html)?\/?$/.test(window.location.pathname)) return;
+      var request = {};
+      host.__bzArtifactRequest = request;
+      // The shell can move the URL before it replaces the mounted DOM. A
+      // still-owned shelf may finish its read (including Back/page restore),
+      // but no old response may paint a replacement or a newer request.
+      function current() {
+        return host.isConnected && document.getElementById("artifactShelf") === host && host.__bzArtifactRequest === request;
+      }
+      return fetch("/api/buzzy/assets?limit=60", { credentials: "same-origin", redirect: "error", headers: { Accept: "application/json" } })
+        .then(function (r) {
+          if (!current()) return null;
+          if (!r.ok) throw new Error("Asset list unavailable");
+          return r.json();
+        })
         .then(function (d) {
-          var host2 = document.getElementById("artifactShelf");
-          if (!host2) return;
-          var items = (d && (d.items || d.assets)) || [];
+          if (!current()) return;
+          if (!d || typeof d !== "object" || Array.isArray(d) || d.ok === false || d.error) throw new Error("Invalid asset list");
+          var items = d.items === undefined ? d.assets : d.items;
+          if (!Array.isArray(items)) throw new Error("Invalid asset list");
+          var assetUrls = items.map(artifactAssetUrl);
           if (!items.length) {
-            host2.innerHTML = "";
+            host.innerHTML = "";
             return;
           }
           var audioCount = items.filter(function (i) { return artifactKind(i) === "audio"; }).length;
           var total = items.reduce(function (a, i) { return a + (Number(i.bytes) || 0); }, 0);
-          host2.innerHTML =
+          host.innerHTML =
             "<div class='shelf-head'><span class='shelf-title'>Artifacts</span>" +
             "<span class='shelf-meta'>" + items.length + " file" + (items.length === 1 ? "" : "s") +
             (audioCount ? " · " + audioCount + " audio" : "") + " · " + humanBytes(total) + "</span></div>" +
             "<div class='shelf-grid'>" +
-            items.map(function (i) {
+            items.map(function (i, index) {
               var kind = artifactKind(i);
-              var name = escHtml(i.name || i.filename || "untitled");
+              var label = (typeof i.name === "string" && i.name) || (typeof i.filename === "string" && i.filename) || "untitled";
+              var name = escHtml(label), nameAttr = escAttr(label), url = escAttr(assetUrls[index]);
               var when = i.created_at ? new Date(i.created_at).toLocaleDateString() : "";
               var body =
-                kind === "audio" ? "<audio controls preload='none' src='" + escAttr(i.url) + "'></audio>" :
-                kind === "image" ? "<img loading='lazy' src='" + escAttr(i.url) + "' alt='" + name + "' />" :
-                kind === "video" ? "<video controls preload='none' src='" + escAttr(i.url) + "'></video>" :
-                "<a class='shelf-dl' href='" + escAttr(i.url) + "' download>Download</a>";
+                kind === "audio" ? "<audio controls preload='none' src='" + url + "'></audio>" :
+                kind === "image" ? "<img loading='lazy' src='" + url + "' alt='" + nameAttr + "' />" :
+                kind === "video" ? "<video controls preload='none' src='" + url + "'></video>" :
+                "<a class='shelf-dl' href='" + url + "' download>Download</a>";
               return "<div class='shelf-card kind-" + kind + "'>" + body +
-                "<div class='shelf-name' title='" + name + "'>" + name + "</div>" +
+                "<div class='shelf-name' title='" + nameAttr + "'>" + name + "</div>" +
                 "<div class='shelf-sub'>" + humanBytes(i.bytes) + (when ? " · " + when : "") + "</div>" +
                 "</div>";
             }).join("") +
             "</div>";
         })
         .catch(function () {
-          var host3 = document.getElementById("artifactShelf");
-          if (host3) host3.innerHTML = "<p class='muted'>Artifacts could not be loaded just now.</p>";
-        });
+          if (current()) host.innerHTML = "<p class='muted'>Artifacts could not be loaded just now.</p>";
+        })
+        .finally(function () { if (host.__bzArtifactRequest === request) delete host.__bzArtifactRequest; });
     }
 
     /* ── Server deliverables ────────────────────────────────────────
