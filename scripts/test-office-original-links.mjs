@@ -175,3 +175,32 @@ test('an owned link never serves a foreign job and ignores supplied URL authorit
  const e=await envelope(raw);assert.match(e.document.downloadUrl,/^\/api\/buzzy\/jobs\/job_file\/document\?original=[a-f0-9]{64}$/);assert.doesNotMatch(e.markup,/outside\.invalid/);
  const foreign=await envelope(raw,{recordId:'job_foreign'});const response=await h.fetch(foreign.document.downloadUrl);assert.equal(response.status,404);assert.equal(h.events.length,0);assert.equal(h.renderCalls.length,0);
 });
+
+// Legacy originals: actual Nitro route, synthetic H3/telemetry, SQLite custody.
+for (const [format, filename] of [
+ ['pptx', 'Plan & 日本語.pptx'], ['xlsx', 'Budget 📊.xlsx'],
+ ['docx', 'café "quotes" \\ notes.docx'], ['docx', 'literal%20 (v1)\'*.docx'],
+ ['docx', 'plain.docx'],
+]) test('legacy original exact filename and bytes: '+filename, async t => {
+ const h=await backend(t),raw=artifact(format,{filename});h.set('job_file',raw,true);const before=h.snapshot();
+ const res=await h.fetch('/api/buzzy/jobs/job_file/document');assert.equal(res.status,200);
+ assert.equal(res.headers.get('content-type'),MIME[format]);
+ const disposition=res.headers.get('content-disposition');assert.match(disposition,/^attachment; filename="[\x20-\x7e]*"; filename\*=UTF-8''/);
+ assert.equal(decodeURIComponent(disposition.split("filename*=UTF-8''")[1]),filename);
+ assert.deepEqual(Buffer.from(await res.arrayBuffer()),Buffer.from(raw.bytesB64,'base64'));
+ assert.equal(h.events.length,1);assert.equal(h.events[0].event,'exported');assert.equal(h.renderCalls.length,0);assert.deepEqual(h.snapshot(),before);
+});
+for(const patch of [{filename:'bad\r\nX-Test: value.pptx'},{filename:'bad\0.pptx'},{filename:'bad\u0085.pptx'},{filename:'bad\ud800.pptx'},{filename:'bad\udc00.pptx'},{filename:{unexpected:true}},{contentType:'text/plain\r\nX-Test: value'}]) test('legacy malformed metadata refuses before success telemetry: '+JSON.stringify(patch),async t=>{
+ const h=await backend(t);h.set('job_file',artifact('pptx',patch),true);const before=h.snapshot();
+ const res=await h.fetch('/api/buzzy/jobs/job_file/document');assert.equal(res.status,422);assert.equal((await res.json()).code,'invalid_original_metadata');
+ assert.equal(h.events.length,0);assert.equal(h.renderCalls.length,0);assert.deepEqual(h.snapshot(),before);
+});
+for(const [principal,approved,status]of [[null,true,401],['foreign',true,404],['owner',false,403]])test('legacy malformed metadata never precedes access refusal '+status,async t=>{
+ const h=await backend(t);h.set('job_file',artifact('pptx',{filename:'bad\ud800.pptx'}),approved);h.user(principal);
+ assert.equal((await h.fetch('/api/buzzy/jobs/job_file/document')).status,status);assert.equal(h.events.length,0);assert.equal(h.renderCalls.length,0);
+});
+test('legacy original absent filename retains default and absent MIME retains Word default',async t=>{
+ const h=await backend(t),raw=artifact('docx',{filename:null,contentType:null});h.set('job_file',raw,true);
+ const res=await h.fetch('/api/buzzy/jobs/job_file/document');assert.equal(res.status,200);assert.equal(res.headers.get('content-type'),MIME.docx);
+ assert.equal(decodeURIComponent(res.headers.get('content-disposition').split("filename*=UTF-8''")[1]),'document.docx');assert.deepEqual(Buffer.from(await res.arrayBuffer()),Buffer.from(raw.bytesB64,'base64'));
+});

@@ -1785,23 +1785,39 @@ export default defineEventHandler(async (event) => {
         "Cache-Control": "private, no-store",
       } });
     }
-    // Unpinned callers retain the previous original-byte contract.
+    // Unpinned callers retain the original bytes, approval and ownership contract.
     const artifact = row.artifact as { filename?: string; bytesB64?: string; contentType?: string };
     if (!artifact.bytesB64) {
       setResponseStatus(event, 404);
       return { error: "No document on this job", code: "not_found" };
     }
     const bytes = Buffer.from(artifact.bytesB64, "base64");
+    const filename = artifact.filename ?? "document.docx";
+    let response: Response;
+    try {
+      // Do not repair malformed stored names or embed raw text in HTTP headers.
+      // The shared encoder preserves valid Unicode via RFC 5987 and rejects
+      // unpaired UTF-16 surrogates. Controls are not a usable download name.
+      if (typeof filename !== "string" || /[\u0000-\u001f\u007f-\u009f]/u.test(filename)) {
+        throw new TypeError("Invalid original filename");
+      }
+      response = new Response(bytes, {
+        status: 200,
+        headers: {
+          "Content-Type": artifact.contentType ?? "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "Content-Disposition": officeOriginalDisposition(filename),
+        },
+      });
+    } catch {
+      setResponseStatus(event, 422);
+      return { error: "The original file metadata is invalid. No replacement was downloaded.", code: "invalid_original_metadata" };
+    }
+    // A malformed header must not leave a success event behind. This records
+    // response preparation, not proof that the client received the download.
     await recordTelemetry(sql, { userId: user.id, jobId, event: "exported",
       props: { format: artifact.contentType ?? "docx" } });
     setResponseStatus(event, 200);
-    return new Response(bytes, {
-      status: 200,
-      headers: {
-        "Content-Type": artifact.contentType ?? "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "Content-Disposition": `attachment; filename="${artifact.filename ?? "document.docx"}"`,
-      },
-    });
+    return response;
   }
 
   // ── Scheduled jobs (plan doc 23, component #5) ──────────────────────
