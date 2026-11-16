@@ -62,6 +62,7 @@ import { buildExportBundle, deleteAccountData } from "./portability";
 import { recordJobEvent } from "./jobEvents";
 import { dueScheduledJobs, markScheduledRun, saveScheduledDraft } from "./scheduled";
 import { setDocumentAcceptance, materializeDraft, summarizeChanges } from "./documents";
+import { officeOriginalMetadata, officeOriginalDisposition } from "./officeOriginal";
 import { ensureExecutionBoard } from "./execution";
 import { renderTextPdf } from "./pdf";
 import { renderDocument } from "./artifact";
@@ -1739,10 +1740,12 @@ export default defineEventHandler(async (event) => {
   }
 
   // ── GET /api/buzzy/jobs/:id/document — approval-gated artifact download ─
-  // The .docx produced by render_document is downloadable ONLY after the
-  // owner has approved the job (plan doc 23 Phase 1 acceptance).
+  // Original tool-produced bytes remain downloadable ONLY after the owner
+  // has approved the job (plan doc 23 Phase 1 acceptance).
   const pathParts = path.split("/"); // ["", "api", "buzzy", "jobs", ":id", "document"]
   if (method === "GET" && pathParts[2] === "buzzy" && pathParts[3] === "jobs" && pathParts[5] === "document") {
+    const originalPins = new URLSearchParams(fullPath.split("?")[1] || "").getAll("original");
+    if (originalPins.length) setResponseHeader(event, "Cache-Control", "private, no-store");
     const user = await getSessionUserFromHeaders(headersFromEvent(event));
     if (!user) {
       setResponseStatus(event, 401);
@@ -1763,6 +1766,26 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 403);
       return { error: "Approve the document first, then download it.", code: "approval_required" };
     }
+    if (originalPins.length) {
+      if (originalPins.length !== 1 || !/^[a-f0-9]{64}$/.test(originalPins[0])) {
+        setResponseStatus(event, 400);
+        return { error: "Invalid original file link. Open the latest file card.", code: "invalid_original" };
+      }
+      const original = officeOriginalMetadata(row.artifact);
+      if (!original || original.key !== originalPins[0]) {
+        setResponseStatus(event, 409);
+        return { error: "This original file has changed or is unavailable. Open the latest file card; no replacement was downloaded.", code: "original_changed" };
+      }
+      await recordTelemetry(sql, { userId: user.id, jobId, event: "exported",
+        props: { format: original.contentType } });
+      setResponseStatus(event, 200);
+      return new Response(original.bytes, { status: 200, headers: {
+        "Content-Type": original.contentType,
+        "Content-Disposition": officeOriginalDisposition(original.filename),
+        "Cache-Control": "private, no-store",
+      } });
+    }
+    // Unpinned callers retain the previous original-byte contract.
     const artifact = row.artifact as { filename?: string; bytesB64?: string; contentType?: string };
     if (!artifact.bytesB64) {
       setResponseStatus(event, 404);

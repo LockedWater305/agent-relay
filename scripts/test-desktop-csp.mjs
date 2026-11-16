@@ -294,9 +294,9 @@ test("build/package/start wiring includes the manifest and never suppresses warn
   assert.match(main, /manifest: loadCspManifest\(ROOT\)/);
   assert.match(main, /getRuntime: \(\) => supervisor\.runtime/);
   assert.match(main, /getContents: trustedContents/);
-  assert.match(main, /callback\(desktopCsp\.authorizeRequest\(details, runtimeAuth\.headers\(details\)\)\)/);
-  assert.match(main, /onCompleted\(\(details\) => desktopCsp\.finished\(details\)\)/);
-  assert.match(main, /onErrorOccurred\(\(details\) => desktopCsp\.finished\(details\)\)/);
+  assert.match(main, /callback\(originalDownloadRefusal\.authorizeRequest\(details, desktopCsp\.authorizeRequest\(details, runtimeAuth\.headers\(details\)\)\)\)/);
+  assert.match(main, /onCompleted\(\(details\) => \{ desktopCsp\.finished\(details\); originalDownloadRefusal\.finished\(details\); \}\)/);
+  assert.match(main, /onErrorOccurred\(\(details\) => \{ desktopCsp\.finished\(details\); originalDownloadRefusal\.finished\(details\); \}\)/);
   assert.doesNotMatch(main, /connectSession\.webRequest\.onHeadersReceived|ELECTRON_DISABLE_SECURITY_WARNINGS|webSecurity:\s*false/);
   for (const file of desktopPkg.build.files) assert.ok(existsSync(join(ROOT, "desktop", file)), `${file} exists for packaging`);
 });

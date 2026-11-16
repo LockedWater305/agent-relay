@@ -48,6 +48,7 @@ import { getSql } from "@/lib/db";
 import { isLocalRuntime } from "@/lib/runtime";
 import { DbMemory } from "./memory";
 import { materializeDraft, documentIdForJob } from "./documents";
+import { originalOfficeFormat, officeOriginalMetadata } from "./officeOriginal";
 import { ensurePeer, ensureSession, syncMessages, honchoAvailable } from "./honcho";
 import { voiceCompletion, voiceAvailable, VOICE_MODEL, type VoiceHandlers } from "./voice";
 import { offeredTools, refusalFor, policyFor, withToolBudget, clampResult } from "./toolRegistry";
@@ -321,7 +322,7 @@ export interface ChatResponse {
   /** What ran this turn, in order — the "what happened" strip reads this. */
   tools?: Array<{ name: string; ms: number; ok: boolean; code?: string }>;
   /** The file this turn produced, with links the chat can show inline. */
-  document?: { filename: string; contentType: string; bytes: number | null; documentId?: string; downloadUrl: string; libraryUrl: string };
+  document?: { filename: string; contentType: string; bytes: number | null; documentId?: string; downloadUrl: string; libraryUrl: string; approvalRequired?: boolean };
   error?: string;
   code?: string;
 }
@@ -1761,25 +1762,41 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
     // tool loop), so take it through an explicitly typed local.
     const renderedDoc = renderedDocument as { filename: string; bytesB64: string; contentType: string } | null;
     if (renderedDoc || materializedId) {
-      // The chat delivers the file. Two links, both real:
-      //   downloadUrl — /api/buzzy/documents/:id?format=… renders the exact
-      //     version on demand and is NOT approval-gated (the owner's own file,
-      //     made in this conversation).
-      //   libraryUrl  — the Library row for the work item this chat produced.
       const docId = materializedId ?? documentIdForJob(recordId);
-      const fmt = /pdf/i.test(renderedDoc?.contentType ?? "")
-        ? "pdf"
-        : /word|officedocument/i.test(renderedDoc?.contentType ?? "")
-          ? "docx"
-          : "md";
-      response.document = {
-        filename: renderedDoc?.filename ?? `${baseTitle.slice(0, 60)}.${fmt}`,
-        contentType: renderedDoc?.contentType ?? "text/markdown",
-        bytes: renderedDoc?.bytesB64 ? Math.round((renderedDoc.bytesB64.length * 3) / 4) : null,
-        documentId: docId,
-        downloadUrl: `/api/buzzy/documents/${encodeURIComponent(docId)}?format=${fmt}`,
-        libraryUrl: `/buzzy/library?job=${encodeURIComponent(recordId)}`,
-      };
+      if (originalOfficeFormat(renderedDoc?.contentType)) {
+        const original = officeOriginalMetadata(renderedDoc);
+        if (original) {
+          // Spreadsheet/deck bytes are not a Word rendering of canonical text.
+          // Keep the existing original-byte owner/approval gate. The pin is
+          // only a stale-file check; it grants no authority to download.
+          response.document = {
+            filename: original.filename,
+            contentType: original.contentType,
+            bytes: original.bytes.length,
+            documentId: docId,
+            downloadUrl: `/api/buzzy/jobs/${encodeURIComponent(recordId)}/document?original=${original.key}`,
+            libraryUrl: `/buzzy/library?job=${encodeURIComponent(recordId)}`,
+            approvalRequired: true,
+          };
+        } else {
+          response.warning = [response.warning, "The original file could not be linked. No substitute file was attached."].filter(Boolean).join(" ");
+        }
+      } else {
+        // Preserve the existing non-approval-gated canonical text/Word exports.
+        const fmt = /pdf/i.test(renderedDoc?.contentType ?? "")
+          ? "pdf"
+          : /word|officedocument/i.test(renderedDoc?.contentType ?? "")
+            ? "docx"
+            : "md";
+        response.document = {
+          filename: renderedDoc?.filename ?? `${baseTitle.slice(0, 60)}.${fmt}`,
+          contentType: renderedDoc?.contentType ?? "text/markdown",
+          bytes: renderedDoc?.bytesB64 ? Math.round((renderedDoc.bytesB64.length * 3) / 4) : null,
+          documentId: docId,
+          downloadUrl: `/api/buzzy/documents/${encodeURIComponent(docId)}?format=${fmt}`,
+          libraryUrl: `/buzzy/library?job=${encodeURIComponent(recordId)}`,
+        };
+      }
     }
   }
 

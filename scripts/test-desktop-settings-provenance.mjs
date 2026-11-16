@@ -1,3 +1,4 @@
+import { createOriginalDownloadRefusal } from "../desktop/original-download.mjs";
 import { createDocumentTransition } from "../desktop/document-transition.mjs";
 /**
  * Settings provenance across the actual main/IPC/preload restart lifecycle.
@@ -83,6 +84,7 @@ async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDi
     "./csp.mjs": { createDesktopCsp: unexpected("CSP install"), loadCspManifest: unexpected("manifest") },
     "./document-transition.mjs": { createDocumentTransition },
     "./security.mjs": security,
+    "./original-download.mjs": { createOriginalDownloadRefusal },
     "./library-vault.mjs": { createLibraryTransition: (deps) => createLibraryTransition({ ...deps, fetchImpl: libraryFetch ?? unexpected("Library network") }) },
   };
   const modules = new Map();

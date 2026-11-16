@@ -1,3 +1,4 @@
+import { createOriginalDownloadRefusal } from "../desktop/original-download.mjs";
 import { createDocumentTransition } from "../desktop/document-transition.mjs";
 /**
  * Managed-account Connect guard regressions. Node built-ins only.
@@ -119,6 +120,7 @@ async function mainFixture(flag, connect = async () => ({ ok: false, error: "fix
     "./csp.mjs": { createDesktopCsp: unexpected("csp"), loadCspManifest: unexpected("manifest") },
     "./document-transition.mjs": { createDocumentTransition },
     "./security.mjs": { ...security },
+    "./original-download.mjs": { createOriginalDownloadRefusal },
     "./library-vault.mjs": { createLibraryTransition: (deps) => createLibraryTransition({ ...deps, fetchImpl: unexpected("Library network") }) },
   };
   const modules = new Map();

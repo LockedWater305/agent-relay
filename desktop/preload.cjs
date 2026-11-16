@@ -40,6 +40,33 @@ ipcRenderer.on("beezilla:runtime:changed", (_event, data) => {
     navigateWhenIdle();
   } catch { /* invalid event: remain on the current page */ }
 });
+// A one-way main notification, not an API by which pages can authorize downloads.
+ipcRenderer.on("beezilla:original-download:refused", (_event, data) => {
+  try {
+    if (!process.isMainFrame || data?.code !== "original_changed" || data.pageUrl !== window.location.href) return;
+    const url = new URL(data.url), page = new URL(window.location.href);
+    if (url.username || url.password || page.username || page.password || url.origin !== page.origin || url.protocol !== "http:" || url.hostname !== "127.0.0.1" ||
+        !/^\/buzzy\/talk(?:\.html)?\/?$/.test(page.pathname) || url.hash ||
+        !/^\/api\/buzzy\/jobs\/[A-Za-z0-9_-]+\/document$/.test(url.pathname) ||
+        !/^\?original=[a-f0-9]{64}$/.test(url.search)) return;
+    const links = [...document.querySelectorAll('#chatMessages .file-card a[download]')].filter(link => link.isConnected && link.href === url.href);
+    if (links.length !== 1) return;
+    for (const link of links) {
+      const card = link.closest(".file-card");
+      if (!card || !link.isConnected) continue;
+      const meta = card.querySelector(".file-meta");
+      if (!meta) continue;
+      let notice = meta.querySelector(".original-download-error");
+      if (!notice) {
+        notice = document.createElement("div");
+        notice.className = "original-download-error";
+        notice.setAttribute("role", "status");
+        meta.appendChild(notice);
+      }
+      notice.textContent = "This original file has changed or is unavailable. Open the latest file card; no replacement was downloaded.";
+    }
+  } catch { /* A retired page or malformed notification cannot affect a new card. */ }
+});
 const call = async (channel, payload) => {
   pendingCalls++;
   try { return await ipcRenderer.invoke(`beezilla:${channel}`, payload); }

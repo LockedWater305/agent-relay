@@ -33,7 +33,8 @@
       "security.mjs",
       "csp.mjs",
       "library-vault.mjs",
-      "document-transition.mjs"
+      "document-transition.mjs",
+      "original-download.mjs"
     ],
     "extraResources": [
       {

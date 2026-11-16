@@ -21,9 +21,10 @@ import { connectAccount, cloudBaseUrl, managedAccountConnectCapability } from ".
 import { createDesktopCsp, loadCspManifest } from "./csp.mjs";
 import { createLibraryTransition } from "./library-vault.mjs";
 import { createDocumentTransition } from "./document-transition.mjs";
+import { createOriginalDownloadRefusal } from "./original-download.mjs";
 import {
   allowAudioPermission, connectBaseUrl, createRuntimeAuth, isAppDownload, isAppPage,
-  isConnectNavigation, isTrustedSender, retargetAppPage, safeExternalUrl, sameOrigin,
+  isConnectNavigation, isTrustedSender, retargetAppPage, safeExternalUrl, sameOrigin, webUrl,
 } from "./security.mjs";
 
 // FIRST, before anything that can throw. 0.2.0 died at module-link time and left
@@ -89,6 +90,11 @@ const acquireLibraryTransition = createDocumentTransition({
 });
 let runtimeBinding = null;
 let runtimeBindingGeneration = 0;
+const originalDownloadRefusal = createOriginalDownloadRefusal({
+  getBinding: () => currentRuntimeBinding(supervisor.runtime), getContents: trustedContents,
+  isTrustedSender, webUrl,
+  notify: (wc, data) => wc.send("beezilla:original-download:refused", data),
+});
 let settingsPreviousBinding = null;
 let settingsHistoryTransition = null;
 let quitting = false;
@@ -131,6 +137,7 @@ function guardLibraryWindowClose(win) {
 }
 
 function clearRuntimeAuth() {
+  originalDownloadRefusal.clear();
   runtimeAuth.clear();
   runtimeBinding = null;
   runtimeBindingGeneration++;
@@ -155,6 +162,7 @@ function flushRuntimeRetargets() {
 }
 
 function bindRuntime(rt, notifyWindows = false) {
+  originalDownloadRefusal.clear();
   const previousBase = runtimeBase;
   const targets = trustedContents().map((wc) => ({ wc, url: wc.getURL() }));
   runtimeBase = runtimeAuth.bind(rt);
@@ -189,7 +197,11 @@ function handleAppLink(wc, url) {
   } else if (isAppDownload(url, runtimeBase)) {
     // Native downloads remain available, but imported HTML never becomes the
     // privileged top-level app document. The permit is single-use and URL-bound.
-    try { wc.downloadURL(url, { headers: runtimeAuth.prepareDownload(wc, url) }); }
+    try {
+      const headers = runtimeAuth.prepareDownload(wc, url);
+      originalDownloadRefusal.prepare(wc, url, headers);
+      wc.downloadURL(url, { headers });
+    }
     catch (err) { console.warn("[desktop] download unavailable:", err.message); }
   } else {
     openSafeExternal(url);
@@ -203,7 +215,10 @@ function confineAppWindow(win) {
     const target = pendingRuntimeRetargets.get(wc);
     if (target && currentRuntimeBinding(target.rt) && target.base === runtimeBase && url === target.url && httpResponseCode >= 200 && httpResponseCode < 300) pendingRuntimeRetargets.delete(wc);
   });
-  wc.on("destroyed", () => pendingRuntimeRetargets.delete(wc));
+  wc.on("destroyed", () => { pendingRuntimeRetargets.delete(wc); originalDownloadRefusal.forgetContents(wc); });
+  wc.on("did-start-navigation", (event, _url, _inPlace, isMainFrame) => {
+    if ((event.isMainFrame ?? isMainFrame) === true) originalDownloadRefusal.forgetContents(wc);
+  });
   const allowed = (url) => isAppPage(url, runtimeBase) || Boolean(testPageUrl && url === testPageUrl);
   wc.on("will-navigate", (event, url) => {
     if (allowed(url)) return;
@@ -942,13 +957,16 @@ app.whenReady().then(async () => {
       try {
         if (!supervisor.runtime) clearRuntimeAuth();
         if (acquireLibraryTransition.blocksRequest(details)) { callback({ cancel: true }); return; }
-        callback(desktopCsp.authorizeRequest(details, runtimeAuth.headers(details)));
+        callback(originalDownloadRefusal.authorizeRequest(details, desktopCsp.authorizeRequest(details, runtimeAuth.headers(details))));
       } catch {
         callback({ cancel: true });
       }
     });
     session.defaultSession.webRequest.onHeadersReceived({ urls: ["http://127.0.0.1:*/*"] }, (details, callback) => {
-      try { callback(desktopCsp.headers(details)); }
+      try {
+        const policy = desktopCsp.headers(details);
+        callback(policy.cancel ? policy : { ...policy, ...originalDownloadRefusal.headers(details) });
+      }
       catch (err) {
         console.error("[desktop] could not enforce the script policy:", err.message);
         callback({ cancel: true });
@@ -956,8 +974,8 @@ app.whenReady().then(async () => {
     });
     // Include redirected/error endpoints for cleanup; these listeners only
     // discard request records and never modify responses or grant authority.
-    session.defaultSession.webRequest.onCompleted((details) => desktopCsp.finished(details));
-    session.defaultSession.webRequest.onErrorOccurred((details) => desktopCsp.finished(details));
+    session.defaultSession.webRequest.onCompleted((details) => { desktopCsp.finished(details); originalDownloadRefusal.finished(details); });
+    session.defaultSession.webRequest.onErrorOccurred((details) => { desktopCsp.finished(details); originalDownloadRefusal.finished(details); });
     applyIdentityToEnv();
     await applyStoredInferenceToEnv();
     await applyStoredMusicToEnv();

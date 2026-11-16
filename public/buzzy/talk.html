@@ -2528,20 +2528,21 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     function renderFileCard(doc) {
       var name = String(doc.filename || "document");
       var size = doc.bytes ? " · " + Math.max(1, Math.round(doc.bytes / 1024)) + " KB" : "";
+      var original = doc.approvalRequired === true;
       var icon = /\.pdf$/i.test(name) ? "\uD83D\uDCC4"
         : /\.(docx|doc)$/i.test(name) ? "\uD83D\uDCDD"
         : /\.csv$/i.test(name) ? "\uD83D\uDCCA"
         : "\uD83D\uDCCE";
-      var esc = function (v) { return String(v == null ? "" : v).replace(/</g, "&lt;").replace(/"/g, "&quot;"); };
+      var esc = function (v) { return String(v == null ? "" : v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); };
       var dl = doc.downloadUrl.indexOf("/api/") === 0 ? doc.downloadUrl : esc(doc.downloadUrl);
       var lib = doc.libraryUrl && doc.libraryUrl.indexOf("/buzzy/") === 0 ? doc.libraryUrl : null;
       return '<div class="file-card">' +
         '<span class="file-icon">' + icon + "</span>" +
         '<span class="file-meta">' +
           '<span class="file-name">' + esc(name) + "</span>" +
-          '<span class="file-sub">Saved to your Library' + size + "</span>" +
+          '<span class="file-sub">' + (original ? "Original file · download requires saved draft approval" : "Saved to your Library") + size + "</span>" +
         "</span>" +
-        '<a href="' + esc(dl) + '" download>Download</a>' +
+        '<a href="' + esc(dl) + '" download>' + (original ? "Download original" : "Download") + '</a>' +
     // BZ-14 does not stop at the nav: this card link used to carry a blank
     // target, so "Open in Library" on a file made its own tab and left the
     // conversation (and the mic) behind in the old one. nav.js soft-navigates any
