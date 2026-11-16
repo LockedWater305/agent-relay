@@ -61,6 +61,8 @@ export interface Sql {
     text: string,
     params?: unknown[],
   ): Promise<T[]>;
+  /** Nested calls join the active transaction; errors must propagate to its owner. */
+  transaction?<T>(work: (tx: Sql) => Promise<T>): Promise<T>;
 }
 
 /**
@@ -120,10 +122,45 @@ function createNeonSql(): Promise<Sql> {
     types.setTypeParser(OID_DATE, identity);
     types.setTypeParser(OID_INTERVAL, identity);
     const pool = new Pool({ connectionString: databaseUrl });
-    return toSql(async <T>(text: string, params: unknown[]) => {
+    const sql = toSql(async <T>(text: string, params: unknown[]) => {
       const res = await pool.query(text, params);
       return res.rows as T[];
     });
+    sql.transaction = async <T>(work: (tx: Sql) => Promise<T>): Promise<T> => {
+      const client = await pool.connect();
+      let begun = false;
+      let released = false;
+      let scopeOpen = false;
+      try {
+        await client.query("BEGIN");
+        begun = true;
+        scopeOpen = true;
+        const tx = toSql(async <R>(text: string, params: unknown[]) => {
+          if (!scopeOpen) throw new Error("Transaction scope is closed");
+          const result = await client.query(text, params);
+          return result.rows as R[];
+        });
+        tx.transaction = async nested => {
+          if (!scopeOpen) throw new Error("Transaction scope is closed");
+          return nested(tx);
+        };
+        const value = await work(tx);
+        scopeOpen = false;
+        await client.query("COMMIT");
+        return value;
+      } catch (error) {
+        scopeOpen = false;
+        if (begun) {
+          try { await client.query("ROLLBACK"); }
+          catch { client.release(true); released = true; throw error; }
+        }
+        throw error;
+      } finally {
+        // A failed rollback discards its client above rather than reusing it.
+        if (!released) client.release();
+      }
+    };
+    return sql;
   })().catch((err) => {
     globalRef.__pgSqlPromise__ = undefined;
     throw err;
@@ -236,10 +273,26 @@ async function createPgliteSql(): Promise<Sql> {
   globalRef.__pgliteMigrateChain__ = pass;
   await pass;
 
-  return toSql(async <T>(text: string, params: unknown[]) => {
+  const sql = toSql(async <T>(text: string, params: unknown[]) => {
     const result = await pg.query<T>(text, params);
     return result.rows;
   });
+  sql.transaction = <T>(work: (tx: Sql) => Promise<T>): Promise<T> =>
+    pg.transaction(async client => {
+      let scopeOpen = true;
+      const tx = toSql(async <R>(text: string, params: unknown[]) => {
+        if (!scopeOpen) throw new Error("Transaction scope is closed");
+        const result = await client.query<R>(text, params);
+        return result.rows;
+      });
+      tx.transaction = async nested => {
+        if (!scopeOpen) throw new Error("Transaction scope is closed");
+        return nested(tx);
+      };
+      try { return await work(tx); }
+      finally { scopeOpen = false; }
+    });
+  return sql;
 }
 
 let sqlPromise: Promise<Sql> | null = null;

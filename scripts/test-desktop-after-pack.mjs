@@ -5,8 +5,8 @@
  */
 import assert from "node:assert/strict";
 import {
-  copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
-  rmSync, statSync, writeFileSync,
+  copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
+  rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -135,3 +135,38 @@ test("the explicit application file allowlist excludes the build-time hook", () 
     assert.notEqual(realpathSync(path), realpathSync(hookSource), "afterPack is build-time only");
   }
 });
+
+// Exercise the actual staging copy expression without running dist.mjs's build
+// entrypoint. A changed call shape must update this explicit boundary.
+function stageDependencyCopy(source, target) {
+  const sourceText = readFileSync(join(desktopDir, "dist.mjs"), "utf8");
+  const calls = sourceText.match(/cpSync\(dir, target, \{[^}]+\}\);/g) ?? [];
+  assert.equal(calls.length, 1, "exact production dependency copy boundary");
+  new Function("cpSync", "dir", "target", calls[0])(cpSync, source, target);
+}
+
+for (const boundary of ["stage", "afterPack"]) {
+  test(`${boundary}: nested relative .bin symlink becomes standalone exact bytes`, async (t) => {
+    const f = fixture(t);
+    const bytes = Buffer.from("#!/usr/bin/env node\n// harmless synthetic CLI bytes\n");
+    const bin = "outer/node_modules/.bin/synthetic";
+    const target = "outer/node_modules/inner/bin/cli.mjs";
+    writeFile(join(f.app, "package.json"), runtimeManifest);
+    writeFile(join(f.stagedDependencies, "outer/package.json"), '{"name":"outer"}\n');
+    writeFile(join(f.stagedDependencies, target), bytes);
+    mkdirSync(dirname(join(f.stagedDependencies, bin)), { recursive: true });
+    symlinkSync("../inner/bin/cli.mjs", join(f.stagedDependencies, bin), "file");
+    assert.ok(lstatSync(join(f.stagedDependencies, bin)).isSymbolicLink());
+    const output = join(f.app, "node_modules");
+    if (boundary === "stage") stageDependencyCopy(f.stagedDependencies, output);
+    else await f.hook.default(f.context);
+    const copied = join(output, bin);
+    assert.equal(lstatSync(copied).isSymbolicLink(), false, "must not retain builder symlink");
+    assert.ok(lstatSync(copied).isFile());
+    assert.deepEqual(readFileSync(copied), bytes);
+    assert.deepEqual(readFileSync(join(output, target)), bytes);
+    // The copy is independently usable after its input disappears.
+    rmSync(f.stagedDependencies, { recursive: true });
+    assert.deepEqual(readFileSync(copied), bytes);
+  });
+}

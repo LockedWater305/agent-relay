@@ -62,6 +62,7 @@ import { buildExportBundle, deleteAccountData } from "./portability";
 import { recordJobEvent } from "./jobEvents";
 import { dueScheduledJobs, markScheduledRun, saveScheduledDraft } from "./scheduled";
 import { setDocumentAcceptance, materializeDraft, summarizeChanges } from "./documents";
+import { commitJobApproval } from "./jobApproval";
 import { officeOriginalMetadata, officeOriginalDisposition } from "./officeOriginal";
 import { ensureExecutionBoard } from "./execution";
 import { renderTextPdf } from "./pdf";
@@ -3005,7 +3006,25 @@ export default defineEventHandler(async (event) => {
     if (hasDueDate) dataPatch.due_date = body.dueDate;
     let executionInfo: { projectId: string; created: boolean } | null = null;
     const sql = await getSql();
-    const rows = await sql`
+    let rows: Array<{ id: string; title: string; status: string; company_id: string | null }>;
+    if (hasApproved) {
+      // Critical approval writes, audit and success telemetry commit together.
+      // Storage errors propagate; no successful flag survives a failed commit.
+      const committed = await commitJobApproval(sql, {
+        userId: user.id, jobId: id, approved: body.approved === true,
+        draft: typeof body.draft === "string" ? body.draft : null,
+        title, status, dataPatch,
+      });
+      if (committed && committed.outcome !== "ok") {
+        setResponseStatus(event, 409);
+        return {
+          error: "That draft changed since you opened it — review the latest version, then approve.",
+          code: committed.outcome, currentVersion: committed.current_version,
+        };
+      }
+      rows = committed ? [committed] : [];
+    } else {
+      rows = await sql`
       UPDATE buzzy_jobs SET
         title = COALESCE(${title}, title),
         status = COALESCE(${status}, status),
@@ -3014,38 +3033,13 @@ export default defineEventHandler(async (event) => {
       WHERE id = ${id} AND user_id = ${user.id}
       RETURNING id, title, status, company_id
     `;
+    }
     if (!rows.length) {
       setResponseStatus(event, 404);
       return { error: "job not found", code: "not_found" };
     }
     // ── Per-human attribution (multi-owner groundwork) ─────────────────
     if (hasApproved) {
-      await recordJobEvent(sql, id, user.id, "approve",
-        body.approved === true ? "approved" : "approval revoked");
-      await recordTelemetry(sql, { userId: user.id, jobId: id,
-        event: body.approved === true ? "approval_recorded" : "reopened",
-        props: { action: body.approved === true ? "approve" : "revoke" } });
-      // BZ-F015/F017: approval state flows into the document lifecycle —
-      // and references the EXACT version being approved (QA-08). When the
-      // client supplies the text it approved, a mismatch with the document's
-      // current version is a stale approval: reject it, never silently
-      // apply it to newer content.
-      try {
-        const acc = await setDocumentAcceptance(
-          sql, user.id, id, body.approved === true,
-          typeof body.draft === "string" ? body.draft : null,
-        );
-        if (!acc.ok) {
-          setResponseStatus(event, 409);
-          return {
-            error: "That draft changed since you opened it — review the latest version, then approve.",
-            code: acc.code,
-            currentVersion: acc.currentVersion,
-          };
-        }
-      } catch (derr) {
-        console.error("[buzzy/documents] acceptance sync failed:", derr instanceof Error ? derr.message : derr);
-      }
       // BZ-REUSE-159: on Approve, create (idempotently) the shop-floor board
       // + agent + first ticket under the hood. The durable approval audit
       // (job approval + document accepted_version) is the first_ticket_cut
@@ -3062,7 +3056,7 @@ export default defineEventHandler(async (event) => {
         }
       }
     }
-    if (hasStatus) {
+    if (hasStatus && !hasApproved) {
       await recordJobEvent(sql, id, user.id, "status", String(body.status));
     }
     // ── Company KB derivation (plan doc 23, component #1) ─────────────
@@ -3071,6 +3065,7 @@ export default defineEventHandler(async (event) => {
     // company facts. They stay suggestions until the owner confirms them
     // in the company card — the approval surface stays one-click.
     if (hasApproved && body.approved === true && rows[0].company_id) {
+      try {
       const cid = rows[0].company_id as string;
       // Customer memory rollup (component #2): rebuilt from approved jobs on
       // every approval — the most recent state always wins.
@@ -3100,6 +3095,9 @@ export default defineEventHandler(async (event) => {
           ON CONFLICT (id) DO UPDATE SET
             value = EXCLUDED.value, updated_at = now()
         `;
+      }
+      } catch (err) {
+        console.error("[buzzy] approved company projection failed:", err instanceof Error ? err.message : err);
       }
     }
     return {
@@ -3283,10 +3281,10 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 404);
       return { error: "Document not found", code: "not_found" };
     }
-    const result = await materializeDraft(sql, user.id, docs[0].job_id ?? docEdit[1], docs[0].title, content, {
+    const result = await materializeDraft(sql, user.id, docs[0].job_id, docs[0].title, content, {
       creator: user.id,
       expert: "manual edit",
-    });
+    }, docEdit[1]);
     return {
       ok: true,
       version: result.version,

@@ -5651,6 +5651,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     window.bzApplyMoneyCheck = function (paper, slots, draft) {
+      invalidateDraftApproval();
       chatState.paper = paper || null;
       chatState.slots = slots || {};
       chatState.draftReady = true;
@@ -5677,6 +5678,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function resetDraftGate() {
+      invalidateDraftApproval();
       chatState.draftReady = false;
       chatState.draftText = "";
       chatState.draftVersion = 1;
@@ -5730,6 +5732,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function onDraftInput() {
+      invalidateDraftApproval();
       var body = draftBodyEl();
       if (!body) return;
       var text = body.value;
@@ -5746,7 +5749,22 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       renderMoneyCheck();
     }
 
-    function onApproveDraft() {
+    var draftApprovalRequest = null;
+    var draftApprovalEpoch = 0;
+
+    function invalidateDraftApproval() {
+      if (draftApprovalRequest) {
+        var note = document.getElementById("draftSendNote");
+        if (note) note.textContent = "The draft changed. Approval is not confirmed for this version.";
+        var approve = document.getElementById("approveDraft");
+        if (approve) approve.disabled = false;
+      }
+      draftApprovalEpoch += 1;
+      draftApprovalRequest = null;
+    }
+
+    async function onApproveDraft() {
+      if (draftApprovalRequest) return;
       var check = renderMoneyCheck();
       if (chatState.moneyBlocks || (check && check.blocksApproval)) {
         chatState.approvedText = null;
@@ -5757,24 +5775,60 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var body = draftBodyEl();
       var text = body ? body.value : "";
       if (!text.trim()) return;
-      chatState.approvedText = text;
+      var note = document.getElementById("draftSendNote");
+      if (!chatState.jobId) {
+        if (note) note.textContent = "Save this draft to a work item before approving it.";
+        return;
+      }
+      var request = { epoch: draftApprovalEpoch, jobId: chatState.jobId,
+        sessionId: chatState.sessionId, text: text };
+      draftApprovalRequest = request;
+      chatState.approvedText = null;
       chatState.draftText = text;
       chatState.outwardConfirmed = false;
-      // Persist the approval so the job leaves "needs your input" and the
-      // Library holds the approved draft (not just the LLM's first pass).
-      if (chatState.jobId) {
-        fetch("/api/buzzy/jobs/" + encodeURIComponent(chatState.jobId), {
-          method: "PATCH",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "Approved", approved: true, draft: text }),
-        }).catch(function () { /* offline or signed out */ });
-      }
+      var approve = document.getElementById("approveDraft");
+      if (approve) approve.disabled = true;
+      if (note) note.textContent = "Saving approval…";
       var onote = document.getElementById("outwardNote");
       if (onote) onote.textContent = "";
-      var note = document.getElementById("draftSendNote");
-      if (note) note.textContent = "Version " + chatState.draftVersion + " is approved. Sending still needs the confirm below.";
       paintDraftGate();
+      function current() {
+        var now = draftBodyEl();
+        return draftApprovalRequest === request && draftApprovalEpoch === request.epoch &&
+          chatState.jobId === request.jobId && chatState.sessionId === request.sessionId &&
+          now === body && now.value === request.text;
+      }
+      try {
+        var res = await fetch("/api/buzzy/jobs/" + encodeURIComponent(request.jobId), {
+          method: "PATCH", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "Approved", approved: true, draft: text }),
+        });
+        var result = await res.json();
+        if (!current()) return;
+        if (!res.ok) {
+          if (note) note.textContent = res.status === 409
+            ? "That draft changed. Review the latest version, then try approving again."
+            : res.status === 401 ? "Sign in again, then retry approval. Your draft is still here."
+            : "Approval was not saved. Your draft is still here; try again.";
+          return;
+        }
+        if (!result || !result.job || result.job.id !== request.jobId || result.job.status !== "Approved") {
+          throw new Error("Invalid approval acknowledgement");
+        }
+        var finalCheck = renderMoneyCheck();
+        if (chatState.moneyBlocks || (finalCheck && finalCheck.blocksApproval)) return;
+        chatState.approvedText = text;
+        if (note) note.textContent = "Version " + chatState.draftVersion + " is approved. Sending still needs the confirm below.";
+      } catch (err) {
+        if (current() && note) note.textContent = "Approval was not confirmed. Your draft is still here; retry when connected.";
+      } finally {
+        if (draftApprovalRequest === request) {
+          draftApprovalRequest = null;
+          if (approve) approve.disabled = !!chatState.moneyBlocks;
+          paintDraftGate();
+        }
+      }
     }
 
     function onDraftSend() {

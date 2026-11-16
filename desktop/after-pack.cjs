@@ -37,7 +37,9 @@ exports.default = async function afterPack(context) {
   if (!existsSync(src) || readdirSync(src).length === 0) {
     throw new Error(`afterPack: no staged node_modules at ${src} — run \`node dist.mjs stage\` first`);
   }
-  cpSync(src, join(app, "node_modules"), { recursive: true, dereference: true });
+  // Force the JS traversal: native recursive copy can retain absolute .bin
+  // symlinks despite dereference:true, leaving the package tied to the builder.
+  cpSync(src, join(app, "node_modules"), { recursive: true, dereference: true, filter: () => true });
   console.log(`  • afterPack: production node_modules added under ${app}`);
 };
 

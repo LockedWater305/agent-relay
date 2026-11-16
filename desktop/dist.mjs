@@ -100,7 +100,9 @@ async function stage() {
     const target = join(APP, dir.slice(ROOT.length + 1));
     if (existsSync(target) || /[\\/]node_modules[\\/]electron([\\/]|$)/.test(dir)) continue;
     try {
-      cpSync(dir, target, { recursive: true, dereference: true });
+      // Force the JS traversal: native recursive copy can retain absolute .bin
+      // symlinks despite dereference:true, leaving the package tied to the builder.
+      cpSync(dir, target, { recursive: true, dereference: true, filter: () => true });
       copied++;
     } catch (err) {
       log(`skipped ${dir.slice(ROOT.length + 1)}: ${err instanceof Error ? err.message : err}`);
