@@ -61,8 +61,9 @@ import { rebuildCustomerMemory, memoryContextBlock, extractTemplateStructure, ty
 import { buildExportBundle, deleteAccountData } from "./portability";
 import { recordJobEvent } from "./jobEvents";
 import { dueScheduledJobs, markScheduledRun, saveScheduledDraft } from "./scheduled";
-import { setDocumentAcceptance, materializeDraft, summarizeChanges } from "./documents";
+import { materializeDraft, summarizeChanges } from "./documents";
 import { commitJobApproval } from "./jobApproval";
+import { commitDocumentDecision } from "./documentDecision";
 import { officeOriginalMetadata, officeOriginalDisposition } from "./officeOriginal";
 import { ensureExecutionBoard } from "./execution";
 import { renderTextPdf } from "./pdf";
@@ -3634,74 +3635,29 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 400);
       return { error: "Tell me what to change — a correction needs a specific ask.", code: "note_required" };
     }
+    if (body.version !== undefined && (typeof body.version !== "number" ||
+        !Number.isSafeInteger(body.version) || body.version < 1)) {
+      setResponseStatus(event, 400);
+      return { error: "Choose one valid document version.", code: "bad_version" };
+    }
     const sql = await getSql();
-    // BZ-F034: a teammate acts on the OWNER's account through membership, and
-    // the action itself is authorized by role or an explicit delegation (with
-    // its cap) — scope is never granted by being signed in.
-    const acting = await resolveActingAccount(sql as never, user.id, user.email ?? null);
-    const needAction = action === "accept" ? "accept_document" : action === "request_changes" ? "request_changes" : "read";
-    const docs = await sql`
-      SELECT id, job_id, title, status, current_version, accepted_version
-      FROM buzzy_documents WHERE id = ${docDecision[1]} AND user_id = ${acting.accountId} LIMIT 1
-    `;
-    if (!docs.length) {
-      setResponseStatus(event, 404);
-      return { error: "Document not found", code: "not_found" };
+    const result = await commitDocumentDecision(sql, {
+      actorId: user.id, actorEmail: user.email ?? null, documentId: docDecision[1],
+      action, role, note, version: typeof body.version === "number" ? body.version : undefined,
+      draft: typeof body.draft === "string" ? body.draft : null,
+    });
+    if (!result.ok) {
+      setResponseStatus(event, result.status);
+      const { ok: _ok, status: _status, ...refusal } = result;
+      return refusal;
     }
-    const doc = docs[0];
-    if (needAction !== "read") {
-      // The space comes from the owning job, not the document row.
-      const spaceRows = doc.job_id
-        ? await sql<{ company_id: string | null }>`
-            SELECT company_id FROM buzzy_jobs WHERE id = ${String(doc.job_id)} AND user_id = ${acting.accountId} LIMIT 1
-          `
-        : [];
-      const decision = await authorize(sql as never, acting, needAction as never,
-        { companyId: spaceRows[0]?.company_id ?? null });
-      if (!decision.allowed) {
-        setResponseStatus(event, 403);
-        return { error: decision.reason, code: "role_denied", role: acting.role, via: decision.via };
-      }
-    }
-    const version = typeof body.version === "number" ? body.version : (doc.accepted_version ?? doc.current_version);
-    // Decisions bind to a version that must exist (and, to accept, the current
-    // one — a stale accept is refused, never silently applied).
-    const vrows = await sql`
-      SELECT content FROM buzzy_document_versions WHERE doc_id = ${doc.id} AND version = ${version} LIMIT 1
-    `;
-    if (!vrows.length) {
-      setResponseStatus(event, 404);
-      return { error: "That version does not exist.", code: "not_found" };
-    }
-    if (action === "accept" && version !== doc.current_version) {
-      setResponseStatus(event, 409);
-      return {
-        error: "That version is not the latest — review the current one before accepting.",
-        code: "stale_version",
-        currentVersion: doc.current_version,
-      };
-    }
-    await sql`
-      INSERT INTO buzzy_document_decisions (doc_id, user_id, version, action, role, note)
-      VALUES (${doc.id}, ${acting.accountId}, ${version}, ${action}, ${role}, ${note})
-    `;
-    await recordTelemetry(sql, { userId: user.id, jobId: String(doc.job_id ?? doc.id), docId: String(doc.id),
+    const version = result.version;
+    // Metrics are explicitly best-effort and run only after the decision commits.
+    // No false success event on refusal/rollback, and no false failure on metric loss.
+    await recordTelemetry(sql, { userId: user.id, jobId: result.jobId ?? result.documentId,
+      docId: result.documentId,
       event: action === "accept" ? "human_accepted" : action === "request_changes" ? "reopened" : "needs_you_answered",
       props: { action, role, version } });
-    if (action === "accept" && role === "internal") {
-      // Internal acceptance moves the document lifecycle (customer acceptance
-      // is a distinct record and never flips the internal state by itself).
-      try {
-        await setDocumentAcceptance(sql, user.id, String(doc.job_id ?? doc.id), true,
-          typeof body.draft === "string" ? body.draft : null);
-      } catch (derr) {
-        console.error("[buzzy/documents] acceptance sync failed:", derr instanceof Error ? derr.message : derr);
-      }
-    }
-    if (action === "request_changes") {
-      await recordJobEvent(sql, String(doc.job_id ?? doc.id), user.id, "correction_requested",
-        JSON.stringify({ version, bound: "one revision", note: note.slice(0, 200) }));
-    }
     return {
       ok: true,
       decision: { version, action, role },
