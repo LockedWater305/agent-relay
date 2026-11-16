@@ -64,6 +64,7 @@ import { dueScheduledJobs, markScheduledRun, saveScheduledDraft } from "./schedu
 import { materializeDraft, summarizeChanges } from "./documents";
 import { commitJobApproval } from "./jobApproval";
 import { commitDocumentDecision } from "./documentDecision";
+import { getDocumentCheckSheet } from "./documentCheckSheet";
 import { officeOriginalMetadata, officeOriginalDisposition } from "./officeOriginal";
 import { ensureExecutionBoard } from "./execution";
 import { renderTextPdf } from "./pdf";
@@ -3566,46 +3567,12 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 401);
       return { error: "Sign in required", code: "signed_out" };
     }
-    const sql = await getSql();
-    const docs = await sql`
-      SELECT id, job_id, title, status, current_version, accepted_version, expert
-      FROM buzzy_documents WHERE id = ${docSheet[1]} AND user_id = ${user.id} LIMIT 1
-    `;
-    if (!docs.length) {
+    const sheet = await getDocumentCheckSheet(await getSql(), user.id, user.email ?? null, docSheet[1]);
+    if (!sheet) {
       setResponseStatus(event, 404);
       return { error: "Document not found", code: "not_found" };
     }
-    const doc = docs[0];
-    const version = doc.accepted_version ?? doc.current_version;
-    const vrows = await sql`
-      SELECT version, content, brief_revision, review, accepted_at FROM buzzy_document_versions
-      WHERE doc_id = ${doc.id} AND version = ${version} LIMIT 1
-    `;
-    const decisions = await sql`
-      SELECT version, action, role, note, created_at FROM buzzy_document_decisions
-      WHERE doc_id = ${doc.id} AND user_id = ${user.id}
-      ORDER BY created_at DESC LIMIT 10
-    `;
-    const review = (() => {
-      const raw = vrows[0]?.review;
-      if (Array.isArray(raw)) return raw;
-      if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return []; } }
-      return [];
-    })() as Array<{ label?: string; verdict?: string; detail?: string }>;
-    return {
-      sheet: {
-        produced: { title: doc.title, version, status: doc.status, expert: doc.expert ?? null },
-        checked: review.map((c) => ({ label: c.label ?? "", verdict: c.verdict ?? "" })),
-        uncertain: review.filter((c) => c.verdict === "warning").map((c) => ({ label: c.label ?? "", detail: c.detail ?? "" })),
-        files: {
-          markdown: `/api/buzzy/documents/${doc.id}?version=${version}&format=md`,
-          pdf: `/api/buzzy/documents/${doc.id}?version=${version}&format=pdf`,
-          docx: `/api/buzzy/documents/${doc.id}?version=${version}&format=docx`,
-          csv: `/api/buzzy/documents/${doc.id}?version=${version}&format=csv`,
-        },
-        decisions,
-      },
-    };
+    return sheet;
   }
 
   // ── POST /api/buzzy/documents/:id/decision — Accept / Request changes / Keep draft ─
