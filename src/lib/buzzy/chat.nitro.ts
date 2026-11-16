@@ -1127,6 +1127,17 @@ export default defineEventHandler(async (event) => {
       /* empty body → bad_request from chatLoop */
     }
 
+    // A renderer's earlier /sessions resolution is not authority for this
+    // request: a cookie account may have changed while its response was pending.
+    // Null/omitted identities retain the unscoped API; malformed explicit values
+    // must not silently broaden it to an account-wide conversation.
+    for (const field of ["jobId", "sessionId", "companyId"]) {
+      const value = body[field];
+      if (value != null && (typeof value !== "string" || !value.trim())) {
+        setResponseStatus(event, 400);
+        return { ok: false, error: "Reopen the conversation before sending this question.", code: "bad_chat_scope" };
+      }
+    }
     const jobId: string | null = typeof body.jobId === "string" ? body.jobId : null;
     const sessionId: string | null = typeof body.sessionId === "string" ? body.sessionId : null;
     const message: string = typeof body.message === "string" ? body.message : "";
@@ -1148,6 +1159,45 @@ export default defineEventHandler(async (event) => {
     const surface: "text" | "voice" = voice ? "voice" : "text";
 
     const sql = await getSql();
+
+    // Admission precedes usage/telemetry, contextual reads and chatLoop writes.
+    // Check each supplied identity independently. session.job_id is its LATEST
+    // item pointer, not a membership list: owned historical multi-job turns must
+    // not be rejected just because that pointer moved on.
+    const ownedJob = jobId ? (await sql<{ company_id: string | null }>`
+      SELECT company_id FROM buzzy_jobs WHERE id = ${jobId} AND user_id = ${userId} LIMIT 1
+    `)[0] : null;
+    const ownedSession = sessionId ? (await sql<{ company_id: string | null }>`
+      SELECT company_id FROM buzzy_sessions WHERE id = ${sessionId} AND user_id = ${userId} LIMIT 1
+    `)[0] : null;
+    if ((jobId && !ownedJob) || (sessionId && !ownedSession)) {
+      setResponseStatus(event, 404);
+      return { ok: false, error: "This conversation or work item is no longer available on this account. Reopen it before sending.", code: "chat_scope_unavailable" };
+    }
+    const requestedCompany = typeof body.companyId === "string" ? body.companyId : null;
+    // A null company on a legacy record is not evidence of a conflicting scope.
+    // Every non-null scope, however, must be owned and agree with the others;
+    // an explicit company cannot override a different item's verified company.
+    const companies = [requestedCompany, ownedJob?.company_id, ownedSession?.company_id]
+      .filter((id): id is string => id != null);
+    for (const id of new Set(companies)) {
+      if (!isCompanyId(id)) {
+        setResponseStatus(event, 400);
+        return { ok: false, error: "Reopen the conversation in its company before sending.", code: "bad_chat_scope" };
+      }
+      const owned = await sql`SELECT id FROM buzzy_companies WHERE id = ${id} AND user_id = ${userId} LIMIT 1`;
+      if (!owned.length) {
+        setResponseStatus(event, 404);
+        return { ok: false, error: "This conversation's company is no longer available on this account.", code: "chat_scope_unavailable" };
+      }
+    }
+    if (new Set(companies).size > 1) {
+      setResponseStatus(event, 409);
+      return { ok: false, error: "The work item and conversation belong to different companies. Reopen the intended conversation before sending.", code: "chat_scope_mismatch" };
+    }
+    // Preserve explicit/session context precedence. Job-only legacy calls have
+    // never implicitly selected a company here; admission does not migrate them.
+    const companyId = requestedCompany || ownedSession?.company_id || null;
 
     // ── Plan + quota, before any provider call ───────────────────────────────
     // The web app calls the provider from OUR server, not through /api/inference,
@@ -1227,18 +1277,6 @@ export default defineEventHandler(async (event) => {
       }
     }
 
-    let companyId: string | null = null;
-    if (typeof body.companyId === "string" && isCompanyId(body.companyId)) {
-      companyId = body.companyId;
-    } else if (sessionId) {
-      const sess = await sql<{ company_id: string | null }>`
-        SELECT company_id FROM buzzy_sessions
-        WHERE id = ${sessionId} AND user_id = ${userId}
-        LIMIT 1
-      `;
-      const fromSession = sess[0]?.company_id;
-      if (typeof fromSession === "string" && isCompanyId(fromSession)) companyId = fromSession;
-    }
     const company = companyId ? await confirmedCompanyContext(sql, userId, companyId) : null;
     // Customer memory (component #2): inject approved-work history so later
     // jobs don't re-ask what earlier approvals already established.
