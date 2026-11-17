@@ -35,7 +35,7 @@ export async function envelope(raw,opts={}){
  const response=plain(ctx.response);return {...response,markup:response.document?ctx.renderFileCard(response.document):null};
 }
 export async function backend(t){
- const db=new DatabaseSync(':memory:'),queries=[],events=[],renderCalls=[];let user='owner',forbidden=0,readGate=null,readError=null;
+ const db=new DatabaseSync(':memory:'),queries=[],events=[],renderCalls=[];let user='owner',forbidden=0,readGate=null,readError=null,transactionActive=false;
  db.exec(`CREATE TABLE buzzy_jobs(id TEXT PRIMARY KEY,user_id TEXT,data TEXT);
  CREATE TABLE buzzy_documents(id TEXT PRIMARY KEY,user_id TEXT,job_id TEXT,title TEXT,type TEXT,status TEXT,current_version INTEGER,accepted_version INTEGER,expert TEXT,created_at TEXT,updated_at TEXT);
  CREATE TABLE buzzy_document_versions(doc_id TEXT,version INTEGER,content TEXT,parent_version INTEGER,creator TEXT,expert TEXT,brief_revision TEXT,review TEXT,accepted_at TEXT,accepted_by TEXT,created_at TEXT);
@@ -49,15 +49,41 @@ export async function backend(t){
  const original=snapshot();
  const sql=async(strings,...params)=>{
   let text=strings[0];params.forEach((_,i)=>text+='$'+(i+1)+strings[i+1]);queries.push({text,params:plain(params)});assert.match(text,/^\s*SELECT/,'file delivery performs no data write');
-  const rows=db.prepare(text.replace(/::(?:text|jsonb|int)/g,'').replace(/\$(\d+)/g,':p$1')).all(Object.fromEntries(params.map((p,i)=>['p'+(i+1),p]))).map(row=>{if(typeof row.artifact==='string')row.artifact=JSON.parse(row.artifact);if([0,1].includes(row.approved))row.approved=row.approved?'true':'false';return row;});
+  // SQLite cannot express PostgreSQL row locks. Only the real helper's
+  // trailing FOR SHARE clause is adapted, inside this explicit transaction.
+  const hasShare=/\s+FOR SHARE\s*$/.test(text);
+  if(hasShare)assert.equal(transactionActive,true,'row-lock query requires transaction');
+  const adapted=hasShare?text.replace(/\s+FOR SHARE\s*$/,''):text;
+  assert.doesNotMatch(adapted,/\bFOR SHARE\b/,'no broad row-lock rewriting');
+  const rows=db.prepare(adapted.replace(/::(?:text|jsonb|int)/g,'').replace(/\$(\d+)/g,':p$1')).all(Object.fromEntries(params.map((p,i)=>['p'+(i+1),p]))).map(row=>{if(typeof row.artifact==='string')row.artifact=JSON.parse(row.artifact);if([0,1].includes(row.approved))row.approved=row.approved?'true':'false';return row;});
   if(readGate&&text.includes("data->>'approved'"))await readGate;if(readError)throw readError;return rows;
+ };
+ // Actual withSqlTransaction drives a real SQLite transaction. This remains
+ // a read-only, single-connection fixture, not PostgreSQL concurrency proof.
+ sql.transaction=async work=>{
+  assert.equal(transactionActive,false,'no nested fixture transaction');
+  db.exec('BEGIN');transactionActive=true;
+  try{const value=await work(sql);db.exec('COMMIT');return value;}
+  catch(error){db.exec('ROLLBACK');throw error;}
+  finally{transactionActive=false;}
  };
  const ctx=vm.createContext({Buffer,Headers,URL,URLSearchParams,Request,Response,Uint8Array,console});
  const helper=await loadHelper(ctx);
+ const transactionModule=new vm.SourceTextModule(stripTypeScriptTypes(read('src/lib/sqlTransaction.ts')),{context:ctx});
+ await transactionModule.link(id=>{throw Error('Unexpected transaction dependency '+id);});await transactionModule.evaluate();
+ const canonicalModule=new vm.SourceTextModule(stripTypeScriptTypes(read('src/lib/buzzy/canonicalExport.ts')),{context:ctx});
+ await canonicalModule.link(id=>{
+  if(id==='../sqlTransaction')return transactionModule;
+  assert.equal(id,'./team');
+  return new vm.SyntheticModule(['resolveActingAccount','canPerform'],function(){
+   for(const name of ['resolveActingAccount','canPerform'])this.setExport(name,()=>{forbidden++;throw Error('Forbidden dependency ./team.'+name);});
+  },{context:ctx});
+ });await canonicalModule.evaluate();
  const deps={h3:{defineEventHandler:f=>f,getMethod:e=>e.req.method,getHeader:(e,k)=>e.req.headers.get(k),setResponseStatus:(e,s)=>e.status=s,setResponseHeader:(e,k,v)=>e.headers.set(k,v)},'@/lib/db':{getSql:async()=>sql},'@/lib/auth/verify.server':{getSessionUserFromHeaders:async()=>user?{id:user}:null},'./telemetry':{recordTelemetry:async(_sql,e)=>events.push(plain(e))},'./artifact':{renderDocument:async body=>{renderCalls.push(plain(body));return {ok:true,bytes:Buffer.from('SYNTHETIC WORD EXPORT'),contentType:MIME.docx,filename:'word.docx'};}}};
  const source=stripTypeScriptTypes(read('src/lib/buzzy/chat.nitro.ts')),route=new vm.SourceTextModule(source,{context:ctx});
  await route.link(id=>{
   if(id==='./officeOriginal'){assert.ok(helper);return helper;}
+  if(id==='./canonicalExport')return canonicalModule;
   const decl=[...source.matchAll(/import\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]/g)].find(m=>m[2]===id);assert.ok(decl,id);const names=decl[1].split(',').map(x=>x.trim()).filter(Boolean);
   return new vm.SyntheticModule(names,function(){for(const name of names)this.setExport(name,deps[id]?.[name]??(()=>{forbidden++;throw Error('Forbidden dependency '+id+'.'+name);}));},{context:ctx});
  });await route.evaluate();
@@ -68,7 +94,7 @@ export async function backend(t){
  };
  const set=(id,raw,approved=true)=>db.prepare('UPDATE buzzy_jobs SET data=? WHERE id=?').run(JSON.stringify({artifact:raw,approved,unrelated:'Keep original job fields'}),id);
  const reset=()=>{for(const row of original[0][1])db.prepare('UPDATE buzzy_jobs SET data=? WHERE id=?').run(row.data,row.id);};
- t.after(()=>{reset();assert.deepEqual(snapshot(),original,'all stored originals, text versions and unrelated records retained exactly');assert.equal(forbidden,0,'zero provider/private dependency calls');db.close();});
+ t.after(()=>{assert.equal(transactionActive,false,'fixture transaction closed');reset();assert.deepEqual(snapshot(),original,'all stored originals, text versions and unrelated records retained exactly');assert.equal(forbidden,0,'zero provider/private dependency calls');db.close();});
  return {fetch,queries,events,renderCalls,seed,set,reset,snapshot,user:value=>user=value,holdRead:value=>readGate=value,failRead:value=>readError=value};
 }
 

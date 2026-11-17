@@ -65,6 +65,7 @@ import { materializeDraft, summarizeChanges } from "./documents";
 import { commitJobApproval } from "./jobApproval";
 import { commitDocumentDecision } from "./documentDecision";
 import { getDocumentCheckSheet } from "./documentCheckSheet";
+import { getCanonicalExportSnapshot } from "./canonicalExport";
 import { officeOriginalMetadata, officeOriginalDisposition } from "./officeOriginal";
 import { ensureExecutionBoard } from "./execution";
 import { renderTextPdf } from "./pdf";
@@ -3143,7 +3144,15 @@ export default defineEventHandler(async (event) => {
       return { error: "Sign in required", code: "signed_out" };
     }
     const sql = await getSql();
-    const docs = await sql`
+    // Only these four explicit canonical formats inherit team read access.
+    // Missing/empty/unsupported formats keep the actor-only JSON/error path.
+    const format = (queryValue(fullPath, "format") ?? "").toLowerCase();
+    const canonicalExport = ["md", "pdf", "docx", "csv"].includes(format);
+    const versionRaw = queryValue(fullPath, "version");
+    const snapshot = canonicalExport
+      ? await getCanonicalExportSnapshot(sql, user.id, user.email ?? null, docMatch[1], versionRaw)
+      : null;
+    const docs = canonicalExport ? (snapshot ? [snapshot.document] : []) : await sql`
       SELECT id, job_id, title, type, status, current_version, accepted_version, expert, created_at, updated_at
       FROM buzzy_documents WHERE id = ${docMatch[1]} AND user_id = ${user.id} LIMIT 1
     `;
@@ -3151,12 +3160,11 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 404);
       return { error: "Document not found", code: "not_found" };
     }
-    const versionRaw = queryValue(fullPath, "version");
     const version = versionRaw ? Number(versionRaw) : docs[0].current_version;
     // QA-12: the chosen version is returned exactly as stored — exports and
     // renders always match it; unknown versions are a clean 404, never a
     // silent fall-through to the latest.
-    const vrows = await sql`
+    const vrows = canonicalExport ? (snapshot?.version ? [snapshot.version] : []) : await sql`
       SELECT version, content, created_at FROM buzzy_document_versions
       WHERE doc_id = ${docMatch[1]} AND version = ${Number.isFinite(version) ? version : -1} LIMIT 1
     `;
@@ -3164,7 +3172,7 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 404);
       return { error: "That version does not exist", code: "not_found" };
     }
-    const versions = await sql`
+    const versions = canonicalExport ? [] : await sql`
       SELECT version, parent_version, creator, expert, brief_revision, review,
              accepted_at, accepted_by, created_at
       FROM buzzy_document_versions
@@ -3176,7 +3184,6 @@ export default defineEventHandler(async (event) => {
     // ── BZ-F020: exports match the CHOSEN version (QA-12) ──────────────
     // format=pdf|docx|md|csv renders THIS version's canonical text on demand —
     // the export can never drift from the version the owner picked.
-    const format = (queryValue(fullPath, "format") ?? "").toLowerCase();
     if (format) {
       await recordTelemetry(sql, { userId: user.id, jobId: String(docs[0].job_id ?? ""), docId: docMatch[1],
         event: "exported", props: { format, version: Number(vrows[0].version) } });
