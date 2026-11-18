@@ -31,6 +31,7 @@
     ".bz-fb.min .bz-fb-body{display:none}";
 
   var box = null, text = null, note = null, sendBtn = null, picPreview = null, picture = "";
+  var pictureRead = 0, hideTimer = null;
 
   function el(tag, cls, txt) {
     var n = document.createElement(tag);
@@ -47,6 +48,7 @@
       document.head.appendChild(st);
     }
     box = el("section", "bz-fb");
+    var panel = box;
     box.setAttribute("role", "dialog");
     box.setAttribute("aria-label", "Send feedback");
     var head = el("div", "bz-fb-head");
@@ -117,13 +119,14 @@
     box.addEventListener("keydown", function (e) { if (e.key === "Escape") hide(); });
     picInput.addEventListener("change", function () {
       var f = picInput.files && picInput.files[0];
+      var read = ++pictureRead;
       picture = "";
       picPreview.hidden = true;
       say("");
       if (!f) return;
       if (f.size > MAX_PICTURE) { say("That picture is too big. Pick one under 1 MB.", true); picInput.value = ""; return; }
       var r = new FileReader();
-      r.onload = function () { picture = String(r.result || ""); picPreview.src = picture; picPreview.hidden = false; };
+      r.onload = function () { if (box !== panel || read !== pictureRead) return; picture = String(r.result || ""); picPreview.src = picture; picPreview.hidden = false; };
       r.readAsDataURL(f);
     });
     sendBtn.addEventListener("click", send);
@@ -135,12 +138,17 @@
   }
 
   function hide() {
+    pictureRead++;
+    if (hideTimer !== null) clearTimeout(hideTimer);
+    hideTimer = null;
     if (box) box.remove();
     box = null;
     picture = "";
   }
 
   function send() {
+    var panel = box;
+    if (!panel || sendBtn.disabled) return;
     var words = String(text.value || "").trim();
     if (!words) { say("Say what you tried and what happened.", true); text.focus(); return; }
     sendBtn.disabled = true;
@@ -153,15 +161,17 @@
     })
       .then(function (r) { return r.json().catch(function () { return { ok: false }; }); })
       .then(function (d) {
+        if (box !== panel) return;
         if (d && d.ok) {
           say("Thank you. The team will read it.");
-          setTimeout(hide, 2200);
+          hideTimer = setTimeout(function () { if (box === panel) hide(); }, 2200);
         } else {
           sendBtn.disabled = false;
           say((d && d.error) || "That didn't send. Try again in a moment.", true);
         }
       })
       .catch(function () {
+        if (box !== panel) return;
         sendBtn.disabled = false;
         say("That didn't send. Check your connection and try again.", true);
       });
