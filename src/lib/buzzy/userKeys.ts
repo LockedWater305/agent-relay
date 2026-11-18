@@ -12,10 +12,10 @@
  * desktop runtime — a key must never travel in clear text.
  */
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
 import type { Sql } from "@/lib/db";
 import type { LlmOverride } from "./llm";
+import { cleanBaseUrl, resolvesPublic } from "./providerTransport";
+export { cleanBaseUrl, isPrivateHost, resolvesPublic } from "./providerTransport";
 
 /** Ready-made addresses for the common providers; "custom" takes any https URL. */
 export const KEY_PROVIDERS: Record<string, { label: string; baseUrl: string }> = {
@@ -55,70 +55,6 @@ export function openSecret(sealed: string | null | undefined): string | null {
   } catch {
     return null;
   }
-}
-
-/**
- * Whether an address on this machine or its private network may be used. Only a
- * local runtime (the desktop app, or a deployment whose own model is local) may: on
- * the cloud, a "provider address" of http://127.0.0.1:… or 10.x.x.x would make the
- * server call its own private services with whatever the person typed (SSRF).
- */
-function allowPrivate(): boolean {
-  if ((process.env.BZ_ALLOW_LOCAL_AI_KEY_URL ?? "").trim() === "1") return true;
-  return /^(https?:\/\/)?(localhost|127\.0\.0\.1|\[::1\])\b/i.test((process.env.BZ_CHAT_BASE_URL ?? "").trim());
-}
-
-/** Loopback, private, link-local, carrier-grade NAT and "internal" names. */
-export function isPrivateHost(host: string): boolean {
-  const h = String(host || "").toLowerCase().replace(/^\[|\]$/g, "");
-  if (!h) return true;
-  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".lan")) return true;
-  const v = isIP(h);
-  if (v === 4) {
-    const [a, b] = h.split(".").map(Number) as [number, number];
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
-  }
-  if (v === 6) {
-    if (h === "::1" || h === "::") return true;
-    if (/^f[cd]/.test(h) || /^fe[89ab]/.test(h)) return true;
-    const mapped = /::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(h);
-    return mapped ? isPrivateHost(mapped[1]!) : false;
-  }
-  return false;
-}
-
-/** An address a key may be sent to: https to a public host; http or private only for a local runtime. */
-export function cleanBaseUrl(raw: unknown): string | null {
-  const s = String(raw ?? "").trim().replace(/\/+$/, "");
-  if (!s || s.length > 300) return null;
-  let u: URL;
-  try { u = new URL(s); } catch { return null; }
-  if (u.username || u.password || u.search || u.hash) return null;
-  const priv = isPrivateHost(u.hostname);
-  if (priv && !allowPrivate()) return null;
-  if (u.protocol === "https:") return u.toString().replace(/\/+$/, "");
-  if (u.protocol === "http:" && priv && allowPrivate()) return u.toString().replace(/\/+$/, "");
-  return null;
-}
-
-// A public name can still resolve to a private address. Checked before a key is
-// saved and before each turn uses it; answers are kept for ten minutes.
-const dnsSeen = new Map<string, { ok: boolean; at: number }>();
-export async function resolvesPublic(baseUrl: string): Promise<boolean> {
-  if (allowPrivate()) return true;
-  let host = "";
-  try { host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, ""); } catch { return false; }
-  if (isIP(host)) return !isPrivateHost(host);
-  const hit = dnsSeen.get(host);
-  if (hit && Date.now() - hit.at < 600_000) return hit.ok;
-  let ok = false;
-  try {
-    const all = await lookup(host, { all: true });
-    ok = all.length > 0 && all.every((a) => !isPrivateHost(a.address));
-  } catch { ok = false; }
-  dnsSeen.set(host, { ok, at: Date.now() });
-  return ok;
 }
 
 /** What the page may see about a saved key. Never the key itself. */
@@ -190,7 +126,15 @@ export async function deleteKey(sql: Sql, userId: string): Promise<void> {
   await sql`DELETE FROM buzzy_user_ai_keys WHERE user_id = ${userId}`;
 }
 
-/** The override for this person's turns, or null when they have no (usable) key. */
+/** No saved row is distinct from a configured key that cannot safely be used. */
+export class PersonalKeyUnavailableError extends Error {
+  constructor() {
+    super("Your AI key settings could not be verified. Update or remove your saved key in Your AI key before continuing.");
+    this.name = "PersonalKeyUnavailableError";
+  }
+}
+
+/** Null means a verified absence only. Invalid keys and read failures fail closed. */
 export async function overrideFor(sql: Sql, userId: string): Promise<LlmOverride | null> {
   try {
     const rows = await sql`
@@ -199,10 +143,19 @@ export async function overrideFor(sql: Sql, userId: string): Promise<LlmOverride
     if (!r) return null;
     const apiKey = openSecret(String(r.key_sealed));
     const baseUrl = cleanBaseUrl(r.base_url);
-    if (!apiKey || !baseUrl || !(await resolvesPublic(baseUrl))) return null;
+    if (!apiKey || apiKey.length < 8 || apiKey.length > 400 || /\s/.test(apiKey) ||
+        !baseUrl || !(await resolvesPublic(baseUrl))) throw new PersonalKeyUnavailableError();
     return { baseUrl, apiKey, model: r.model ? String(r.model) : null };
   } catch {
-    // An older database without the table: the deployment's own key still works.
-    return null;
+    // An unavailable table/database is not proof that the user has no key.
+    // Never silently send their turn with the deployment's credentials.
+    throw new PersonalKeyUnavailableError();
   }
+}
+
+/** Test-and-save requires the saved key even if it was concurrently removed. */
+export async function requiredOverrideFor(sql: Sql, userId: string): Promise<LlmOverride> {
+  const key = await overrideFor(sql, userId);
+  if (!key) throw new PersonalKeyUnavailableError();
+  return key;
 }

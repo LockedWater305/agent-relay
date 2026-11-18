@@ -30,7 +30,7 @@
 import { defineEventHandler, getMethod, getHeader, setResponseHeader, setResponseStatus } from "h3";
 import { chatLoop, type FlowStep } from "./server";
 import { withLlmOverride } from "./llm";
-import { overrideFor, keySummary, saveKey, deleteKey, KEY_PROVIDERS } from "./userKeys";
+import { overrideFor, requiredOverrideFor, PersonalKeyUnavailableError, keySummary, saveKey, deleteKey, KEY_PROVIDERS } from "./userKeys";
 import { enrichLater, backfillTags, searchTagged, recallPrompt } from "./tags";
 import { listBoardRecipes, saveBoardRecipe, deleteBoardRecipe } from "./boardRecipes";
 import type { VoiceHandlers } from "./voice";
@@ -1259,6 +1259,15 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, quota.code === "model_not_allowed" ? 403 : quota.code === "plan_required" ? 402 : 429);
       return { ok: false, error: quota.error, code: quota.code, plan: quota.plan, limit: quota.limit, used: quota.used };
     }
+    // A saved-but-unusable personal key must not fall back to our credentials.
+    // Resolve before metering a started turn or opening either streaming lane.
+    let ownKey: Awaited<ReturnType<typeof overrideFor>>;
+    try {
+      ownKey = await overrideFor(sql, userId);
+    } catch {
+      setResponseStatus(event, 503);
+      return { ok: false, code: "personal_key_unavailable", error: new PersonalKeyUnavailableError().message };
+    }
     // A turn is charged when it runs: the provider cost is incurred by starting it.
     await recordUsage({ userId, scope: "inference", units: 1, ms: 0, status: "ok", model: modelId ?? null });
 
@@ -1352,7 +1361,6 @@ export default defineEventHandler(async (event) => {
     const turnTools: Array<{ name: string; state: string; ms?: number }> = [];
     // Their own AI key, when they saved one: every completion in this turn goes to
     // their provider instead of the deployment's (owner, 2026-11-18).
-    const ownKey = await overrideFor(sql, userId);
     const runTurn = (opts?: {
       speech?: VoiceHandlers;
       onText?: (t: string) => void;
@@ -2766,15 +2774,16 @@ export default defineEventHandler(async (event) => {
       let works: boolean | null = null;
       let problem: string | null = null;
       if (body.test === true) {
-        const o = await overrideFor(sql, user.id);
         try {
+          const o = await requiredOverrideFor(sql, user.id);
           await withLlmOverride(o, () => chatCompletion([{ role: "user", content: "Reply with the word ok." }], { maxTokens: 8, temperature: 0 }));
           works = true;
         } catch (err) {
           works = false;
           const m = err instanceof Error ? err.message : String(err);
           const code = /\((\d{3})\)/.exec(m)?.[1];
-          problem = code === "401" || code === "403" ? "The provider refused that key."
+          problem = err instanceof PersonalKeyUnavailableError ? err.message
+            : code === "401" || code === "403" ? "The provider refused that key."
             : code === "404" ? "The provider doesn't know that model name."
             : code === "429" ? "The provider says the key is out of credit or rate-limited."
             : "The provider didn't answer.";

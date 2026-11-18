@@ -12,6 +12,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { postProviderJson } from "./providerTransport";
 
 const env = (key: string): string => {
   const v = process.env[key]?.trim();
@@ -39,7 +40,11 @@ const overrideStore = new AsyncLocalStorage<LlmOverride>();
 
 /** Run fn with every completion inside it sent to the person's own endpoint. */
 export function withLlmOverride<T>(o: LlmOverride | null | undefined, fn: () => Promise<T>): Promise<T> {
-  return o && o.baseUrl && o.apiKey ? overrideStore.run(o, fn) : fn();
+  if (o == null) return fn();
+  if (typeof o.baseUrl !== "string" || !o.baseUrl.trim() || typeof o.apiKey !== "string" || !o.apiKey.trim()) {
+    return Promise.reject(new Error("Personal AI override is incomplete."));
+  }
+  return overrideStore.run(o, fn);
 }
 
 /** True while the current turn is running on the person's own key. */
@@ -63,6 +68,19 @@ function endpoint(requestedModel?: string): { url: string; key: string; model: s
     key: API_KEY,
     model: requestedModel || DEFAULT_MODEL,
   };
+}
+
+/** Personal keys always use the checked transport; never fall back on failure. */
+function postJson(ep: { url: string; key: string }, init: { body: string }): Promise<Response> {
+  if (usingOwnKey()) return postProviderJson(ep.url, ep.key, init.body);
+  // The deployment endpoint remains on its existing transport. Deny redirects
+  // here too so neither completion path forwards a request to a new address.
+  return fetch(ep.url, {
+    method: "POST",
+    redirect: "error",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${ep.key}` },
+    body: init.body,
+  });
 }
 
 /**
@@ -226,9 +244,7 @@ export async function chatCompletionStream(
   const ep = endpoint(opts?.model);
   const model = ep.model;
   const started = Date.now();
-  const res = await fetch(ep.url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${ep.key}` },
+  const res = await postJson(ep, {
     body: JSON.stringify({
       model,
       messages,
@@ -286,12 +302,7 @@ async function postCompletionFull(body: Record<string, unknown>): Promise<FullCo
   const ep = endpoint(typeof body.model === "string" ? body.model : undefined);
   const started = Date.now();
 
-  const res = await fetch(ep.url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${ep.key}`,
-    },
+  const res = await postJson(ep, {
     body: JSON.stringify(body),
   });
 
