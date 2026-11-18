@@ -103,6 +103,19 @@
     var jobId = new URLSearchParams(location.search).get("job");
     var titleEl = document.getElementById("title");
     var metaEl = document.getElementById("meta");
+    var srcBox = document.getElementById("sources");
+    var box = document.getElementById("deliverables");
+    var act = document.getElementById("activity");
+    var conv = document.getElementById("conversation");
+    // The shell may replace this Project while either fetch or JSON is pending.
+    // Keep writes with the mounted controls, even when a later page has the same job.
+    function ownsPage() {
+      return titleEl.isConnected && document.getElementById("title") === titleEl;
+    }
+    function ownsUrl() {
+      return /^\/buzzy\/project(?:\.html)?\/?$/.test(location.pathname) &&
+        new URLSearchParams(location.search).get("job") === jobId;
+    }
     function esc(s) {
       return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
         return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -112,12 +125,21 @@
     if (!jobId) {
       titleEl.textContent = "No project selected";
       metaEl.textContent = "Open a work item from Talk → Recent work.";
-      document.getElementById("deliverables").innerHTML = '<p class="empty-note">Nothing to show.</p>';
+      box.innerHTML = '<p class="empty-note">Nothing to show.</p>';
       return;
     }
     fetch("/api/buzzy/projects/" + encodeURIComponent(jobId), { credentials: "same-origin" })
-      .then(function (r) { if (r.status === 401) { location.href = "/buzzy/landing"; throw new Error("signed_out"); } return r.json(); })
+      .then(function (r) {
+        if (!ownsPage()) return;
+        if (r.status === 401) {
+          // pushState precedes the next mount. Do not replace a pending destination.
+          if (ownsUrl()) location.href = "/buzzy/landing";
+          throw new Error("signed_out");
+        }
+        return r.json();
+      })
       .then(function (data) {
+        if (!ownsPage()) return;
         if (!data || !data.project) throw new Error("missing project");
         var p = data.project;
         titleEl.textContent = p.title || "Untitled project";
@@ -126,7 +148,6 @@
           '<span class="chip ' + chipClass + '">' + esc(p.status) + "</span>" +
           ' <a class="back" style="margin-left:.6rem" href="/buzzy/talk?job=' + encodeURIComponent(p.id) + '">Open conversation →</a>';
 
-        var srcBox = document.getElementById("sources");
         var sources = data.sources || [];
         srcBox.innerHTML = sources.length
           ? sources.map(function (s) {
@@ -138,7 +159,6 @@
             }).join("")
           : '<p class="empty-note">No inputs recorded yet — draw on the sketch board or fill in the brief and they appear here.</p>';
 
-        var box = document.getElementById("deliverables");
         if (!data.deliverables || !data.deliverables.length) {
           box.innerHTML = '<p class="empty-note">No file behind this project yet. A project is only ready when it holds a deliverable.</p>';
         } else {
@@ -152,7 +172,6 @@
           }).join("");
         }
 
-        var act = document.getElementById("activity");
         if (!data.turns || !data.turns.length) {
           act.innerHTML = '<p class="empty-note">No turn log recorded for this project yet.</p>';
         } else {
@@ -166,7 +185,6 @@
             }).join("") + "</tbody></table>";
         }
 
-        var conv = document.getElementById("conversation");
         if (!data.messages || !data.messages.length) {
           conv.innerHTML = '<p class="empty-note">No transcript linked to this project.</p>';
         } else {
@@ -178,6 +196,7 @@
         }
       })
       .catch(function (e) {
+        if (!ownsPage()) return;
         titleEl.textContent = "Could not load project";
         metaEl.textContent = e.message;
       });

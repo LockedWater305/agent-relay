@@ -23,6 +23,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, write
 import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeCspManifest } from "../scripts/build-desktop-csp.mjs";
+import { productionDependencyClosure, copyProductionDependency, ensurePgliteAssets } from "./stage-inputs.mjs";
 
 const DESKTOP = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(DESKTOP, "..");
@@ -94,41 +95,22 @@ async function stage() {
   // stray dev packages ended up in the release — 714 MB instead of ~150 MB. Walk
   // the manifest's `dependencies` instead, resolving each name the way Node does.
   log("resolving the production dependency closure");
-  const closure = prodClosure(ROOT);
+  const { directories: closure, optionalMissing } = productionDependencyClosure(ROOT);
+  for (const entry of optionalMissing) log(`optional dependency absent: ${entry.name} from ${entry.from}`);
   let copied = 0;
   for (const dir of closure) {
     const target = join(APP, dir.slice(ROOT.length + 1));
-    if (existsSync(target) || /[\\/]node_modules[\\/]electron([\\/]|$)/.test(dir)) continue;
-    try {
-      // Force the JS traversal: native recursive copy can retain absolute .bin
-      // symlinks despite dereference:true, leaving the package tied to the builder.
-      cpSync(dir, target, { recursive: true, dereference: true, filter: () => true });
-      copied++;
-    } catch (err) {
-      log(`skipped ${dir.slice(ROOT.length + 1)}: ${err instanceof Error ? err.message : err}`);
-    }
+    if (/[\\/]node_modules[\\/]electron([\\/]|$)/.test(dir)) continue;
+    if (copyProductionDependency(dir, target)) copied++;
   }
   log(`staged ${copied} packages`);
 
   // A staged tree without the PGLite runtime assets boots and then 500s every DB
   // route, so check for them here rather than after install.
-  const libs = join(APP, ".output", "server", "_libs");
-  const pgliteSrc = join(APP, "node_modules", "@electric-sql", "pglite", "dist");
   // Ship the payloads instead of letting the launcher copy them on first start:
   // that restore WRITES into the install folder, which a per-machine NSIS install
   // cannot do, and a read-only install must not need to write to start.
-  for (const f of ["pglite.data", "pglite.wasm", "initdb.wasm"]) {
-    const target = join(libs, f);
-    if (!existsSync(target) && existsSync(join(pgliteSrc, f))) {
-      mkdirSync(libs, { recursive: true });
-      cpSync(join(pgliteSrc, f), target);
-    }
-  }
-  const assets = ["pglite.data", "pglite.wasm", "initdb.wasm"].filter((f) => !existsSync(join(libs, f)));
-  const pgliteInModules = existsSync(join(APP, "node_modules", "@electric-sql", "pglite", "dist"));
-  if (assets.length > 0 && !pgliteInModules) {
-    throw new Error(`staged tree is missing PGLite assets (${assets.join(", ")}) and the pglite package — the app would 500 on every DB route`);
-  }
+  ensurePgliteAssets(APP);
   const migrations = existsSync(join(APP, "migrations"))
     ? readdirSync(join(APP, "migrations")).filter((f) => f.endsWith(".sql")).length
     : 0;
@@ -287,45 +269,6 @@ function assertPackagedImports() {
     );
   }
   log(`packaged imports: ok (${asarFiles.length} shell files, ${REQUIRED_RUNTIME_FILES.length} runtime libs)`);
-}
-
-function prodClosure(root) {
-  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  const deps = Object.keys(pkg.dependencies ?? {});
-  const seen = new Set();
-  const out = [];
-  const queue = deps.map((name) => ({ name, from: root }));
-
-  while (queue.length > 0) {
-    const { name, from } = queue.shift();
-    const dir = resolvePackage(name, from, root);
-    if (!dir || seen.has(dir)) continue;
-    seen.add(dir);
-    out.push(dir);
-    let childPkg;
-    try {
-      childPkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-    } catch {
-      continue;
-    }
-    for (const dep of Object.keys({ ...childPkg.dependencies, ...childPkg.optionalDependencies })) {
-      queue.push({ name: dep, from: dir });
-    }
-  }
-  return out;
-}
-
-/** Node's lookup: nearest node_modules from `from` upward, never above the repo. */
-function resolvePackage(name, from, root) {
-  let dir = from;
-  for (;;) {
-    const candidate = join(dir, "node_modules", name);
-    if (existsSync(join(candidate, "package.json"))) return candidate;
-    if (dir === root) return null;
-    const parent = dirname(dir);
-    if (parent === dir || parent.length < root.length) return null;
-    dir = parent;
-  }
 }
 
 function du(dir) {

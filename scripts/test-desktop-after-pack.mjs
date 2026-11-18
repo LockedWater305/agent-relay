@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import {
-  copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
+  copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
   rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { copyProductionDependency } from "../desktop/stage-inputs.mjs";
 
 const desktopDir = fileURLToPath(new URL("../desktop/", import.meta.url));
 const hookSource = join(desktopDir, "after-pack.cjs");
@@ -121,7 +122,7 @@ test("build configuration registers the tested hook and staged runtime destinati
     "extraResources must copy the staged runtime to resources/app before afterPack");
 });
 
-test("the explicit application file allowlist excludes the build-time hook", () => {
+test("the explicit application file allowlist excludes the build-time hook and staging guard", () => {
   const files = desktopPackage.build.files;
   assert.ok(Array.isArray(files) && files.length > 0, "build.files must be an explicit nonempty allowlist");
   for (const entry of files) {
@@ -133,16 +134,13 @@ test("the explicit application file allowlist excludes the build-time hook", () 
     assert.ok(existsSync(path) && statSync(path).isFile(),
       `build.files must name explicit existing files, not patterns or directories: ${entry}`);
     assert.notEqual(realpathSync(path), realpathSync(hookSource), "afterPack is build-time only");
+    assert.notEqual(realpathSync(path), realpathSync(join(desktopDir, "stage-inputs.mjs")), "staging guards are build-time only");
   }
 });
 
-// Exercise the actual staging copy expression without running dist.mjs's build
-// entrypoint. A changed call shape must update this explicit boundary.
+// Exercise the actual staging copy guard without importing the build entrypoint.
 function stageDependencyCopy(source, target) {
-  const sourceText = readFileSync(join(desktopDir, "dist.mjs"), "utf8");
-  const calls = sourceText.match(/cpSync\(dir, target, \{[^}]+\}\);/g) ?? [];
-  assert.equal(calls.length, 1, "exact production dependency copy boundary");
-  new Function("cpSync", "dir", "target", calls[0])(cpSync, source, target);
+  copyProductionDependency(source, target);
 }
 
 for (const boundary of ["stage", "afterPack"]) {

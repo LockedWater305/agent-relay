@@ -7134,7 +7134,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     };
     document.getElementById("downloadPdf").onclick = onDownloadPdf;
     // ── Sessions drawer ───────────────────────────────────────
+    var sessionsCloseTimer = null;
     function openSessionsDrawer() {
+      clearTimeout(sessionsCloseTimer);
+      sessionsCloseTimer = null;
       const drawer = document.getElementById("sessionsDrawer");
       const overlay = document.getElementById("sessionsOverlay");
       overlay.classList.remove("hidden");
@@ -7147,7 +7150,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       const overlay = document.getElementById("sessionsOverlay");
       drawer.classList.remove("open");
       drawer.setAttribute("aria-hidden", "true");
-      setTimeout(function () { overlay.classList.add("hidden"); }, 180);
+      clearTimeout(sessionsCloseTimer);
+      sessionsCloseTimer = setTimeout(function () {
+        sessionsCloseTimer = null;
+        overlay.classList.add("hidden");
+      }, 180);
     }
     // Handle auth/errors with plain-language notes; 401 → sign in.
     function sessionsError(msg) {

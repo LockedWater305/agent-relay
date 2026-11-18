@@ -1,0 +1,960 @@
+{
+  "schemaVersion": 1,
+  "asOfDate": "2026-11-18",
+  "inventoryKind": "phase_one_acceptance_evidence_and_remaining_gates",
+  "scopeLimit": "Minimal evidence/gate matrix. No complete current-head behavioral parity is claimed; function-register totals are historical source inventory.",
+  "ownerPriorities": [
+    {
+      "order": 1,
+      "scope": "Local Electron parity with hosted UI",
+      "status": "active"
+    },
+    {
+      "order": 2,
+      "scope": "Optional user-directed local/device access",
+      "status": "deferred_until_parity"
+    },
+    {
+      "order": 3,
+      "scope": "Later UI/orchestration roadmap",
+      "status": "deferred"
+    }
+  ],
+  "refObservation": {
+    "repository": "LockedWater305/agent-relay",
+    "branch": "beezilla/desktop-parity-20261113",
+    "pr": 1,
+    "observedAt": "2026-11-18T07:53:20.126Z",
+    "head": "d297b6f1f137c081412fa35d8ec262fe4595b932",
+    "base": "3bf15ce27a10e15e2533a5f659c42da07e9cfe36",
+    "draft": true,
+    "merged": false,
+    "readOnlyConnector": true
+  },
+  "subjects": {
+    "publishedDesktop": {
+      "commit": "d297b6f1f137c081412fa35d8ec262fe4595b932",
+      "tree": "c7e41162902a2e370041e3a1aeda67da296dc9bd",
+      "published": true,
+      "currentNativeAccepted": false,
+      "servedRevisionVerified": false
+    },
+    "retainedNative": {
+      "tree": "5685a0050a0a1ed13f9e328e02bd544421762872",
+      "artifact": "historical unsigned Mac arm64 package",
+      "currentPackage": false
+    },
+    "resolverStaging": {
+      "tree": "7831d6c81581c94494974a0ee1b6430b82db974e",
+      "baseCommit": "d297b6f1f137c081412fa35d8ec262fe4595b932",
+      "patchSha256": "1bdc4e79c3d582027c5ad5147a8ecf486ebe441045a9b3bf0e4f301c6648e496",
+      "sourceReview": "PASS",
+      "published": false
+    },
+    "disabledEmittedProposal": {
+      "tree": "b0be7c53f1464720fd4098bd22ee4c9420f39423",
+      "baseTree": "7831d6c81581c94494974a0ee1b6430b82db974e",
+      "patchSha256": "96ba6657ba91f6bf9b83e0a7e97b60288357ea2e50ff2276afb2190bbc68619c",
+      "review": "PASS static/pure only",
+      "literallyDisabled": true,
+      "published": false
+    },
+    "honchoReconciliation": {
+      "tree": "34dcfdc39cca076fbc8f9d5250de73ee1101494e",
+      "intendedParents": [
+        "3fb04a43184ea1b1cbedf7ea4654f7d10c962e32",
+        "94cfa4ccfa2a02e16c52b638661e4d4ed7ae7812"
+      ],
+      "headToCandidatePatchSha256": "ae29950703733abf6acf1994ec98d0d630e88120816bf2dd1c52da7367583d85",
+      "review": "PASS source/focused only",
+      "published": false,
+      "separateStream": true
+    },
+    "futureCurrentPackage": {
+      "artifact": null,
+      "accepted": false
+    }
+  },
+  "matrix": [
+    {
+      "id": "M01",
+      "area": "Published source and canonical export",
+      "evidenceClass": "accepted_server_source",
+      "status": "accepted_scoped",
+      "subject": "publishedDesktop",
+      "evidence": [
+        "published-source-ci",
+        "canonical-export-review"
+      ],
+      "observations": {
+        "sourceFiles": 702,
+        "buildFiles": 180,
+        "inputsPlusAliases": 87,
+        "httpCases": 96,
+        "passingAssertions": 104,
+        "tableCount": 73,
+        "finalReopenEqual": true,
+        "historicalNormalExit": true
+      },
+      "limits": [
+        "Finite actual signed-session HTTP/PGlite fixtures only.",
+        "DOCX normalization only reviewed bounded timestamps; remaining ZIP payloads exact.",
+        "Transaction-local probes are not hosted multi-session concurrency."
+      ],
+      "remainingGateIds": [
+        "G09",
+        "G10",
+        "G12"
+      ]
+    },
+    {
+      "id": "M02",
+      "area": "Published exact-commit hosted CI",
+      "evidenceClass": "accepted_source_ci",
+      "status": "accepted_scoped",
+      "subject": "publishedDesktop",
+      "evidence": [
+        "published-source-ci"
+      ],
+      "observations": {
+        "runId": 44113981765,
+        "node": "22.23.4",
+        "npm": "10.9.9",
+        "runner": "ubuntu-26.04",
+        "requiredStages": {
+          "Install": "success",
+          "Typecheck": "success",
+          "Build": "success",
+          "Tests (hermetic subset)": "success"
+        },
+        "pass": 1912,
+        "skip": 4,
+        "fail": 0,
+        "advisoryLint": {
+          "exit": 1,
+          "errors": 70,
+          "warnings": 115
+        }
+      },
+      "limits": [
+        "No new candidate CI inheritance; no native/live/endpoint acceptance.",
+        "PDF text-tool skips and public/private-stub scope remain visible."
+      ],
+      "remainingGateIds": [
+        "G04",
+        "G11"
+      ]
+    },
+    {
+      "id": "M03",
+      "area": "Electron and embedded runtime",
+      "evidenceClass": "source_pins_and_old_native_observation",
+      "status": "version_warning_superseded",
+      "subject": "publishedDesktop",
+      "evidence": [
+        "native-static-review"
+      ],
+      "observations": {
+        "sourceElectron": "45.3.2",
+        "sourceBuilder": "26.18.0",
+        "rootNodeEngine": ">=22",
+        "oldPackageElectron": "45.3.2",
+        "oldPackageEmbeddedNode": "24.22.2"
+      },
+      "limits": [
+        "No fresh embedded-runtime execution in this inventory."
+      ],
+      "remainingGateIds": [
+        "G08",
+        "G09"
+      ]
+    },
+    {
+      "id": "M04",
+      "area": "Shell ASAR and historical native acceptance",
+      "evidenceClass": "old_native_package",
+      "status": "historical_only",
+      "subject": "retainedNative",
+      "evidence": [
+        "native-static-review"
+      ],
+      "observations": {
+        "nativePassed": 179,
+        "nativeTotal": 179,
+        "shellModulesEqualPublished": 12,
+        "asarBytes": 142590,
+        "asarSha256": "9d2997ad2f62cfc6ccc6554412ea099d44d4873047320c4595a02a99908120f8"
+      },
+      "limits": [
+        "Full old34408-file runtime was not rehashed by the static review.",
+        "No current package or generated-ASAR-metadata acceptance."
+      ],
+      "remainingGateIds": [
+        "G06",
+        "G08",
+        "G09"
+      ]
+    },
+    {
+      "id": "M05",
+      "area": "Current build against retained package",
+      "evidenceClass": "changed_current_build",
+      "status": "classified_static",
+      "subject": "publishedDesktop",
+      "evidence": [
+        "native-static-review",
+        "native-ten-row-matrix"
+      ],
+      "observations": {
+        "currentPaths": 180,
+        "identical": 166,
+        "changed": 13,
+        "missing": 1,
+        "oldExtra": 1,
+        "commentOnlySsrChanges": 10
+      },
+      "behaviorDifference": "server/index.mjs has newer canonical export/check-sheet/decision handlers; other reviewed changes include date and manifest references/source-path metadata.",
+      "limits": [
+        "Different bytes remain different. Exact graph and changed behavior must bind to the future package."
+      ],
+      "remainingGateIds": [
+        "G05",
+        "G06",
+        "G08"
+      ]
+    },
+    {
+      "id": "M06",
+      "area": "Package input closure",
+      "evidenceClass": "partial_static_inputs",
+      "status": "incomplete",
+      "subject": "publishedDesktop",
+      "evidence": [
+        "input-closure-audit",
+        "package-custody-requirements"
+      ],
+      "observations": {
+        "sourcePublicFiles": 92,
+        "sourceMigrationFiles": 67,
+        "runtimeScriptClosure": 8,
+        "asarSourceEntries": 13,
+        "asarSourceModules": 12,
+        "serverReferenceModuleFilesParsed": 66,
+        "missingLiteralRelativeImportTargets": 0,
+        "selectedInstalledPackageMetadata": 475,
+        "missingDeclaredRequiredMetadata": 0,
+        "lockVersionMismatches": 0,
+        "optionalMissingEdges": 31
+      },
+      "missing": [
+        "Generated public registry/recipes/manifest for the pilot",
+        "Complete isolated dependency/tool/cache file custody",
+        "New output/stage/ASAR/package"
+      ],
+      "limits": [
+        "475 metadata records and31 optional omissions do not prove full payload closure.",
+        "Unavailable conditional vendor ws is not a demonstrated default-start failure.",
+        "The CWD-only proposal was held and superseded by reviewed module-anchored repair."
+      ],
+      "remainingGateIds": [
+        "G06",
+        "G08"
+      ]
+    },
+    {
+      "id": "M07",
+      "area": "Resolver and staging repair",
+      "evidenceClass": "unpublished_source_candidate",
+      "status": "source_reviewed_runtime_partial",
+      "subject": "resolverStaging",
+      "evidence": [
+        "repair-source-review",
+        "repair-warning-successor-review",
+        "repair-final-checkpoint",
+        "partial-node26-validation",
+        "node24-pure-lane"
+      ],
+      "observations": {
+        "node24PureTests": 63,
+        "node24PurePassed": 63,
+        "moneyControls": {
+          "implementations": 2,
+          "selectedCasesEach": 2,
+          "expectedFailuresEach": 2
+        },
+        "node26PredecessorTypecheck": "PASS with two public stubs",
+        "node26PredecessorAdditionalCommandsPassed": 47,
+        "warningSuccessorChangedCodeLint": {
+          "errors": 0,
+          "warnings": 0
+        }
+      },
+      "limits": [
+        "Normal exact-final-candidate CI/build and emitted behavior remain unrun.",
+        "The unused import deletion is not a fresh complete lint/CI receipt.",
+        "No installed current-package failure is inferred solely from the static audit."
+      ],
+      "remainingGateIds": [
+        "G02",
+        "G04",
+        "G05",
+        "G08",
+        "G09",
+        "G16"
+      ]
+    },
+    {
+      "id": "M08",
+      "area": "Disabled emitted-money proposal",
+      "evidenceClass": "disabled_test_proposal",
+      "status": "reviewed_static_only",
+      "subject": "disabledEmittedProposal",
+      "evidence": [
+        "disabled-proposal-review",
+        "node24-pure-lane",
+        "corrected-ci-operation-inventory"
+      ],
+      "observations": {
+        "node24PurePassed": 18,
+        "workflowLiterallyDisabled": true,
+        "endpointRequestsExecuted": 0,
+        "proposedRequests": 3
+      },
+      "coverage": {
+        "proposed": [
+          "missing token401",
+          "wrong token401",
+          "authenticated wrong amount200 exact oracle"
+        ],
+        "excluded": [
+          "authenticated matching amount",
+          "emitted missing/deceptive asset control",
+          "company/paper ownership branches",
+          "cloud sessions",
+          "spend HTTP",
+          "native lifecycle"
+        ]
+      },
+      "remainingGateIds": [
+        "G03",
+        "G04",
+        "G05"
+      ]
+    },
+    {
+      "id": "M09",
+      "area": "Separate Honcho reconciliation",
+      "evidenceClass": "separate_unpublished_source_candidate",
+      "status": "source_reviewed_runtime_partial",
+      "subject": "honchoReconciliation",
+      "evidence": [
+        "honcho-source-review",
+        "node24-pure-lane"
+      ],
+      "observations": {
+        "node24PurePassed": 15,
+        "sourceReview": "PASS",
+        "commitCreated": false
+      },
+      "limits": [
+        "No fresh Honcho remote status is asserted by this desktop inventory.",
+        "No served-privacy or deletion claim.",
+        "Desktop scope does not depend on waiting for this upstream review."
+      ],
+      "remainingGateIds": [
+        "G17"
+      ]
+    },
+    {
+      "id": "M10",
+      "area": "Current installed UI and native lifecycle",
+      "evidenceClass": "untested_current_native",
+      "status": "not_accepted",
+      "subject": "futureCurrentPackage",
+      "evidence": [
+        "native-static-review",
+        "process-preflight-denial",
+        "listen-denial-classification"
+      ],
+      "observations": {
+        "completeCurrentHeadNativeMatrixAccepted": false,
+        "freshProcessInventorySucceeded": false
+      },
+      "remainingGateIds": [
+        "G07",
+        "G08",
+        "G09",
+        "G10"
+      ]
+    }
+  ],
+  "gates": [
+    {
+      "id": "G01",
+      "title": "Review this inventory and prepare bounded missing-case specifications",
+      "status": "ready",
+      "scope": "phase_one_preparation",
+      "dependsOn": [],
+      "executableNow": true,
+      "externalPrerequisite": null,
+      "acceptanceCriteria": [
+        "Check the three-path docs proposal against retained scoped evidence.",
+        "Prepare only the smallest changed-byte-to-case plan; do not repeat accepted campaigns or broad custody comparisons."
+      ],
+      "evidence": [
+        "native-ten-row-matrix",
+        "package-custody-requirements"
+      ]
+    },
+    {
+      "id": "G02",
+      "title": "Supported Node22 pure lane",
+      "status": "blocked_capability",
+      "scope": "candidate_validation",
+      "dependsOn": [],
+      "executableNow": false,
+      "externalPrerequisite": "Host resolution of nodejs.org failed before manifest/archive bytes. No retry through another route. External capability resolution and a permitted next action are required.",
+      "acceptanceCriteria": [
+        "Trusted exact Node22 runtime provenance, actual version and prepared96-test/negative-control receipts.",
+        "Preserve no-listener/process/signal boundaries and source custody.",
+        "A22.23.x result would not prove every supported22.0–22.12 minor."
+      ],
+      "evidence": [
+        "node22-download-failure",
+        "node24-pure-lane"
+      ]
+    },
+    {
+      "id": "G03",
+      "title": "Resolve CI and endpoint operation scope",
+      "status": "blocked_permission_scope",
+      "scope": "candidate_validation",
+      "dependsOn": [],
+      "executableNow": false,
+      "externalPrerequisite": "Parent/policy authority must resolve listed operations under existing user authorization. Neither an EPERM nor a source PASS permits relocated execution.",
+      "acceptanceCriteria": [
+        "Explicit disposition of normal CI listeners/children/native probes and timeout signals before a trigger.",
+        "Preserve canonical shard90s SIGKILL and local-start5s default SIGTERM effects in the inventory.",
+        "No repeated denied host operation, settings change or substitute inspection."
+      ],
+      "evidence": [
+        "corrected-ci-operation-inventory",
+        "listen-denial-classification",
+        "process-preflight-denial"
+      ]
+    },
+    {
+      "id": "G04",
+      "title": "Exact final resolver candidate required CI",
+      "status": "pending_execution",
+      "scope": "candidate_validation",
+      "dependsOn": [
+        "G03",
+        "G16"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "For the normal hosted branch route, resolve automatic-CI effects under G03, then perform permitted source publication under G16 to obtain exact final-commit CI on supported Node22 with dependencies. Any different route needs its own reviewed ordering; none is authorized here.",
+      "acceptanceCriteria": [
+        "Exact candidate commit/tree install, typecheck, build and full required test:ci receipts; record actual Node and skips.",
+        "Keep advisory lint separate.",
+        "Run the separately unregistered proposal pure controls when that proposal is in scope.",
+        "Baseline d297 CI and historical Node26 partial checks do not close this gate."
+      ],
+      "evidence": [
+        "published-source-ci",
+        "partial-node26-validation",
+        "repair-warning-successor-review"
+      ]
+    },
+    {
+      "id": "G05",
+      "title": "Actual emitted money-loader integration",
+      "status": "pending_execution",
+      "scope": "candidate_validation",
+      "dependsOn": [
+        "G03",
+        "G04"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Separately permitted bounded build/server execution and independent review of any proposal enablement/coverage change.",
+      "acceptanceCriteria": [
+        "Confirm actual emitted module layout and exact output/public asset under unrelated CWD.",
+        "Retain single-listener/worker rejection, capped responses, confirmed closure and final custody/overflow checks.",
+        "Three proposed token/wrong-amount requests are preliminary; authenticated match and emitted missing/deceptive asset proof remain distinct required cases.",
+        "Keep literal-false workflow until separately authorized; no guard weakening."
+      ],
+      "evidence": [
+        "disabled-proposal-review",
+        "repair-source-review"
+      ]
+    },
+    {
+      "id": "G06",
+      "title": "Current package input closure",
+      "status": "incomplete_inputs",
+      "scope": "phase_one_package",
+      "dependsOn": [
+        "G01"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Generated/public-only hydration inputs and complete offline dependency/tool/distribution-cache custody are not yet available for an accepted pilot; execution scope remains unresolved.",
+      "acceptanceCriteria": [
+        "Choose exact reviewed source; reconcile old d297 pilot plan if using7831 repair.",
+        "Freeze source/build/package linkage, generated stub manifest, full module/dependency graph and all three PGlite payloads.",
+        "Include exact public assets/migrations/runtime scripts/CSP, generated package metadata, ASAR inventory, runtime binary/architecture and symlink rules.",
+        "Do not use unsupported --public flag or private-source discovery.",
+        "Do not relabel old metadata counts as current payload completeness."
+      ],
+      "evidence": [
+        "input-closure-audit",
+        "package-custody-requirements",
+        "repair-source-review"
+      ]
+    },
+    {
+      "id": "G07",
+      "title": "Native current-host ownership and lifecycle preflight",
+      "status": "blocked_permission_scope",
+      "scope": "phase_one_native",
+      "dependsOn": [],
+      "executableNow": false,
+      "externalPrerequisite": "The native-launch contract requires current task ownership and exact live-process evidence; /bin/ps was denied before execution. A permitted native assertion/contract is required externally before G09, with no retry or equivalent substitute under this assignment. Build-tool lifecycle is a separate G08 contract, not cleared by this gate.",
+      "acceptanceCriteria": [
+        "Establish permitted preflight/lifecycle authority and actual evidence for the exact namespace.",
+        "Do not infer process absence from old exit receipts, sole assignment or the failed inventory.",
+        "Keep listen EPERM enforcement layer/scope unknown unless new authorized evidence establishes it."
+      ],
+      "evidence": [
+        "process-preflight-denial",
+        "listen-denial-classification"
+      ]
+    },
+    {
+      "id": "G08",
+      "title": "One isolated current-source unsigned offline package pilot",
+      "status": "pending_execution",
+      "scope": "phase_one_package",
+      "dependsOn": [
+        "G04",
+        "G05",
+        "G06"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Separately reviewed permission for the isolated build-only namespace, build-tool lifecycle and pilot operations after the listed input/validation gates. G07 remains the native-launch preflight for G09; the failed inventory does not establish a universal build/CI prohibition. No build/package execution is authorized in this lane.",
+      "acceptanceCriteria": [
+        "Before the pilot, resolve the build-tool child-process and normal-completion contract for its exact isolated namespace. This does not retry or replace denied native ownership/process inspection.",
+        "Freeze chosen source/tool/generated/build/stage/ASAR/package bytes and before/after identities.",
+        "At most one proportionate reviewed offline unsigned dir pilot, no installs/downloads or native launch within build-only phase.",
+        "Record normal completion and actual runtime version/architecture; missing cache/input ends the pilot.",
+        "Do not inherit old5685 or accepted96HTTP results for different/unbound bytes."
+      ],
+      "evidence": [
+        "native-static-review",
+        "pilot-preparation",
+        "package-custody-requirements"
+      ]
+    },
+    {
+      "id": "G09",
+      "title": "Current native lifecycle and applicable local UI",
+      "status": "pending_execution",
+      "scope": "phase_one_native",
+      "dependsOn": [
+        "G08",
+        "G07"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Permitted finite native contract, exact accepted package and synthetic fixtures.",
+      "acceptanceCriteria": [
+        "Normal start, local read-only behavior, normal Quit and closed reopen bound to current package.",
+        "Choose functional cases from changed bytes: Talk approval, navigation, Library/export/original denial, Settings and applicable Studio/Sketch/Project/recording surfaces.",
+        "Record unavailable/untested paths honestly; no automatic replay of historical179/96 campaigns."
+      ],
+      "evidence": [
+        "native-static-review",
+        "native-ten-row-matrix"
+      ]
+    },
+    {
+      "id": "G10",
+      "title": "Pinned hosted versus local UI comparison",
+      "status": "pending_execution",
+      "scope": "phase_one_native",
+      "dependsOn": [
+        "G09"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Identify actual served hosted revision and scoped permitted sessions/devices when this gate is reached; no credentials needed now for static preparation.",
+      "acceptanceCriteria": [
+        "Bind screenshots/behavior/data fixtures to exact hosted and local revisions.",
+        "Exercise applicable user flows and preserve intentional privacy/locality differences.",
+        "Source-register state both or a page load is not acceptance."
+      ],
+      "evidence": [
+        "native-static-review"
+      ]
+    },
+    {
+      "id": "G11",
+      "title": "PDF text-tool-dependent cases",
+      "status": "conditional",
+      "scope": "claim_specific",
+      "dependsOn": [
+        "G04"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Permitted native PDF-tool execution with installed tooling for the claimed target.",
+      "acceptanceCriteria": [
+        "Resolve or explicitly retain the four skipped hosted cases; no full PDF acceptance claim from skipped tests."
+      ],
+      "evidence": [
+        "published-source-ci"
+      ]
+    },
+    {
+      "id": "G12",
+      "title": "Hosted PostgreSQL multi-session concurrency",
+      "status": "conditional",
+      "scope": "claim_specific",
+      "dependsOn": [],
+      "executableNow": false,
+      "externalPrerequisite": "Authorized isolated hosted-database concurrency environment and bounded independent test plan if this claim is required.",
+      "acceptanceCriteria": [
+        "Real multi-session contention evidence; transaction-local single-PGlite seams do not satisfy it."
+      ],
+      "evidence": [
+        "canonical-export-review"
+      ]
+    },
+    {
+      "id": "G13",
+      "title": "Private commercial and real-provider/media parity",
+      "status": "conditional",
+      "scope": "claim_specific",
+      "dependsOn": [
+        "G10"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Exact authorized private pin and explicitly scoped provider/device access when those features are selected; do not inspect secrets during preparation.",
+      "acceptanceCriteria": [
+        "Separate public-stub limitations from commercial behavior.",
+        "Record real inference/media/microphone results and any provider failures without substituting synthetic success."
+      ],
+      "evidence": [
+        "published-source-ci",
+        "native-static-review"
+      ]
+    },
+    {
+      "id": "G14",
+      "title": "Windows package and behavior",
+      "status": "conditional",
+      "scope": "platform_release",
+      "dependsOn": [],
+      "executableNow": false,
+      "externalPrerequisite": "Permitted Windows target and independent package/native evidence before Windows claims.",
+      "acceptanceCriteria": [
+        "Windows-specific runtime, packaging, lifecycle and UI evidence. Mac acceptance does not transfer automatically."
+      ],
+      "evidence": [
+        "native-static-review"
+      ]
+    },
+    {
+      "id": "G15",
+      "title": "Signing, publisher trust and release artifacts",
+      "status": "conditional",
+      "scope": "release",
+      "dependsOn": [
+        "G08",
+        "G09"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Authorized release/signing workflow and production publisher pins; current artifact is unsigned and publisher set empty.",
+      "acceptanceCriteria": [
+        "Target-specific signature/trust and release artifact verification.",
+        "No release/deployment authorized by this inventory."
+      ],
+      "evidence": [
+        "native-static-review"
+      ]
+    },
+    {
+      "id": "G16",
+      "title": "Guarded source publication of reviewed successor",
+      "status": "blocked_permission_scope",
+      "scope": "source_publication",
+      "dependsOn": [
+        "G03"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Ordinary publication is owner-authorized in principle; unresolved automatic-CI effects remain the dependency, not duplicate routine user approval.",
+      "acceptanceCriteria": [
+        "Refresh actual PR/base/head; stop on drift.",
+        "Review exact final commit/tree/parent and delta before any permitted normal push.",
+        "Use a guarded non-forced source push and confirm remote branch/PR commit, tree and parent by readback; preserve draft/review/protection gates.",
+        "Publication completes only this source gate. Collect final-commit required CI under G04 afterward; emitted endpoint acceptance remains G05. Neither receipt is a pre-publication prerequisite. No merge/deploy here."
+      ],
+      "evidence": [
+        "repair-source-review",
+        "repair-warning-successor-review",
+        "corrected-ci-operation-inventory"
+      ]
+    },
+    {
+      "id": "G17",
+      "title": "Separate Honcho reconciliation integration",
+      "status": "blocked_permission_scope",
+      "scope": "independent_upstream_stream",
+      "dependsOn": [
+        "G03"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Permitted CI scope and fresh actual hotfix/main refs; parent2 recorded94cfa4cc must not be assumed current later.",
+      "acceptanceCriteria": [
+        "Preserve reviewed34dcfdc3 tree and history; changed refs create a new review problem.",
+        "Required final-commit Node22 CI and maintainer/protection gates.",
+        "Does not prove live privacy or delete earlier transmitted copies."
+      ],
+      "evidence": [
+        "honcho-source-review",
+        "node24-pure-lane"
+      ]
+    },
+    {
+      "id": "G18",
+      "title": "Optional user-directed local/device access",
+      "status": "deferred",
+      "scope": "phase_two",
+      "dependsOn": [
+        "G09",
+        "G10"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Owner priority places this after phase-one parity; concrete grants are specified when implementing the selected capability.",
+      "acceptanceCriteria": [
+        "Visible bounded grants, operation previews, revocation and optional whole-device access.",
+        "Local content must not silently leave the device or become public."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "G19",
+      "title": "Later UI and orchestration roadmap",
+      "status": "deferred",
+      "scope": "later_roadmap",
+      "dependsOn": [
+        "G18"
+      ],
+      "executableNow": false,
+      "externalPrerequisite": "Explicitly deferred by owner priority; no implementation scope expansion in this lane.",
+      "acceptanceCriteria": [
+        "Resume only after higher-priority parity and optional-access work are scoped/completed."
+      ],
+      "evidence": []
+    }
+  ],
+  "counts": {
+    "matrixRows": 10,
+    "gateCount": 19,
+    "gatesByStatus": {
+      "ready": 1,
+      "blocked_capability": 1,
+      "blocked_permission_scope": 4,
+      "pending_execution": 5,
+      "incomplete_inputs": 1,
+      "conditional": 5,
+      "deferred": 2
+    },
+    "executableNowGateIds": [
+      "G01"
+    ]
+  },
+  "retainedRuntimeEvidence": {
+    "publishedHostedCI": {
+      "node": "22.23.4",
+      "pass": 1912,
+      "skip": 4,
+      "fail": 0
+    },
+    "candidatePureLane": {
+      "node": "v24.22.1",
+      "pass": 96,
+      "fail": 0,
+      "resolverStaging": 63,
+      "disabledProposalControls": 18,
+      "honchoPrivacy": 15,
+      "negativeControlExpectedFailures": 4,
+      "forbiddenOperationAttempts": 0
+    },
+    "candidateNode22": {
+      "executed": false,
+      "attemptedVersion": "22.23.5",
+      "failure": "curl: (6) Could not resolve host: nodejs.org",
+      "downloadedBytes": 0
+    }
+  },
+  "supersededStatements": [
+    {
+      "claim": "Current desktop still targets Electron32/Node20",
+      "replacement": "Published source locks Electron45.3.2; old native log records Node24.22.2; future package still needs its own receipt."
+    },
+    {
+      "claim": "Full source CI has never run because registry/materialization failed",
+      "replacement": "Published d297 required hosted stages passed; unpublished candidates retain separate full-CI/build gaps."
+    },
+    {
+      "claim": "November3 source-register parity reached establishes current installed parity",
+      "replacement": "Historical function-register/source/runtime snapshot only; current package and served hosted comparison are unaccepted."
+    },
+    {
+      "claim": "Node24 pure lane establishes Node22 compatibility",
+      "replacement": "Candidate Node22 execution remains absent after DNS failure; do not retry another route."
+    }
+  ],
+  "currentAssignment": {
+    "lane": 1,
+    "deliverable": "Docs-only proposal plus machine-readable gate inventory",
+    "productCodeChanges": false,
+    "forbidden": [
+      "listeners",
+      "process inventory/signals",
+      "app/native launch",
+      "build/package",
+      "network download",
+      "push/dispatch/merge/deploy",
+      "denied-operation retry/substitution/relocation"
+    ],
+    "completedTestsRerun": false,
+    "acceptedCustodyComparisonsRerun": false,
+    "frozenCandidatesEdited": false
+  },
+  "evidenceHandling": {
+    "rootAliases": [
+      "task",
+      "review"
+    ],
+    "absolutePathsKeptInPrivateSidecar": true,
+    "recordedHashesAreReusedNotReverified": true,
+    "rawCredentialsOrDatabaseSnapshotsIncluded": false
+  },
+  "evidence": {
+    "published-source-ci": {
+      "rootAlias": "task",
+      "path": "desktop-export-publication-v1/publication-v1/publication-final.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false,
+      "recordedSha256": "d1576e74eadd8c815175a8cda2d0cf78691a9ef1bd817d2c251e9fd01a778cb6",
+      "publicUrl": "https://github.com/LockedWater305/agent-relay/actions/runs/44113981765"
+    },
+    "canonical-export-review": {
+      "rootAlias": "review",
+      "path": "canonical-export-publication-review/independent-review.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false,
+      "recordedArtifacts": {
+        "configSha256": "1b3a9033321b485997bb4d74aa333e3f04106e1673444937d3bcbedcfc6e5cc6",
+        "supervisorSha256": "f4216bc89d2b7e920f6acb7ccb5fdf44a46c125186233a6025e8e75f432568a6",
+        "primaryResultSha256": "693eedfb3697acd28d228667c4065b6f90fdcf4451f90a60c98159bb93f66231",
+        "reopenResultSha256": "f592c84d74df7c213ee9cf36e9a2bbaa09daa2d65917c5b68a9e77a8243db28d"
+      }
+    },
+    "native-static-review": {
+      "rootAlias": "review",
+      "path": "native-package-review/independent-review.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "native-ten-row-matrix": {
+      "rootAlias": "review",
+      "path": "native-package-review/minimal-custody-parity-matrix.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "pilot-preparation": {
+      "rootAlias": "task",
+      "path": "desktop-package-pilot-prep-v1/checkpoint.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "package-custody-requirements": {
+      "rootAlias": "task",
+      "path": "desktop-package-pilot-prep-v1/evidence/custody-requirements.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "input-closure-audit": {
+      "rootAlias": "task",
+      "path": "desktop-package-input-closure-v1/checkpoint.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "repair-source-review": {
+      "rootAlias": "review",
+      "path": "package-fix-review/independent-review.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "repair-warning-successor-review": {
+      "rootAlias": "review",
+      "path": "package-fix-v2-review/independent-review.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "repair-final-checkpoint": {
+      "rootAlias": "task",
+      "path": "desktop-package-fix-v2/CHECKPOINT.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "partial-node26-validation": {
+      "rootAlias": "task",
+      "path": "desktop-package-validation-v1/CHECKPOINT.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "disabled-proposal-review": {
+      "rootAlias": "review",
+      "path": "emitted-proposal-v3-review/independent-review.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "corrected-ci-operation-inventory": {
+      "rootAlias": "task",
+      "path": "desktop-emitted-proposal-v3/CI-OPERATION-INVENTORY.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "honcho-source-review": {
+      "rootAlias": "review",
+      "path": "honcho-merge-review-v2/independent-review.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "node24-pure-lane": {
+      "rootAlias": "task",
+      "path": "node22-pure-validation-20261118-v1/node24-v2/RESULT.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "node22-download-failure": {
+      "rootAlias": "task",
+      "path": "node22-official-execution-20261118-v1/CHECKPOINT.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false,
+      "recordedSha256": "29743b29dc9f2fb9a10c67e63e1c6d078205cea980a10475397851dbe365a53e"
+    },
+    "process-preflight-denial": {
+      "rootAlias": "task",
+      "path": "desktop-package-pilot-prep-v1/evidence/denial-recovery.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    },
+    "listen-denial-classification": {
+      "rootAlias": "task",
+      "path": "desktop-package-fix-v2/DENIAL-ANALYSIS.json",
+      "access": "retained_private_receipt",
+      "rehashPerformedInThisLane": false
+    }
+  }
+}

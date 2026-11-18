@@ -240,16 +240,18 @@ export function readRecipe(
       ? { ok: false, reason: bad.reason, detail: bad.detail }
       : { ok: false, reason: "NOT_CACHED", detail: `no cached recipe ${id}${version ? `@${version}` : ""}` };
   }
-  // Verify the exact bytes returned; the file may have changed after listing.
+  // Verify the exact bytes returned and bind them to the selected snapshot.
+  // Even another trusted bundle must not inherit the first read's metadata.
   try {
     if (!isCacheFile(checkedCacheDir(dataDir, false), match.file)) return { ok: false, reason: "INVALID_CACHE_PATH" };
     const bytes = readFileSync(match.file);
     const verdict = verifyTrustedBundle(bytes, anchors);
     if (!verdict.ok) return { ok: false, reason: verdict.reason, detail: verdict.detail };
-    if (verdict.manifest?.id !== id || (version && verdict.manifest.version !== version)) {
+    const digest = sha256(bytes);
+    if (digest !== match.sha256 || verdict.manifest?.id !== id || (version && verdict.manifest.version !== version)) {
       return { ok: false, reason: "CACHE_IDENTITY_CHANGED" };
     }
-    return { ok: true, bytes, entry: { ...match, sha256: sha256(bytes) } };
+    return { ok: true, bytes, entry: { ...match, sha256: digest } };
   } catch {
     return { ok: false, reason: "NOT_CACHED" };
   }
