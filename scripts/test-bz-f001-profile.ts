@@ -141,7 +141,70 @@ async function main() {
     assert(r.key.startsWith("profile_"), `only profile_ rows at account scope (got ${r.key})`);
   }
 
-  console.log("✓ BZ-F001: scoping negative, skip-setup, default-edit-no-rewrite, no inferred fields");
+  // Explicit clears use the same real database surface. A missing/non-string
+  // field is not a clear, and clearing a default cannot rewrite job snapshots.
+  // Keep unrelated prefix lookalikes as a negative control. SQL LIKE's `_`
+  // wildcard used to surface profileXtone as tone after profile_tone cleared.
+  const nonProfileKeys = [
+    ...fieldIds.map((id) => `profileX${id}`),
+    "profile-tone", "profile%tone", "profile tone", "profile\\tone", "profileétone",
+    "Profile_tone", "profile__tone", "profile_tone_extra", "profile_tone ",
+    "profile_activity", "profile_future_key", "unrelated_account_fact",
+  ];
+  for (const key of nonProfileKeys) {
+    await sql.query(
+      `INSERT INTO buzzy_user_memory (user_id, job_id, key, value) VALUES ($1, NULL, $2, $3)`,
+      [userA, key, `Keep unrelated ${key}`],
+    );
+  }
+  const unrelatedQuery = `SELECT * FROM buzzy_user_memory WHERE user_id = $1 AND job_id IS NULL
+    AND key IN (${nonProfileKeys.map((_, i) => `$${i + 2}`).join(", ")}) ORDER BY key`;
+  const unrelatedBefore = await sql.query(unrelatedQuery, [userA, ...nonProfileKeys]);
+  const jobSnapshotsBefore = await sql.query(
+    `SELECT * FROM buzzy_user_memory WHERE user_id = $1 AND job_id = $2 ORDER BY key`, [userA, jobA],
+  );
+  const literalRead = await getProfile(sql, userA);
+  assert(literalRead.fields.tone.value === "Friendly and direct", "literal canonical tone wins without reading lookalikes");
+  assert(Object.keys(literalRead.fields).length === 6, "read contains only the six canonical fields");
+  await saveProfile(sql, userB, { tone: "Keep foreign tone" });
+  const cleared = await saveProfile(sql, userA, { tone: "", audience: " \n\t " });
+  assert(cleared.saved.length === 0 && cleared.cleared.length === 2, "explicit blanks are cleared, not saved as empty rows");
+  const afterClear = await getProfile(sql, userA);
+  assert(!afterClear.fields.tone && !afterClear.fields.audience, "cleared defaults absent after database readback");
+  assert(afterClear.fields.business_name.value === "Ace Fencing Co.", "omitted field preserved");
+  await saveProfile(sql, userA, { business_name: null, brand_notes: false });
+  const afterInvalid = await getProfile(sql, userA);
+  assert(afterInvalid.fields.business_name.value === "Ace Fencing Co.", "non-string value cannot clear");
+  assert(afterInvalid.fields.brand_notes.value === "Always mention the 5-year workmanship guarantee", "false cannot clear");
+  const unicode = "日本語 🐝 e\u0301 &copy; <literal>";
+  await saveProfile(sql, userA, { brand_notes: unicode });
+  assert((await getProfile(sql, userA)).fields.brand_notes.value === unicode, "Unicode and literal entity text preserved");
+  await saveProfile(sql, userA, Object.fromEntries(PROFILE_FIELDS.map((f) => [f.id, ""])));
+  await saveProfile(sql, userA, { tone: "" });
+  assert(!(await getProfile(sql, userA)).hasProfile, "all defaults clear and repeated clear is idempotent");
+  assert((await getProfile(sql, userB)).fields.tone.value === "Keep foreign tone", "clear cannot touch another account");
+  const afterAllClears = await sql.query<{ key: string; value: string }>(
+    `SELECT key, value FROM buzzy_user_memory WHERE user_id = $1 AND job_id = $2 AND key LIKE 'profile_%'`,
+    [userA, jobA],
+  );
+  const snapshotAfterClear = Object.fromEntries(afterAllClears.map((r) => [r.key, r.value]));
+  assert(snapshotAfterClear.profile_business_name === "Ace Fencing", "original job business snapshot survives clears");
+  assert(snapshotAfterClear.profile_tone === "Friendly and direct", "original job tone snapshot survives clears");
+  const reuseCleared = await reuseDefaults(sql, userA, jobA, ["tone"]);
+  assert(reuseCleared.reused.length === 0 && reuseCleared.skipped[0] === "tone", "cleared default cannot be reused later");
+  await saveProfile(sql, userA, { activity: "Canonical alias value" });
+  assert((await getProfile(sql, userA)).fields.primary_activity.value === "Canonical alias value", "alias still saves the canonical default");
+  await saveProfile(sql, userA, { activity: "" });
+  const emptyWithLookalikes = await getProfile(sql, userA);
+  assert(!emptyWithLookalikes.hasProfile && Object.keys(emptyWithLookalikes.fields).length === 0, "lookalikes and unknown stored aliases cannot populate an empty profile");
+  const unrelatedAfter = await sql.query(unrelatedQuery, [userA, ...nonProfileKeys]);
+  assert(JSON.stringify(unrelatedAfter) === JSON.stringify(unrelatedBefore), "read, clear, alias and reuse preserve all unrelated rows exactly");
+  const jobSnapshotsAfter = await sql.query(
+    `SELECT * FROM buzzy_user_memory WHERE user_id = $1 AND job_id = $2 ORDER BY key`, [userA, jobA],
+  );
+  assert(JSON.stringify(jobSnapshotsAfter) === JSON.stringify(jobSnapshotsBefore), "all existing job rows remain unchanged after clears and skipped reuse");
+
+  console.log("✓ BZ-F001: scoping, skip-setup, snapshots, explicit clears, literal keys, Unicode, no inferred fields");
 }
 
 main().catch((e) => {

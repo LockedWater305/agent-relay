@@ -101,14 +101,18 @@ function profileKey(id: string): string {
  * `job_id = NULL`; the NULL-safe match keeps them distinct from job slots.
  */
 export async function getProfile(sql: Sql, userId: string): Promise<Profile> {
+  // Match the closed storage keys literally. LIKE 'profile_%' treats the
+  // underscore as a wildcard and can mislabel unrelated profileXtone rows.
+  const keys = Array.from(PROFILE_KEYS, profileKey);
   const rows = await sql.query<{ key: string; value: string; updated_at: string | null }>(
     `SELECT key, value, updated_at FROM buzzy_user_memory
-     WHERE user_id = $1 AND job_id IS NULL AND key LIKE $2
+     WHERE user_id = $1 AND job_id IS NULL AND key IN (${keys.map((_, i) => `$${i + 2}`).join(", ")})
      ORDER BY key`,
-    [userId, `${PROFILE_PREFIX}%`],
+    [userId, ...keys],
   );
   const fields: Record<string, ProfileValue> = {};
   for (const r of rows) {
+    if (!r.key.startsWith(PROFILE_PREFIX)) continue;
     const id = r.key.slice(PROFILE_PREFIX.length);
     if (!PROFILE_KEYS.has(id)) continue; // never surface unknown/foreign keys
     fields[id] = { value: r.value, origin: "you set this", updatedAt: r.updated_at };
@@ -120,13 +124,16 @@ export async function getProfile(sql: Sql, userId: string): Promise<Profile> {
  * Save profile fields for `userId`. Only keys in the closed PROFILE_KEYS set
  * are persisted; anything else (e.g. tax/license/consent) is rejected and
  * returned in `rejected` — never stored, never inferred.
+ * A supplied blank string explicitly clears that account default. Omitted
+ * keys and non-string values leave it unchanged; job snapshots are untouched.
  */
 export async function saveProfile(
   sql: Sql,
   userId: string,
   values: Record<string, unknown>,
-): Promise<{ saved: string[]; rejected: string[] }> {
+): Promise<{ saved: string[]; cleared: string[]; rejected: string[] }> {
   const saved: string[] = [];
+  const cleared: string[] = [];
   const rejected: string[] = [];
   for (const [rawId, raw] of Object.entries(values)) {
     const id = PROFILE_ALIASES[rawId] ?? rawId;
@@ -134,8 +141,8 @@ export async function saveProfile(
       rejected.push(rawId); // report the id the caller used, not the canonical one
       continue;
     }
-    const value = typeof raw === "string" ? raw.trim() : "";
-    if (!value) continue; // empty = leave as-is / don't create blank rows
+    if (typeof raw !== "string") continue; // only an explicit string can change a default
+    const value = raw.trim();
     // NOTE: profile rows store job_id = NULL. Postgres treats NULLs as distinct
     // under a plain UNIQUE constraint, so ON CONFLICT (user_id, job_id, key)
     // never matches for a NULL job_id. Delete-then-insert guarantees one row
@@ -144,6 +151,10 @@ export async function saveProfile(
       `DELETE FROM buzzy_user_memory WHERE user_id = $1 AND job_id IS NULL AND key = $2`,
       [userId, profileKey(id)],
     );
+    if (!value) {
+      cleared.push(id);
+      continue; // remove the default, never create a blank row
+    }
     await sql.query(
       `INSERT INTO buzzy_user_memory (user_id, job_id, key, value)
        VALUES ($1, NULL, $2, $3)`,
@@ -151,7 +162,7 @@ export async function saveProfile(
     );
     saved.push(id);
   }
-  return { saved, rejected };
+  return { saved, cleared, rejected };
 }
 
 /**

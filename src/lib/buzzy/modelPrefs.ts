@@ -53,6 +53,14 @@ export async function readModelPrefs(sql: Sql, userId: string): Promise<ModelPre
   const prefs: Record<string, unknown> =
     raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
 
+  // An absent control keeps the default. A present but malformed privacy
+  // control must not become false: stale rows such as localOnly: "true" would
+  // otherwise permit cloud inference. chatLoop reports this as a policy error
+  // before extraction or generation, without changing the stored preference.
+  if ("localOnly" in prefs && typeof prefs.localOnly !== "boolean") {
+    throw new Error("Saved local-only preference is invalid. Update your model settings before trying again.");
+  }
+
   const stored = asString(prefs.modelPreference);
   let preference: ModelPreference = "value";
   let preferenceSource: ModelPrefs["preferenceSource"] = "default";

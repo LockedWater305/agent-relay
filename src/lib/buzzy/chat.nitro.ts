@@ -61,7 +61,12 @@ import { rebuildCustomerMemory, memoryContextBlock, extractTemplateStructure, ty
 import { buildExportBundle, deleteAccountData } from "./portability";
 import { recordJobEvent } from "./jobEvents";
 import { dueScheduledJobs, markScheduledRun, saveScheduledDraft } from "./scheduled";
-import { setDocumentAcceptance, materializeDraft, summarizeChanges } from "./documents";
+import { materializeDraft, summarizeChanges } from "./documents";
+import { commitJobApproval } from "./jobApproval";
+import { commitDocumentDecision } from "./documentDecision";
+import { getDocumentCheckSheet } from "./documentCheckSheet";
+import { getCanonicalExportSnapshot } from "./canonicalExport";
+import { officeOriginalMetadata, officeOriginalDisposition } from "./officeOriginal";
 import { ensureExecutionBoard } from "./execution";
 import { renderTextPdf } from "./pdf";
 import { renderDocument } from "./artifact";
@@ -73,7 +78,10 @@ import { RECIPES, UNIVERSAL_STATEMENTS, getRecipe, validateRecipe, boundaryViola
 import { resolveActingAccount, guard, canPerform, denialReason, TEAM_ACTIONS, DELEGATABLE, authorize, type MemberRole } from "./team";
 import { STATEMENT_IDS, DEEPENING_IDS } from "./questions";
 import { createHash } from "node:crypto";
-import { transcribeAudio, formatFromContentType, ASR_MAX_BYTES } from "./asr";
+import { transcribeAudio, formatFromContentType, ASR_MAX_BYTES, normalizeVocab } from "./asr";
+import { isLocalRuntime } from "../runtime";
+import { LOCAL_OWNER_ID, localToken } from "../local-owner";
+import { LibraryVaultError, readVaultBody, validateVaultBatch, storeVaultBatch, listVaultPage, vaultPageOptions, getVaultMetadata } from "./libraryVault";
 
 /**
  * Largest single file the bulk asset path will store. A skills corpus is
@@ -81,6 +89,16 @@ import { transcribeAudio, formatFromContentType, ASR_MAX_BYTES } from "./asr";
  * a mistake, and one 200 MB body would take the whole process down with it.
  */
 const ASSET_MAX_BYTES = 25 * 1024 * 1024;
+
+// Uploaded MIME metadata is untrusted. Only inert raster/media formats may be
+// displayed at the app origin; SVG/HTML/XML and unknown formats must download.
+// PDF also downloads until there is an isolated preview, not a same-origin frame.
+const INLINE_ASSET_TYPES = new Set([
+  "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "image/bmp",
+  "image/x-icon", "image/vnd.microsoft.icon",
+  "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm",
+  "audio/mp4", "audio/aac", "audio/flac",
+]);
 
 /**
  * One latency sample. Two sources: `server` (our own stage timings) and
@@ -109,19 +127,21 @@ async function recordVoiceMetrics(
     spoken?: boolean;
     lane?: string | null;
     speechMs?: number | null;
+    preRollMs?: number | null;
   },
 ): Promise<void> {
   try {
     await sql`
       INSERT INTO buzzy_voice_metrics
         (user_id, job_id, session_id, source, mode, model, asr_ms, ttft_ms, ttfa_ms,
-         turn_ms, extract_ms, llm_ms, honcho_ms, reply_chars, audio_bytes, spoken, lane, speech_ms)
+         turn_ms, extract_ms, llm_ms, honcho_ms, reply_chars, audio_bytes, spoken, lane, speech_ms, pre_roll_ms)
       VALUES
         (${row.userId}, ${row.jobId ?? null}, ${row.sessionId ?? null}, ${row.source},
          ${row.mode ?? null}, ${row.model ?? null}, ${row.asrMs ?? null}, ${row.ttftMs ?? null},
          ${row.ttfaMs ?? null}, ${row.turnMs ?? null}, ${row.extractMs ?? null},
          ${row.llmMs ?? null}, ${row.honchoMs ?? null}, ${row.replyChars ?? null},
-         ${row.audioBytes ?? null}, ${row.spoken ?? false}, ${row.lane ?? null}, ${row.speechMs ?? null})
+         ${row.audioBytes ?? null}, ${row.spoken ?? false}, ${row.lane ?? null}, ${row.speechMs ?? null},
+         ${row.preRollMs ?? null})
     `;
   } catch (err) {
     // A lost metric must never break a turn.
@@ -312,6 +332,50 @@ export default defineEventHandler(async (event) => {
   const fullPath = event.path ?? "";
   const path = fullPath.split("?")[0];
 
+  // Desktop-only history storage. Local identity is not supplied by the body.
+  // Deny hosted/unsigned callers before reading their body or querying the DB.
+  if (path === "/api/buzzy/library-vault") {
+    setResponseHeader(event, "cache-control", "no-store");
+    if (!isLocalRuntime()) {
+      setResponseStatus(event, 404);
+      return { ok: false, code: "local_only", error: "Library migration is available only in the local app." };
+    }
+    // Manual dev mode permits missing tokens elsewhere; migration never does.
+    if (!localToken()) {
+      setResponseStatus(event, 503);
+      return { ok: false, code: "local_auth_required", error: "Restart through the local launcher before migrating Library history." };
+    }
+    const user = await getSessionUserFromHeaders(headersFromEvent(event));
+    if (!user || user.id !== LOCAL_OWNER_ID) {
+      setResponseStatus(event, 401);
+      return { ok: false, code: "signed_out", error: "The local app must authenticate before accessing Library history." };
+    }
+    if (method !== "GET" && method !== "POST") {
+      setResponseStatus(event, 405);
+      return { ok: false, code: "method_not_allowed", error: "Use GET or POST for Library history." };
+    }
+    try {
+      // Parse and validate the bounded body before obtaining a database handle.
+      if (method === "POST") {
+        const body = await readVaultBody(event.req as Request);
+        validateVaultBatch(body);
+        return await storeVaultBatch(await getSql(), user.id, body);
+      }
+      if (new URL(fullPath, "http://127.0.0.1").searchParams.get("metadata") === "1") {
+        return { ok: true, ...await getVaultMetadata(await getSql(), user.id) };
+      }
+      const options = vaultPageOptions(fullPath);
+      return await listVaultPage(await getSql(), user.id, options);
+    } catch (error) {
+      if (error instanceof LibraryVaultError) {
+        setResponseStatus(event, error.status);
+        return { ok: false, code: error.code, error: error.message };
+      }
+      setResponseStatus(event, 503);
+      return { ok: false, code: "vault_unavailable", error: "Library history could not be saved or loaded. Original copies were not removed; retry before restarting." };
+    }
+  }
+
   // ── GET /api/buzzy/shared/:token — PUBLIC controlled-share read (BZ-F021) ─
   // The ONLY unauthenticated buzzy route. Serves exactly one pinned version
   // of one document while the link is unexpired and unrevoked. Completion
@@ -413,6 +477,15 @@ export default defineEventHandler(async (event) => {
       return { messages: [] };
     }
     const sql = await getSql();
+    const sessionRows = sessionId ? await sql<{ id: string; job_id: string | null; company_id: string | null }>`
+      SELECT id, job_id, company_id FROM buzzy_sessions
+      WHERE id = ${sessionId} AND user_id = ${user.id} LIMIT 1
+    ` : [];
+    if (sessionId && !sessionRows.length) {
+      setResponseStatus(event, 404);
+      return { error: "Session not found", code: "not_found" };
+    }
+    const session = sessionRows[0];
     const rows = sessionId
       ? await sql`
           SELECT role, content, created_at FROM buzzy_chat_messages
@@ -428,14 +501,8 @@ export default defineEventHandler(async (event) => {
     // Decisions (buzzy_user_memory) alongside the messages, so reopening a
     // job/session re-fills the Decisions box instead of showing it empty
     // until the next chat turn.
-    let resolvedJobId = jobId;
-    if (!resolvedJobId && sessionId) {
-      const sj = await sql<{ job_id: string | null }>`
-        SELECT job_id FROM buzzy_sessions
-        WHERE id = ${sessionId} AND user_id = ${user.id} LIMIT 1
-      `;
-      resolvedJobId = sj[0]?.job_id ?? null;
-    }
+    // Explicit session identity wins over a simultaneous legacy job filter.
+    const resolvedJobId = sessionId ? (session?.job_id ?? null) : jobId;
     const slots: Record<string, string> = {};
     if (resolvedJobId) {
       const slotRows = await sql<{ key: string; value: string }>`
@@ -450,6 +517,7 @@ export default defineEventHandler(async (event) => {
       }
     }
     return {
+      ...(session ? { session: { id: session.id, jobId: session.job_id, companyId: session.company_id } } : {}),
       messages: rows.map((r) => ({
         jobId: ("job_id" in r && typeof r.job_id === "string") ? r.job_id : null,
         role: r.role,
@@ -495,8 +563,56 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 413);
       return { ok: false, error: "That recording is too long — keep it under a minute.", code: "audio_too_large" };
     }
+    // BZ-22 — proper nouns. The model joins and mis-spells names it has no
+    // reason to know ("Honey Crumb" → "Honeycrumb", measured 2/2). The fix is a
+    // post-hoc rewrite over a vocabulary built from names this owner actually
+    // uses, never a prompt glossary: a glossary primes the model into hearing
+    // the words on silence (asr.ts carries the measurement).
+    const vocab: string[] = [];
+    const addVocab = (raw: unknown, minSquash = 3) => {
+      for (const term of normalizeVocab(raw, minSquash)) {
+        if (!vocab.some((v) => v.toLowerCase() === term.toLowerCase())) vocab.push(term);
+      }
+    };
+    // Most specific first: what the page sent, then the job this turn is about.
+    addVocab(queryValue(fullPath, "vocab"));
+    const asrJobId = queryValue(fullPath, "jobId");
     try {
-      const r = await transcribeAudio(audio, format);
+      const vocabSql = await getSql();
+      if (asrJobId) {
+        const jobRows = (await vocabSql`
+          SELECT j.title, c.name AS company_name
+          FROM buzzy_jobs j
+          LEFT JOIN buzzy_companies c ON c.id = j.company_id AND c.user_id = j.user_id
+          WHERE j.id = ${asrJobId} AND j.user_id = ${user.id}
+          LIMIT 1
+        `) as Array<{ title?: string | null; company_name?: string | null }>;
+        addVocab(jobRows[0]?.company_name);
+        addVocab(jobRows[0]?.title);
+      }
+      // Then the owner's own recent names. 5-char floor: a one-word job title
+      // like "Test" is a common word, and canonicalising every "test" in a
+      // transcript is noise, not a correction.
+      const titleRows = (await vocabSql`
+        SELECT title AS term FROM buzzy_jobs
+        WHERE user_id = ${user.id} AND title IS NOT NULL AND length(title) >= 5
+        ORDER BY updated_at DESC LIMIT 20
+      `) as Array<{ term?: string | null }>;
+      for (const r of titleRows) addVocab(r.term, 5);
+      const companyRows = (await vocabSql`
+        SELECT name AS term FROM buzzy_companies
+        WHERE user_id = ${user.id} AND name IS NOT NULL AND length(name) >= 5
+        ORDER BY updated_at DESC LIMIT 10
+      `) as Array<{ term?: string | null }>;
+      for (const r of companyRows) addVocab(r.term, 5);
+    } catch {
+      // A vocabulary is an improvement, never a precondition: if the read
+      // fails, transcribe with what we have.
+    }
+    // The product's own coinages, which no owner can be expected to have typed.
+    addVocab(["Honey Drops"]);
+    try {
+      const r = await transcribeAudio(audio, format, vocab);
       // Time to transcript is a product number, not a log line. Recorded with
       // lane "asr" so ops can tell the browser recognizer apart from this path.
       const sql = await getSql();
@@ -728,15 +844,21 @@ export default defineEventHandler(async (event) => {
       FROM buzzy_assets WHERE user_id = ${user.id}
         AND (${prefix} = '' OR rel_path LIKE ${prefix + "%"})
     `;
+    // The Library must name the work, not the file. A list of "music-2026-11-07-
+    // 06-20-07.mp3" tells the owner nothing about which conversation produced it,
+    // so join the job and carry its title alongside the row (same defect class as
+    // the desktop issue where the column itself was missing).
     const rows = await sql<{
       id: number; filename: string; rel_path: string; content_type: string | null;
-      bytes: number; created_at: string;
+      bytes: number; created_at: string; job_id: string | null; job_title: string | null;
     }>`
-      SELECT id, filename, rel_path, content_type, bytes, created_at
-      FROM buzzy_assets
-      WHERE user_id = ${user.id}
-        AND (${prefix} = '' OR rel_path LIKE ${prefix + "%"})
-      ORDER BY rel_path ASC
+      SELECT a.id, a.filename, a.rel_path, a.content_type, a.bytes, a.created_at,
+             a.job_id, j.title AS job_title
+      FROM buzzy_assets a
+      LEFT JOIN buzzy_jobs j ON j.id = a.job_id
+      WHERE a.user_id = ${user.id}
+        AND (${prefix} = '' OR a.rel_path LIKE ${prefix + "%"})
+      ORDER BY a.rel_path ASC
       LIMIT ${want} OFFSET ${offset}
     `;
     return {
@@ -769,8 +891,24 @@ export default defineEventHandler(async (event) => {
       return { ok: false, error: "No such file on this account.", code: "not_found" };
     }
     const row = rows[0]!;
-    setResponseHeader(event, "content-type", row.content_type || "application/octet-stream");
-    setResponseHeader(event, "content-disposition", `inline; filename="${row.filename.replace(/"/g, "")}"`);
+    const mime = (row.content_type || "").split(";", 1)[0].trim().toLowerCase();
+    const inline = INLINE_ASSET_TYPES.has(mime);
+    // Keep Unicode download names using RFC 5987, with an ASCII fallback that
+    // cannot inject headers or escape the quoted filename. Buffer normalises a
+    // surrogate split by the display-name length limit before URI encoding.
+    const filename = Buffer.from(cleanFilename(row.filename) || "download", "utf8").toString("utf8");
+    const fallbackName = filename.replace(/[^\x20-\x7e]|["\\]/g, "_");
+    const encodedName = encodeURIComponent(filename).replace(/[!'()*]/g, (char) =>
+      `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
+    setResponseHeader(event, "content-type", inline ? mime : "application/octet-stream");
+    setResponseHeader(event, "content-disposition", `${inline ? "inline" : "attachment"}; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`);
+    setResponseHeader(event, "x-content-type-options", "nosniff");
+    setResponseHeader(event, "cross-origin-resource-policy", "same-origin");
+    setResponseHeader(event, "cache-control", "private, no-store");
+    if (!inline) {
+      setResponseHeader(event, "content-security-policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'");
+    }
     return new Uint8Array(row.body);
   }
 
@@ -994,6 +1132,17 @@ export default defineEventHandler(async (event) => {
       /* empty body → bad_request from chatLoop */
     }
 
+    // A renderer's earlier /sessions resolution is not authority for this
+    // request: a cookie account may have changed while its response was pending.
+    // Null/omitted identities retain the unscoped API; malformed explicit values
+    // must not silently broaden it to an account-wide conversation.
+    for (const field of ["jobId", "sessionId", "companyId"]) {
+      const value = body[field];
+      if (value != null && (typeof value !== "string" || !value.trim())) {
+        setResponseStatus(event, 400);
+        return { ok: false, error: "Reopen the conversation before sending this question.", code: "bad_chat_scope" };
+      }
+    }
     const jobId: string | null = typeof body.jobId === "string" ? body.jobId : null;
     const sessionId: string | null = typeof body.sessionId === "string" ? body.sessionId : null;
     const message: string = typeof body.message === "string" ? body.message : "";
@@ -1015,6 +1164,45 @@ export default defineEventHandler(async (event) => {
     const surface: "text" | "voice" = voice ? "voice" : "text";
 
     const sql = await getSql();
+
+    // Admission precedes usage/telemetry, contextual reads and chatLoop writes.
+    // Check each supplied identity independently. session.job_id is its LATEST
+    // item pointer, not a membership list: owned historical multi-job turns must
+    // not be rejected just because that pointer moved on.
+    const ownedJob = jobId ? (await sql<{ company_id: string | null }>`
+      SELECT company_id FROM buzzy_jobs WHERE id = ${jobId} AND user_id = ${userId} LIMIT 1
+    `)[0] : null;
+    const ownedSession = sessionId ? (await sql<{ company_id: string | null }>`
+      SELECT company_id FROM buzzy_sessions WHERE id = ${sessionId} AND user_id = ${userId} LIMIT 1
+    `)[0] : null;
+    if ((jobId && !ownedJob) || (sessionId && !ownedSession)) {
+      setResponseStatus(event, 404);
+      return { ok: false, error: "This conversation or work item is no longer available on this account. Reopen it before sending.", code: "chat_scope_unavailable" };
+    }
+    const requestedCompany = typeof body.companyId === "string" ? body.companyId : null;
+    // A null company on a legacy record is not evidence of a conflicting scope.
+    // Every non-null scope, however, must be owned and agree with the others;
+    // an explicit company cannot override a different item's verified company.
+    const companies = [requestedCompany, ownedJob?.company_id, ownedSession?.company_id]
+      .filter((id): id is string => id != null);
+    for (const id of new Set(companies)) {
+      if (!isCompanyId(id)) {
+        setResponseStatus(event, 400);
+        return { ok: false, error: "Reopen the conversation in its company before sending.", code: "bad_chat_scope" };
+      }
+      const owned = await sql`SELECT id FROM buzzy_companies WHERE id = ${id} AND user_id = ${userId} LIMIT 1`;
+      if (!owned.length) {
+        setResponseStatus(event, 404);
+        return { ok: false, error: "This conversation's company is no longer available on this account.", code: "chat_scope_unavailable" };
+      }
+    }
+    if (new Set(companies).size > 1) {
+      setResponseStatus(event, 409);
+      return { ok: false, error: "The work item and conversation belong to different companies. Reopen the intended conversation before sending.", code: "chat_scope_mismatch" };
+    }
+    // Preserve explicit/session context precedence. Job-only legacy calls have
+    // never implicitly selected a company here; admission does not migrate them.
+    const companyId = requestedCompany || ownedSession?.company_id || null;
 
     // ── Plan + quota, before any provider call ───────────────────────────────
     // The web app calls the provider from OUR server, not through /api/inference,
@@ -1094,18 +1282,6 @@ export default defineEventHandler(async (event) => {
       }
     }
 
-    let companyId: string | null = null;
-    if (typeof body.companyId === "string" && isCompanyId(body.companyId)) {
-      companyId = body.companyId;
-    } else if (sessionId) {
-      const sess = await sql<{ company_id: string | null }>`
-        SELECT company_id FROM buzzy_sessions
-        WHERE id = ${sessionId} AND user_id = ${userId}
-        LIMIT 1
-      `;
-      const fromSession = sess[0]?.company_id;
-      if (typeof fromSession === "string" && isCompanyId(fromSession)) companyId = fromSession;
-    }
     const company = companyId ? await confirmedCompanyContext(sql, userId, companyId) : null;
     // Customer memory (component #2): inject approved-work history so later
     // jobs don't re-ask what earlier approvals already established.
@@ -1357,6 +1533,7 @@ export default defineEventHandler(async (event) => {
       spoken: body.spoken === true,
       lane: typeof body.lane === "string" ? body.lane.slice(0, 8) : null,
       speechMs: num("speechMs"),
+      preRollMs: num("preRollMs"),
     });
     return { ok: true };
   }
@@ -1472,7 +1649,8 @@ export default defineEventHandler(async (event) => {
     `) as Array<Record<string, unknown>>;
     const recent = (await sql`
       SELECT created_at, source, mode, model, lane, asr_ms, ttft_ms, ttfa_ms, turn_ms,
-             extract_ms, llm_ms, reply_chars, spoken, session_id, user_id, speech_ms
+             extract_ms, llm_ms, reply_chars, spoken, session_id, user_id, speech_ms,
+             pre_roll_ms
       FROM buzzy_voice_metrics
       WHERE (${scopeAll} OR user_id = ${scopeUid})
       ORDER BY created_at DESC LIMIT 25
@@ -1511,6 +1689,7 @@ export default defineEventHandler(async (event) => {
         model: c.model ?? v.model ?? null,
         lane: c.lane ?? v.lane ?? null,
         speech_ms: c.speech_ms ?? v.speech_ms ?? null,
+        pre_roll_ms: c.pre_roll_ms ?? null,
         asr_ms: c.asr_ms ?? null,
         ttft_ms: c.ttft_ms ?? v.ttft_ms ?? null,
         ttfa_ms: c.ttfa_ms ?? v.ttfa_ms ?? null,
@@ -1565,10 +1744,12 @@ export default defineEventHandler(async (event) => {
   }
 
   // ── GET /api/buzzy/jobs/:id/document — approval-gated artifact download ─
-  // The .docx produced by render_document is downloadable ONLY after the
-  // owner has approved the job (plan doc 23 Phase 1 acceptance).
+  // Original tool-produced bytes remain downloadable ONLY after the owner
+  // has approved the job (plan doc 23 Phase 1 acceptance).
   const pathParts = path.split("/"); // ["", "api", "buzzy", "jobs", ":id", "document"]
   if (method === "GET" && pathParts[2] === "buzzy" && pathParts[3] === "jobs" && pathParts[5] === "document") {
+    const originalPins = new URLSearchParams(fullPath.split("?")[1] || "").getAll("original");
+    if (originalPins.length) setResponseHeader(event, "Cache-Control", "private, no-store");
     const user = await getSessionUserFromHeaders(headersFromEvent(event));
     if (!user) {
       setResponseStatus(event, 401);
@@ -1589,22 +1770,58 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 403);
       return { error: "Approve the document first, then download it.", code: "approval_required" };
     }
+    if (originalPins.length) {
+      if (originalPins.length !== 1 || !/^[a-f0-9]{64}$/.test(originalPins[0])) {
+        setResponseStatus(event, 400);
+        return { error: "Invalid original file link. Open the latest file card.", code: "invalid_original" };
+      }
+      const original = officeOriginalMetadata(row.artifact);
+      if (!original || original.key !== originalPins[0]) {
+        setResponseStatus(event, 409);
+        return { error: "This original file has changed or is unavailable. Open the latest file card; no replacement was downloaded.", code: "original_changed" };
+      }
+      await recordTelemetry(sql, { userId: user.id, jobId, event: "exported",
+        props: { format: original.contentType } });
+      setResponseStatus(event, 200);
+      return new Response(original.bytes, { status: 200, headers: {
+        "Content-Type": original.contentType,
+        "Content-Disposition": officeOriginalDisposition(original.filename),
+        "Cache-Control": "private, no-store",
+      } });
+    }
+    // Unpinned callers retain the original bytes, approval and ownership contract.
     const artifact = row.artifact as { filename?: string; bytesB64?: string; contentType?: string };
     if (!artifact.bytesB64) {
       setResponseStatus(event, 404);
       return { error: "No document on this job", code: "not_found" };
     }
     const bytes = Buffer.from(artifact.bytesB64, "base64");
+    const filename = artifact.filename ?? "document.docx";
+    let response: Response;
+    try {
+      // Do not repair malformed stored names or embed raw text in HTTP headers.
+      // The shared encoder preserves valid Unicode via RFC 5987 and rejects
+      // unpaired UTF-16 surrogates. Controls are not a usable download name.
+      if (typeof filename !== "string" || /[\u0000-\u001f\u007f-\u009f]/u.test(filename)) {
+        throw new TypeError("Invalid original filename");
+      }
+      response = new Response(bytes, {
+        status: 200,
+        headers: {
+          "Content-Type": artifact.contentType ?? "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "Content-Disposition": officeOriginalDisposition(filename),
+        },
+      });
+    } catch {
+      setResponseStatus(event, 422);
+      return { error: "The original file metadata is invalid. No replacement was downloaded.", code: "invalid_original_metadata" };
+    }
+    // A malformed header must not leave a success event behind. This records
+    // response preparation, not proof that the client received the download.
     await recordTelemetry(sql, { userId: user.id, jobId, event: "exported",
       props: { format: artifact.contentType ?? "docx" } });
     setResponseStatus(event, 200);
-    return new Response(bytes, {
-      status: 200,
-      headers: {
-        "Content-Type": artifact.contentType ?? "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "Content-Disposition": `attachment; filename="${artifact.filename ?? "document.docx"}"`,
-      },
-    });
+    return response;
   }
 
   // ── Scheduled jobs (plan doc 23, component #5) ──────────────────────
@@ -1951,34 +2168,115 @@ export default defineEventHandler(async (event) => {
       return { error: "Sign in required", code: "signed_out" };
     }
 
-    const sql = await getSql();
-    const facts = await sql`
-      SELECT job_id, key, value, updated_at FROM buzzy_user_memory
-      WHERE user_id = ${user.id}
-      ORDER BY updated_at DESC
-      LIMIT 200
-    `;
-    const messages = await sql`
-      SELECT job_id, role, content, created_at FROM buzzy_chat_messages
-      WHERE user_id = ${user.id}
-      ORDER BY created_at DESC
-      LIMIT 100
-    `;
-    return {
-      honchoAvailable: honchoAvailable(),
-      facts: facts.map((r) => ({
-        jobId: r.job_id,
-        key: r.key,
-        value: r.value,
-        updatedAt: r.updated_at,
-      })),
-      messages: messages.map((r) => ({
-        jobId: r.job_id,
-        role: r.role,
-        content: r.content,
-        createdAt: r.created_at,
-      })),
-    };
+    const params = new URLSearchParams(fullPath.includes("?") ? fullPath.slice(fullPath.indexOf("?") + 1) : "");
+    const scopes = params.getAll("companyId");
+    // No other query keys are supported: misspelled/array scopes must not
+    // silently turn into an account-wide read.
+    if ([...params.keys()].some((key) => key !== "companyId") || scopes.length > 1 || (scopes.length === 1 && !isCompanyId(scopes[0]!))) {
+      setResponseStatus(event, 400);
+      return { error: "Choose one valid company scope.", code: "bad_company" };
+    }
+    const companyId = scopes.length ? scopes[0]! : null;
+    try {
+      const sql = await getSql();
+      if (companyId) {
+        const owned = await sql`SELECT id FROM buzzy_companies WHERE id = ${companyId} AND user_id = ${user.id}`;
+        if (!owned.length) {
+          setResponseStatus(event, 404);
+          return { error: "Company not found", code: "not_found" };
+        }
+      }
+      // Resolve provenance before limiting. All joins stay within this owner;
+      // unknown or conflicting relationships are account-visible, never guessed
+      // into a company. Archived jobs are deliberately included. A session job_id
+      // is only its latest work pointer: immutable message edges preserve older
+      // associations. Session identity is independent of its latest job pointer.
+      // This describes verified current stored association, not a historical
+      // company-at-message-time stamp.
+      const sources = `
+        WITH owned_companies AS (SELECT id FROM buzzy_companies WHERE user_id = $1),
+        owned_jobs AS (SELECT id, title, company_id FROM buzzy_jobs WHERE user_id = $1),
+        owned_sessions AS (SELECT id, title, job_id, company_id FROM buzzy_sessions WHERE user_id = $1),
+        job_session_edges AS (
+          SELECT job_id, id AS session_id FROM owned_sessions WHERE job_id IS NOT NULL
+          UNION
+          SELECT job_id, session_id FROM buzzy_chat_messages
+          WHERE user_id = $1 AND job_id IS NOT NULL AND session_id IS NOT NULL
+        ),
+        verified_edges AS (
+          SELECT e.job_id, c.id AS company_id
+          FROM job_session_edges e LEFT JOIN owned_sessions s ON s.id = e.session_id
+          LEFT JOIN owned_companies c ON c.id = s.company_id
+        ),
+        legacy_companies AS (
+          SELECT job_id, CASE WHEN COUNT(*) = COUNT(company_id) AND COUNT(DISTINCT company_id) = 1
+            THEN MIN(company_id) ELSE NULL END AS company_id
+          FROM verified_edges GROUP BY job_id
+        ),
+        resolved_jobs AS (
+          SELECT j.id, j.title, CASE WHEN j.company_id IS NOT NULL THEN c.id
+            ELSE lc.company_id END AS company_id
+          FROM owned_jobs j LEFT JOIN owned_companies c ON c.id = j.company_id
+          LEFT JOIN legacy_companies lc ON lc.job_id = j.id
+        ),
+        resolved_sessions AS (
+          SELECT s.id, s.title, s.job_id, c.id AS company_id
+          FROM owned_sessions s LEFT JOIN owned_companies c ON c.id = s.company_id
+        )`;
+      const factSql = sources + `,
+        sourced AS (
+          SELECT m.id AS row_id, m.job_id, m.key, m.value, m.updated_at,
+            CASE WHEN j.id IS NOT NULL AND s.id IS NULL AND j.company_id IS NOT NULL THEN 'job'
+              WHEN s.id IS NOT NULL AND j.id IS NULL AND s.company_id IS NOT NULL THEN 'session'
+              ELSE 'unassigned' END AS source_kind,
+            CASE WHEN j.id IS NOT NULL AND s.id IS NULL AND j.company_id IS NOT NULL THEN j.id
+              WHEN s.id IS NOT NULL AND j.id IS NULL AND s.company_id IS NOT NULL THEN s.id END AS source_id,
+            CASE WHEN j.id IS NOT NULL AND s.id IS NULL AND j.company_id IS NOT NULL THEN j.title
+              WHEN s.id IS NOT NULL AND j.id IS NULL AND s.company_id IS NOT NULL THEN s.title END AS source_title,
+            CASE WHEN j.id IS NOT NULL AND s.id IS NULL THEN j.company_id
+              WHEN s.id IS NOT NULL AND j.id IS NULL THEN s.company_id END AS source_company_id
+          FROM buzzy_user_memory m LEFT JOIN resolved_jobs j ON j.id = m.job_id
+          LEFT JOIN resolved_sessions s ON s.id = m.job_id WHERE m.user_id = $1
+        ) SELECT * FROM sourced WHERE (CAST($2 AS TEXT) IS NULL OR source_company_id = $2)
+          ORDER BY updated_at DESC, row_id DESC LIMIT 200`;
+      const messageSql = sources + `,
+        related AS (
+          SELECT m.id AS row_id, m.job_id, m.session_id, m.role, m.content, m.created_at,
+            CASE WHEN m.session_id IS NOT NULL THEN
+              CASE WHEN s.id IS NOT NULL AND (m.job_id IS NULL OR (actual_job.id IS NOT NULL AND
+                (actual_job.company_id IS NULL OR actual_job.company_id = s.company_id)))
+                THEN s.company_id END
+              ELSE j.company_id END AS source_company_id,
+            CASE WHEN m.session_id IS NOT NULL THEN 'session' ELSE 'job' END AS candidate_kind,
+            CASE WHEN m.session_id IS NOT NULL THEN s.id ELSE j.id END AS candidate_id,
+            CASE WHEN m.session_id IS NOT NULL THEN s.title ELSE j.title END AS candidate_title
+          FROM buzzy_chat_messages m LEFT JOIN resolved_sessions s ON s.id = m.session_id
+          LEFT JOIN resolved_jobs j ON j.id = m.job_id
+          LEFT JOIN owned_jobs actual_job ON actual_job.id = m.job_id
+          WHERE m.user_id = $1
+        ), sourced AS (
+          SELECT row_id, job_id, session_id, role, content, created_at, source_company_id,
+            CASE WHEN source_company_id IS NOT NULL THEN candidate_kind ELSE 'unassigned' END AS source_kind,
+            CASE WHEN source_company_id IS NOT NULL THEN candidate_id END AS source_id,
+            CASE WHEN source_company_id IS NOT NULL THEN candidate_title END AS source_title
+          FROM related
+        ) SELECT * FROM sourced WHERE (CAST($2 AS TEXT) IS NULL OR source_company_id = $2)
+          ORDER BY created_at DESC, row_id DESC LIMIT 100`;
+      const facts = await sql.query(factSql, [user.id, companyId]);
+      const messages = await sql.query(messageSql, [user.id, companyId]);
+      const source = (r: any) => ({ kind: r.source_kind, id: r.source_id ?? null,
+        title: r.source_title ?? null, companyId: r.source_company_id ?? null });
+      return {
+        honchoAvailable: honchoAvailable(), scope: { companyId },
+        facts: facts.map((r: any) => ({ jobId: r.job_id, key: r.key, value: r.value,
+          updatedAt: r.updated_at, source: source(r) })),
+        messages: messages.map((r: any) => ({ jobId: r.job_id, sessionId: r.session_id,
+          role: r.role, content: r.content, createdAt: r.created_at, source: source(r) })),
+      };
+    } catch (_) {
+      setResponseStatus(event, 503);
+      return { error: "Memory could not be loaded. Try again.", code: "memory_unavailable" };
+    }
   }
 
   // ── DELETE /api/buzzy/memory — forget, with propagation (BZ-F031) ─────
@@ -2053,9 +2351,9 @@ export default defineEventHandler(async (event) => {
         ? (body.fields as Record<string, unknown>)
         : {};
     const sql = await getSql();
-    const { saved, rejected } = await saveProfile(sql, user.id, values);
+    const { saved, cleared, rejected } = await saveProfile(sql, user.id, values);
     const profile = await getProfile(sql, user.id);
-    return { saved, rejected, profile };
+    return { saved, cleared, rejected, profile };
   }
 
   // ── POST /api/buzzy/profile/reuse — copy chosen defaults into a job ─────
@@ -2385,6 +2683,49 @@ export default defineEventHandler(async (event) => {
     };
   }
 
+  // ── GET /api/buzzy/jobs/:id — one job, minus its artifact bytes ──────
+  // Talk can receive a bare job id (a ?job= link, or a recent-work row that
+  // knows only the id) and still owes the reader the same context opener the
+  // Library card gets from sessionStorage. The list endpoint carries
+  // data.artifact (a base64 .docx), so it is the wrong thing to fetch for one
+  // row; this returns the header fields the opener needs and drops the artifact.
+  if (method === "GET" && path.startsWith("/api/buzzy/jobs/")) {
+    const id = decodeURIComponent(path.slice("/api/buzzy/jobs/".length));
+    if (id && !id.includes("/")) {
+      const user = await getSessionUserFromHeaders(headersFromEvent(event));
+      if (!user) {
+        setResponseStatus(event, 401);
+        return { error: "Sign in required", code: "signed_out" };
+      }
+      const sql = await getSql();
+      const rows = await sql`
+        SELECT id, template, title, status, company_id, data, created_at, updated_at
+        FROM buzzy_jobs
+        WHERE id = ${id} AND user_id = ${user.id}
+        LIMIT 1
+      `;
+      if (!rows.length) {
+        setResponseStatus(event, 404);
+        return { error: "Job not found", code: "not_found" };
+      }
+      const r = rows[0];
+      const data = typeof r.data === "string" ? safeParseJson(r.data) : r.data;
+      if (data && typeof data === "object") delete (data as Record<string, unknown>).artifact;
+      return {
+        job: {
+          id: r.id,
+          template: r.template,
+          title: r.title,
+          status: r.status,
+          companyId: typeof r.company_id === "string" ? r.company_id : null,
+          data,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+        },
+      };
+    }
+  }
+
   // ── GET /api/buzzy/search — work search across ALL of the user's companies
   // Matches job titles, captured problem text, and chat message content, so a
   // user can find work by what was said in it, not just its title. Archived
@@ -2668,7 +3009,25 @@ export default defineEventHandler(async (event) => {
     if (hasDueDate) dataPatch.due_date = body.dueDate;
     let executionInfo: { projectId: string; created: boolean } | null = null;
     const sql = await getSql();
-    const rows = await sql`
+    let rows: Array<{ id: string; title: string; status: string; company_id: string | null }>;
+    if (hasApproved) {
+      // Critical approval writes, audit and success telemetry commit together.
+      // Storage errors propagate; no successful flag survives a failed commit.
+      const committed = await commitJobApproval(sql, {
+        userId: user.id, jobId: id, approved: body.approved === true,
+        draft: typeof body.draft === "string" ? body.draft : null,
+        title, status, dataPatch,
+      });
+      if (committed && committed.outcome !== "ok") {
+        setResponseStatus(event, 409);
+        return {
+          error: "That draft changed since you opened it — review the latest version, then approve.",
+          code: committed.outcome, currentVersion: committed.current_version,
+        };
+      }
+      rows = committed ? [committed] : [];
+    } else {
+      rows = await sql`
       UPDATE buzzy_jobs SET
         title = COALESCE(${title}, title),
         status = COALESCE(${status}, status),
@@ -2677,38 +3036,13 @@ export default defineEventHandler(async (event) => {
       WHERE id = ${id} AND user_id = ${user.id}
       RETURNING id, title, status, company_id
     `;
+    }
     if (!rows.length) {
       setResponseStatus(event, 404);
       return { error: "job not found", code: "not_found" };
     }
     // ── Per-human attribution (multi-owner groundwork) ─────────────────
     if (hasApproved) {
-      await recordJobEvent(sql, id, user.id, "approve",
-        body.approved === true ? "approved" : "approval revoked");
-      await recordTelemetry(sql, { userId: user.id, jobId: id,
-        event: body.approved === true ? "approval_recorded" : "reopened",
-        props: { action: body.approved === true ? "approve" : "revoke" } });
-      // BZ-F015/F017: approval state flows into the document lifecycle —
-      // and references the EXACT version being approved (QA-08). When the
-      // client supplies the text it approved, a mismatch with the document's
-      // current version is a stale approval: reject it, never silently
-      // apply it to newer content.
-      try {
-        const acc = await setDocumentAcceptance(
-          sql, user.id, id, body.approved === true,
-          typeof body.draft === "string" ? body.draft : null,
-        );
-        if (!acc.ok) {
-          setResponseStatus(event, 409);
-          return {
-            error: "That draft changed since you opened it — review the latest version, then approve.",
-            code: acc.code,
-            currentVersion: acc.currentVersion,
-          };
-        }
-      } catch (derr) {
-        console.error("[buzzy/documents] acceptance sync failed:", derr instanceof Error ? derr.message : derr);
-      }
       // BZ-REUSE-159: on Approve, create (idempotently) the shop-floor board
       // + agent + first ticket under the hood. The durable approval audit
       // (job approval + document accepted_version) is the first_ticket_cut
@@ -2725,7 +3059,7 @@ export default defineEventHandler(async (event) => {
         }
       }
     }
-    if (hasStatus) {
+    if (hasStatus && !hasApproved) {
       await recordJobEvent(sql, id, user.id, "status", String(body.status));
     }
     // ── Company KB derivation (plan doc 23, component #1) ─────────────
@@ -2734,6 +3068,7 @@ export default defineEventHandler(async (event) => {
     // company facts. They stay suggestions until the owner confirms them
     // in the company card — the approval surface stays one-click.
     if (hasApproved && body.approved === true && rows[0].company_id) {
+      try {
       const cid = rows[0].company_id as string;
       // Customer memory rollup (component #2): rebuilt from approved jobs on
       // every approval — the most recent state always wins.
@@ -2763,6 +3098,9 @@ export default defineEventHandler(async (event) => {
           ON CONFLICT (id) DO UPDATE SET
             value = EXCLUDED.value, updated_at = now()
         `;
+      }
+      } catch (err) {
+        console.error("[buzzy] approved company projection failed:", err instanceof Error ? err.message : err);
       }
     }
     return {
@@ -2806,7 +3144,15 @@ export default defineEventHandler(async (event) => {
       return { error: "Sign in required", code: "signed_out" };
     }
     const sql = await getSql();
-    const docs = await sql`
+    // Only these four explicit canonical formats inherit team read access.
+    // Missing/empty/unsupported formats keep the actor-only JSON/error path.
+    const format = (queryValue(fullPath, "format") ?? "").toLowerCase();
+    const canonicalExport = ["md", "pdf", "docx", "csv"].includes(format);
+    const versionRaw = queryValue(fullPath, "version");
+    const snapshot = canonicalExport
+      ? await getCanonicalExportSnapshot(sql, user.id, user.email ?? null, docMatch[1], versionRaw)
+      : null;
+    const docs = canonicalExport ? (snapshot ? [snapshot.document] : []) : await sql`
       SELECT id, job_id, title, type, status, current_version, accepted_version, expert, created_at, updated_at
       FROM buzzy_documents WHERE id = ${docMatch[1]} AND user_id = ${user.id} LIMIT 1
     `;
@@ -2814,12 +3160,11 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 404);
       return { error: "Document not found", code: "not_found" };
     }
-    const versionRaw = queryValue(fullPath, "version");
     const version = versionRaw ? Number(versionRaw) : docs[0].current_version;
     // QA-12: the chosen version is returned exactly as stored — exports and
     // renders always match it; unknown versions are a clean 404, never a
     // silent fall-through to the latest.
-    const vrows = await sql`
+    const vrows = canonicalExport ? (snapshot?.version ? [snapshot.version] : []) : await sql`
       SELECT version, content, created_at FROM buzzy_document_versions
       WHERE doc_id = ${docMatch[1]} AND version = ${Number.isFinite(version) ? version : -1} LIMIT 1
     `;
@@ -2827,7 +3172,7 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 404);
       return { error: "That version does not exist", code: "not_found" };
     }
-    const versions = await sql`
+    const versions = canonicalExport ? [] : await sql`
       SELECT version, parent_version, creator, expert, brief_revision, review,
              accepted_at, accepted_by, created_at
       FROM buzzy_document_versions
@@ -2839,7 +3184,6 @@ export default defineEventHandler(async (event) => {
     // ── BZ-F020: exports match the CHOSEN version (QA-12) ──────────────
     // format=pdf|docx|md|csv renders THIS version's canonical text on demand —
     // the export can never drift from the version the owner picked.
-    const format = (queryValue(fullPath, "format") ?? "").toLowerCase();
     if (format) {
       await recordTelemetry(sql, { userId: user.id, jobId: String(docs[0].job_id ?? ""), docId: docMatch[1],
         event: "exported", props: { format, version: Number(vrows[0].version) } });
@@ -2946,10 +3290,10 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 404);
       return { error: "Document not found", code: "not_found" };
     }
-    const result = await materializeDraft(sql, user.id, docs[0].job_id ?? docEdit[1], docs[0].title, content, {
+    const result = await materializeDraft(sql, user.id, docs[0].job_id, docs[0].title, content, {
       creator: user.id,
       expert: "manual edit",
-    });
+    }, docEdit[1]);
     return {
       ok: true,
       version: result.version,
@@ -3230,46 +3574,12 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 401);
       return { error: "Sign in required", code: "signed_out" };
     }
-    const sql = await getSql();
-    const docs = await sql`
-      SELECT id, job_id, title, status, current_version, accepted_version, expert
-      FROM buzzy_documents WHERE id = ${docSheet[1]} AND user_id = ${user.id} LIMIT 1
-    `;
-    if (!docs.length) {
+    const sheet = await getDocumentCheckSheet(await getSql(), user.id, user.email ?? null, docSheet[1]);
+    if (!sheet) {
       setResponseStatus(event, 404);
       return { error: "Document not found", code: "not_found" };
     }
-    const doc = docs[0];
-    const version = doc.accepted_version ?? doc.current_version;
-    const vrows = await sql`
-      SELECT version, content, brief_revision, review, accepted_at FROM buzzy_document_versions
-      WHERE doc_id = ${doc.id} AND version = ${version} LIMIT 1
-    `;
-    const decisions = await sql`
-      SELECT version, action, role, note, created_at FROM buzzy_document_decisions
-      WHERE doc_id = ${doc.id} AND user_id = ${user.id}
-      ORDER BY created_at DESC LIMIT 10
-    `;
-    const review = (() => {
-      const raw = vrows[0]?.review;
-      if (Array.isArray(raw)) return raw;
-      if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return []; } }
-      return [];
-    })() as Array<{ label?: string; verdict?: string; detail?: string }>;
-    return {
-      sheet: {
-        produced: { title: doc.title, version, status: doc.status, expert: doc.expert ?? null },
-        checked: review.map((c) => ({ label: c.label ?? "", verdict: c.verdict ?? "" })),
-        uncertain: review.filter((c) => c.verdict === "warning").map((c) => ({ label: c.label ?? "", detail: c.detail ?? "" })),
-        files: {
-          markdown: `/api/buzzy/documents/${doc.id}?version=${version}&format=md`,
-          pdf: `/api/buzzy/documents/${doc.id}?version=${version}&format=pdf`,
-          docx: `/api/buzzy/documents/${doc.id}?version=${version}&format=docx`,
-          csv: `/api/buzzy/documents/${doc.id}?version=${version}&format=csv`,
-        },
-        decisions,
-      },
-    };
+    return sheet;
   }
 
   // ── POST /api/buzzy/documents/:id/decision — Accept / Request changes / Keep draft ─
@@ -3299,74 +3609,29 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 400);
       return { error: "Tell me what to change — a correction needs a specific ask.", code: "note_required" };
     }
+    if (body.version !== undefined && (typeof body.version !== "number" ||
+        !Number.isSafeInteger(body.version) || body.version < 1)) {
+      setResponseStatus(event, 400);
+      return { error: "Choose one valid document version.", code: "bad_version" };
+    }
     const sql = await getSql();
-    // BZ-F034: a teammate acts on the OWNER's account through membership, and
-    // the action itself is authorized by role or an explicit delegation (with
-    // its cap) — scope is never granted by being signed in.
-    const acting = await resolveActingAccount(sql as never, user.id, user.email ?? null);
-    const needAction = action === "accept" ? "accept_document" : action === "request_changes" ? "request_changes" : "read";
-    const docs = await sql`
-      SELECT id, job_id, title, status, current_version, accepted_version
-      FROM buzzy_documents WHERE id = ${docDecision[1]} AND user_id = ${acting.accountId} LIMIT 1
-    `;
-    if (!docs.length) {
-      setResponseStatus(event, 404);
-      return { error: "Document not found", code: "not_found" };
+    const result = await commitDocumentDecision(sql, {
+      actorId: user.id, actorEmail: user.email ?? null, documentId: docDecision[1],
+      action, role, note, version: typeof body.version === "number" ? body.version : undefined,
+      draft: typeof body.draft === "string" ? body.draft : null,
+    });
+    if (!result.ok) {
+      setResponseStatus(event, result.status);
+      const { ok: _ok, status: _status, ...refusal } = result;
+      return refusal;
     }
-    const doc = docs[0];
-    if (needAction !== "read") {
-      // The space comes from the owning job, not the document row.
-      const spaceRows = doc.job_id
-        ? await sql<{ company_id: string | null }>`
-            SELECT company_id FROM buzzy_jobs WHERE id = ${String(doc.job_id)} AND user_id = ${acting.accountId} LIMIT 1
-          `
-        : [];
-      const decision = await authorize(sql as never, acting, needAction as never,
-        { companyId: spaceRows[0]?.company_id ?? null });
-      if (!decision.allowed) {
-        setResponseStatus(event, 403);
-        return { error: decision.reason, code: "role_denied", role: acting.role, via: decision.via };
-      }
-    }
-    const version = typeof body.version === "number" ? body.version : (doc.accepted_version ?? doc.current_version);
-    // Decisions bind to a version that must exist (and, to accept, the current
-    // one — a stale accept is refused, never silently applied).
-    const vrows = await sql`
-      SELECT content FROM buzzy_document_versions WHERE doc_id = ${doc.id} AND version = ${version} LIMIT 1
-    `;
-    if (!vrows.length) {
-      setResponseStatus(event, 404);
-      return { error: "That version does not exist.", code: "not_found" };
-    }
-    if (action === "accept" && version !== doc.current_version) {
-      setResponseStatus(event, 409);
-      return {
-        error: "That version is not the latest — review the current one before accepting.",
-        code: "stale_version",
-        currentVersion: doc.current_version,
-      };
-    }
-    await sql`
-      INSERT INTO buzzy_document_decisions (doc_id, user_id, version, action, role, note)
-      VALUES (${doc.id}, ${acting.accountId}, ${version}, ${action}, ${role}, ${note})
-    `;
-    await recordTelemetry(sql, { userId: user.id, jobId: String(doc.job_id ?? doc.id), docId: String(doc.id),
+    const version = result.version;
+    // Metrics are explicitly best-effort and run only after the decision commits.
+    // No false success event on refusal/rollback, and no false failure on metric loss.
+    await recordTelemetry(sql, { userId: user.id, jobId: result.jobId ?? result.documentId,
+      docId: result.documentId,
       event: action === "accept" ? "human_accepted" : action === "request_changes" ? "reopened" : "needs_you_answered",
       props: { action, role, version } });
-    if (action === "accept" && role === "internal") {
-      // Internal acceptance moves the document lifecycle (customer acceptance
-      // is a distinct record and never flips the internal state by itself).
-      try {
-        await setDocumentAcceptance(sql, user.id, String(doc.job_id ?? doc.id), true,
-          typeof body.draft === "string" ? body.draft : null);
-      } catch (derr) {
-        console.error("[buzzy/documents] acceptance sync failed:", derr instanceof Error ? derr.message : derr);
-      }
-    }
-    if (action === "request_changes") {
-      await recordJobEvent(sql, String(doc.job_id ?? doc.id), user.id, "correction_requested",
-        JSON.stringify({ version, bound: "one revision", note: note.slice(0, 200) }));
-    }
     return {
       ok: true,
       decision: { version, action, role },
@@ -4306,8 +4571,34 @@ export default defineEventHandler(async (event) => {
         type: a.content_type,
       })),
     ];
-    const status = deliverables.length ? "Deliverable ready" : messages.length ? "In progress" : "Empty";
-    return { ok: true, project: { ...job, status }, deliverables, session: session[0] ?? null, turns, messages };
+    // A project is a pair: what went in, what came out. Inputs are listed next to the
+    // deliverables so a board or a brief cannot be separated from the thing it made.
+    const data = (job.data ?? {}) as Record<string, unknown>;
+    const recorded = Array.isArray(data.sources) ? (data.sources as Record<string, unknown>[]) : [];
+    const inputs: Record<string, unknown>[] = [...recorded];
+    if (data.board && !recorded.some((r) => r.kind === "board")) {
+      const b = data.board as { strokes?: unknown[]; images?: unknown[] };
+      inputs.push({
+        kind: "board",
+        label: `Sketch board — ${(b.strokes ?? []).length} marks, ${(b.images ?? []).length} images`,
+        url: `/buzzy/sketch?job=${job.id}`,
+      });
+    }
+    if (data.music && !recorded.some((r) => r.kind === "brief")) {
+      inputs.push({ kind: "brief", label: "Music brief, lyrics and instruments", url: `/buzzy/studio?job=${job.id}` });
+    }
+    // A reference image is an INPUT. It is stored as an asset so it can be shown and
+    // re-used, but listing it as a deliverable would let the project claim two outputs
+    // when it produced one.
+    const sourceIds = new Set(
+      inputs.filter((i) => i.kind === "reference").map((i) => String(i.url ?? "").split("/").pop() || ""),
+    );
+    const outputs = deliverables.filter((d) => !(d.kind === "image" && sourceIds.has(String(d.id))));
+    const status = outputs.length ? "Deliverable ready" : messages.length || inputs.length ? "In progress" : "Empty";
+    return {
+      ok: true, project: { ...job, status }, deliverables: outputs, sources: inputs,
+      session: session[0] ?? null, turns, messages,
+    };
   }
 
   // ── GET /api/buzzy/sessions — list the user's Talk sessions ──────────
@@ -4401,14 +4692,41 @@ export default defineEventHandler(async (event) => {
     }
     const id = `sess_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
     const sql = await getSql();
+    // A requested job is an explicit conversation scope, not a hint to attach
+    // to whichever company-wide session happened to be touched most recently.
+    if (jobId) {
+      const jobs = await sql<{ company_id: string | null }>`
+        SELECT company_id FROM buzzy_jobs WHERE id = ${jobId} AND user_id = ${user.id} LIMIT 1
+      `;
+      if (!jobs.length) {
+        setResponseStatus(event, 404);
+        return { error: "Job not found", code: "not_found" };
+      }
+      const jobCompany = jobs[0]!.company_id ?? null;
+      if (jobCompany && companyId && companyId !== jobCompany) {
+        setResponseStatus(event, 400);
+        return { error: "Choose this job's company before opening its conversation.", code: "bad_company" };
+      }
+      // Older Talk-created jobs have no company_id even when their sessions
+      // do. Retain an explicitly requested, separately owner-checked company
+      // for those legacy jobs without rewriting or reassigning the job.
+      companyId = jobCompany || companyId;
+    }
     // Resume, don't multiply. Every POST used to mint a new session, and a new
     // session mints its own job: one lullaby request left 56 identical work items
     // in the list. An open thread for this account (same company scope, touched in
     // the last 12 hours) IS the thread the next turn belongs to. `fresh: true`
     // is the explicit opt-out, which is what the New chat button sends.
     if (body.fresh !== true) {
-      const recent = companyId
+      const recent = jobId
         ? await sql<{ id: string; job_id: string | null; title: string; company_id: string | null }>`
+            SELECT id, job_id, title, company_id FROM buzzy_sessions
+            WHERE user_id = ${user.id} AND job_id = ${jobId}
+              AND company_id IS NOT DISTINCT FROM ${companyId}
+              AND updated_at > now() - interval '12 hours'
+            ORDER BY updated_at DESC LIMIT 1
+          `
+        : companyId ? await sql<{ id: string; job_id: string | null; title: string; company_id: string | null }>`
             SELECT id, job_id, title, company_id FROM buzzy_sessions
             WHERE user_id = ${user.id} AND company_id = ${companyId}
               AND updated_at > now() - interval '12 hours'

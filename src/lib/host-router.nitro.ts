@@ -22,6 +22,7 @@
 import { defineEventHandler, getRequestURL, sendRedirect } from "h3";
 import type { H3Event } from "h3";
 import { CONSUMER_ORIGIN, isConsumerHost } from "./product-hosts";
+import { isLocalRuntime } from "./runtime";
 
 /**
  * Paths the consumer domain is allowed to serve. Everything else is BeeZilla's
@@ -34,6 +35,12 @@ import { CONSUMER_ORIGIN, isConsumerHost } from "./product-hosts";
  */
 const CONSUMER_PREFIXES = [
   "/buzzy",
+  // Crawler files are not product surfaces but a consumer domain must serve its
+  // own. Without these the catch-all below answered /robots.txt and /sitemap.xml
+  // with a 302 to /buzzy/talk — a crawler asking for rules got a chat page.
+  "/robots.txt",
+  "/sitemap.xml",
+
   "/api/auth",
   "/api/buzzy",
   "/api/inference",
@@ -71,6 +78,10 @@ function moveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 export default defineEventHandler((event) => {
+  // A packaged/local app serves its own UI. Inherited deployment host flags
+  // must never send its loopback window to the hosted product (or canonicalise
+  // a spoofed forwarded host); cloud routing remains unchanged below.
+  if (isLocalRuntime()) return;
   const url = getRequestURL(event);
   const pathname = url.pathname;
   const host = requestHost(event);

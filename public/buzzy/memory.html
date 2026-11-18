@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>🐴 BeeZilla — Memory</title>
+  <title>BeeZilla — Memory</title>
   <link rel="icon" type="image/png" href="/buzzy/brand/revision6_expressions_16-smiling.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet" />
@@ -46,17 +46,12 @@
     header img { width: 48px; height: 48px; }
     header h1 { font-size: 1.1rem; margin: 0; }
     header h1 span { color: var(--yellow); }
-    nav {
-      display: flex;
-      gap: 1rem;
-      margin-left: auto;
-      font-size: 0.92rem;
-    }
-    nav a { color: var(--muted); text-decoration: none; padding: 0.25rem 0.5rem; border-radius: 6px; }
-    nav a.active { color: var(--yellow); background: var(--panel2); }
+    /* The nav is chrome (nav.js + nav.css own it). This page used to carry bare
+       `nav { margin-left: auto }` rules, which beat nothing in nav.css and pushed
+       #bzNav to the right edge here while every other page centred it — the
+       "Memory has a different header" report (BZ-15 follow-up, Nov 2026). A page
+       styles its own content; the header belongs to the shell. */
     .brand-link { text-decoration: none; cursor: pointer; display: flex; align-items: center; gap: 0.75rem; }
-    nav a:hover { color: var(--text); }
-    nav .account-link { color: var(--yellow); border: 1px solid var(--line); }
     main { max-width: 960px; margin: 0 auto; padding: 1.5rem; }
     /* Memory redesign: digest card + per-job drill-down */
     .mem-digest {
@@ -254,52 +249,26 @@
     </script>
   </div>
   </header>
-  <div id="companyTabs"></div>
   <main>
     <div id="content"><p class="empty">Loading memory…</p></div>
   </main>
   <script src="/buzzy/companies.js"></script>
   <script>
-    // Session-aware account link (same as talk.html) — memory.html previously
-    // had no account code, so signed-in users always saw "Sign in" (dogfood 10003).
-    (function account() {
-      var link = document.querySelector(".account-link");
-      if (!link) return;
+    // ── Account gate. The chrome (nav.js) owns the identity chip and its menu;
+    // this page only refuses a signed-out visitor. A second menu here raced the
+    // chrome's and made the name disappear on some loads. ─────────────────────
+    (function accountGate() {
       fetch("/api/auth/get-session", { credentials: "same-origin" })
-        .then(function (r) { return r.ok ? r.json() : null; })
+        // A non-2xx is an outage, not a logout. The chrome already refuses to
+        // erase a real identity on a 500 (fee2c5f); this page gate used to take
+        // the same answer as "signed out" and eject a signed-in reader to
+        // /buzzy/landing. Only a 200 with no user may refuse.
+        .then(function (r) {
+          if (!r.ok) throw new Error("get-session " + r.status);
+          return r.json();
+        })
         .then(function (session) {
-          var user = session && session.user;
-          if (!user) { window.location.replace("/buzzy/landing"); return; }
-          var bzDisplayName = user.name || user.email || "Account";
-          link.textContent = bzDisplayName;
-          link.href = "#";
-          link.style.cursor = "pointer";
-          // Profile menu: clicking the name opens a small account panel
-          var menu = document.createElement("div");
-          menu.className = "account-menu";
-          menu.style.display = "none";
-          menu.innerHTML =
-            '<div class="am-name">' + bzDisplayName + "</div>" +
-            '<div class="am-email">' + (user.email || "") + "</div>" +
-            '<button type="button" class="am-signout">Log out</button>';
-          var out = menu.querySelector(".am-signout");
-          out.addEventListener("click", function (e) {
-            e.preventDefault();
-            fetch("/api/auth/sign-out", {
-              method: "POST",
-              credentials: "same-origin",
-              headers: { "content-type": "application/json" },
-              body: "{}",
-            }).then(function () { window.location.href = "/buzzy/"; });
-          });
-          link.parentNode.insertBefore(menu, link.nextSibling);
-          link.addEventListener("click", function (e) {
-            e.preventDefault();
-            menu.style.display = menu.style.display === "none" ? "block" : "none";
-          });
-          document.addEventListener("click", function (e) {
-            if (!menu.contains(e.target) && e.target !== link) menu.style.display = "none";
-          });
+          if (!(session && session.user)) window.location.replace("/buzzy/landing");
         })
         .catch(function () {});
     })();
@@ -314,46 +283,71 @@
     var memGen = 0;
     async function loadMemory() {
       var gen = ++memGen;
-      try {
-      const res = await fetch("/api/buzzy/memory", { credentials: "same-origin" });
       const root = document.getElementById("content");
-      if (gen !== memGen) return;
+      if (!root) return;
+      root.innerHTML = '<p class="empty">Loading memory…</p>';
+      var companies = window.BZCompanies;
+      var company = null;
+      var companyId = null;
+      var requested = false;
+      function emptyAccount() {
+        if (typeof companies.loadError !== "function" || companies.loadError() || typeof companies.list !== "function") return false;
+        var known = companies.list();
+        return Array.isArray(known) && known.length === 0;
+      }
+      function current() {
+        if (gen !== memGen || window.BZCompanies !== companies) return false;
+        var active = companies.active();
+        return companies.ready() && (active ? active.id : null) === companyId &&
+          (companyId !== null || emptyAccount());
+      }
+      try {
+      // An unavailable company catalogue is not an account with no companies.
+      // Only a verified empty catalogue may request account-wide memory.
+      if (!companies || typeof companies.ready !== "function" || typeof companies.active !== "function") throw new Error("company_unavailable");
+      if (!companies.ready()) return;
+      company = companies.active();
+      if (company) {
+        if (typeof company.id !== "string" || !/^co_[a-z0-9]{8,32}$/.test(company.id)) throw new Error("invalid_company");
+        companyId = company.id;
+      } else if (!emptyAccount()) {
+        throw new Error("company_unavailable");
+      }
+      requested = true;
+      const res = await fetch("/api/buzzy/memory" + (companyId ? "?companyId=" + encodeURIComponent(companyId) : ""), { credentials: "same-origin" });
+      if (!current()) return;
       if (res.status === 401) {
         root.innerHTML =
           '<div class="signout"><p class="muted">Memory is tied to your account.</p><a href="/buzzy/landing">Sign in</a></div>';
         return;
       }
-      if (!res.ok) {
-        root.innerHTML = '<p class="empty">Couldn\u2019t load memory right now. Try refreshing.</p>';
-        return;
-      }
+      if (!res.ok) throw new Error("memory_unavailable");
       const data = await res.json();
-      var facts = data.facts || [];
-      var messages = data.messages || [];
-      var company = window.BZCompanies && BZCompanies.ready && BZCompanies.ready() ? BZCompanies.active() : null;
-      if (company) {
-        var jr = await fetch("/api/buzzy/jobs?companyId=" + encodeURIComponent(company.id), { credentials: "same-origin" });
-        if (gen !== memGen) return;
-        if (!jr.ok) {
-          root.innerHTML = '<p class="empty">Couldn\u2019t open memory for this company. Try refreshing.</p>';
-          return;
-        }
-        var jd = await jr.json();
-        var allowed = {};
-        (jd.jobs || []).forEach(function (j) { if (j && j.id) allowed[j.id] = true; });
-        facts = facts.filter(function (f) { return f.jobId && allowed[f.jobId]; });
-        messages = messages.filter(function (m) { return m.jobId && allowed[m.jobId]; });
-      }
+      if (!current()) return;
+      if (!data || !data.scope || data.scope.companyId !== companyId ||
+          !Array.isArray(data.facts) || !Array.isArray(data.messages)) throw new Error("invalid_memory");
+      var facts = data.facts;
+      var messages = data.messages;
+      if (companyId && facts.concat(messages).some(function (row) {
+        return !row || !row.source || row.source.companyId !== companyId;
+      })) throw new Error("wrong_memory_scope");
       const honcho = data.honchoAvailable;
-      const jobLabel = (id) => (id ? id.slice(0, 8) : "General");
+      const sourceLabel = (source) => {
+        if (!source || source.kind === "unassigned") return "Unassigned memory";
+        if (typeof source.title === "string" && source.title.trim()) return source.title;
+        return (source.kind === "session" ? "Conversation " : "Job ") + String(source.id || "").slice(0, 8);
+      };
 
       // ── Memory redesign: summary first, drill-down on demand ──────────
-      // Group facts by job, show a plain-language summary line per job plus
+      // Group facts by their verified job or conversation, not a raw memory key.
+      // Show a plain-language summary line per source plus
       // a one-line "what we know" digest; details hidden behind toggles.
-      const jobsMap = {};
+      const groups = new Map();
       facts.forEach((f) => {
-        const k = f.jobId || "general";
-        (jobsMap[k] = jobsMap[k] || []).push(f);
+        const source = f.source || { kind: "unassigned", id: null };
+        const key = JSON.stringify([source.kind, source.id]);
+        if (!groups.has(key)) groups.set(key, { source: source, facts: [] });
+        groups.get(key).facts.push(f);
       });
 
       const digest = facts.length
@@ -363,7 +357,7 @@
       const stats = `
         <div class="mem-status">
           <div class="stat"><b>${facts.length}</b><span>things known</span></div>
-          <div class="stat"><b>${Object.keys(jobsMap).length}</b><span>jobs touched</span></div>
+          <div class="stat"><b>${groups.size}</b><span>memory sources</span></div>
           <div class="stat"><b>${honcho ? "on" : "off"}</b><span>long-term memory</span></div>
         </div>`;
 
@@ -373,15 +367,15 @@
           <p>${digest}</p>
         </div>`;
 
-      const jobsHtml = Object.keys(jobsMap).length
-        ? Object.entries(jobsMap).map(([jobId, fs]) => {
-            const label = jobLabel(jobId);
+      const jobsHtml = groups.size
+        ? Array.from(groups.values()).map(({ source, facts: fs }) => {
+            const label = sourceLabel(source);
             const digestLine = fs.map((f) => esc(f.value)).join(" · ");
             const detailRows = fs
               .map((f) => `<div class="fact"><span class="k">${esc(f.key)}</span><span class="v">${esc(f.value)}</span></div>`)
               .join("");
             return `<div class="mem-job">
-              <button type="button" class="mem-job-head" data-job="${esc(jobId)}">
+              <button type="button" class="mem-job-head">
                 <span class="mj-title">${esc(label)}</span>
                 <span class="mj-digest">${digestLine}</span>
                 <span class="mj-count">${fs.length}</span>
@@ -395,7 +389,7 @@
         ? messages.slice(0, 20)
             .map(
               (m) =>
-                `<div class="msg ${esc(m.role)}"><div class="who">${m.role === "assistant" ? "BeeZilla" : "You"} · ${jobLabel(m.jobId)}</div>${esc(m.content)}</div>`,
+                `<div class="msg ${m.role === "assistant" ? "assistant" : "user"}"><div class="who">${m.role === "assistant" ? "BeeZilla" : "You"} · ${esc(sourceLabel(m.source))}</div>${esc(m.content)}</div>`,
             )
             .join("")
         : '<p class="empty">No conversations yet.</p>';
@@ -407,7 +401,7 @@
         coTitle +
         stats +
         summaryCard +
-        '<section><h2>By job</h2>' + jobsHtml + '</section>' +
+        '<section><h2>By job or conversation</h2>' + jobsHtml + '</section>' +
         '<details class="mem-conv"><summary>Recent conversations</summary>' + msgsHtml + '</details>';
 
       // Wire drill-down toggles
@@ -421,14 +415,19 @@
       });
       } catch (err) {
         if (gen !== memGen) return;
-        const root = document.getElementById("content");
+        if (requested && !current()) return;
         if (root) root.innerHTML = '<p class="empty">Couldn\u2019t load memory right now. Try refreshing.</p>';
       }
     }
     if (window.BZCompanies) BZCompanies.onChange(function () { loadMemory(); });
     else loadMemory();
   </script>
-<script src="/buzzy/common.js"></script>
-<script>(function(){var run=function(){if(window.__bzHeader)window.__bzHeader("memory")};if(document.readyState!=="loading")run();else document.addEventListener("DOMContentLoaded",run)})();</script>
+  <!-- BZ-15 residual: common.js was the SECOND gate on this page (the accountGate IIFE
+       above is the first, and it refuses only on a 200 with no user). common.js's
+       __bzHeader() ran gateSignedOut(), whose resolveSession() answers a non-2xx with
+       null — so one 500 from /api/auth/get-session ejected a signed-in reader to
+       /buzzy/landing in under 100ms. The chrome (nav.js) owns the header, the account
+       chip and the active nav link, so this page needs no part of it. Do not re-add:
+       a page-level session read must never be able to log somebody out. -->
 </body>
 </html>

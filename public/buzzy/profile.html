@@ -150,13 +150,14 @@
 
   <script>
     function escapeHtml(s) {
-      return String(s || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
     const $ = (html) => { document.getElementById("app").innerHTML = html; };
 
     let FIELDS = [];
     let PROFILE = { fields: {}, hasProfile: false };
+    let profileSavePending = false;
 
     function fmtWhen(iso) {
       if (!iso) return "";
@@ -200,7 +201,7 @@
       $(
         "<h1>About your business</h1>" +
         "<p>Optional. Tell BeeZilla a little about your business once, and it can reuse those details on future jobs so you don't retype them. You can skip this entirely — it never blocks starting a job.</p>" +
-        "<div class='card'><h2>Your details</h2>" + form +
+        "<div class='card'><h2>Your details</h2><p class='muted'>Leave a field blank and Save to remove that saved default. Copies already in jobs stay unchanged.</p>" + form +
         "<div class='row'><button id='save'>Save</button><button id='skip' class='secondary'>Skip for now</button></div>" +
         "<div class='status' id='saveStatus'></div></div>" +
         "<div class='card'><h2>Reuse these on a new job</h2>" +
@@ -214,7 +215,7 @@
       );
 
       document.getElementById("save").onclick = saveProfile;
-      document.getElementById("skip").onclick = () => { window.location.href = "/buzzy/"; };
+      document.getElementById("skip").onclick = () => { if (window.BeeZillaShell) window.BeeZillaShell.go("/buzzy/"); };
       document.getElementById("reuse").onclick = reuseIntoJob;
     }
 
@@ -227,12 +228,27 @@
     }
 
     async function saveProfile() {
+      if (profileSavePending) return;
+      const app = document.getElementById("app");
+      const status = document.getElementById("saveStatus");
+      if (!app || !status || !app.contains(status)) return;
+      const current = () => app.isConnected && status.isConnected && document.getElementById("app") === app;
       const fields = {};
+      const controls = [];
       FIELDS.forEach((f) => {
         const el = document.getElementById("f_" + f.id);
-        if (el && el.value.trim()) fields[f.id] = el.value.trim();
+        if (el && app.contains(el)) {
+          const value = el.value.trim();
+          // A blank clears a default shown as saved, not an untouched unset
+          // field that might have been populated elsewhere since this load.
+          if (value || PROFILE.fields[f.id]) fields[f.id] = value;
+          controls.push([el, el.disabled]);
+        }
       });
-      const status = document.getElementById("saveStatus");
+      const button = document.getElementById("save");
+      if (button && app.contains(button)) controls.push([button, button.disabled]);
+      profileSavePending = true;
+      controls.forEach(([el]) => { el.disabled = true; });
       status.className = "status";
       status.textContent = "Saving…";
       try {
@@ -243,14 +259,27 @@
           body: JSON.stringify({ fields }),
         });
         const data = await r.json();
-        if (!r.ok) throw new Error(data.error || "Save failed");
+        if (!current()) return;
+        if (!r.ok || !data || !data.profile || !data.profile.fields ||
+            typeof data.profile.fields !== "object" || Array.isArray(data.profile.fields) ||
+            typeof data.profile.hasProfile !== "boolean" ||
+            Object.values(data.profile.fields).some((v) => !v || typeof v.value !== "string")) {
+          throw new Error("Save not confirmed");
+        }
         PROFILE = data.profile;
-        status.className = "status ok";
-        status.textContent = "Saved. " + (data.rejected && data.rejected.length ? "Ignored: " + data.rejected.join(", ") : "");
         render();
+        const savedStatus = document.getElementById("saveStatus");
+        savedStatus.className = "status ok";
+        savedStatus.textContent = "Saved." + (Array.isArray(data.rejected) && data.rejected.length ? " Ignored: " + data.rejected.join(", ") : "");
       } catch (e) {
+        if (!current()) return;
         status.className = "status err";
-        status.textContent = e.message || "Save failed";
+        // A failed response can follow a committed or partially committed save.
+        // Keep the entries for an idempotent retry, never claim nothing changed.
+        status.textContent = "Could not confirm the save. Your entries are kept; retry Save.";
+      } finally {
+        profileSavePending = false;
+        controls.forEach(([el, disabled]) => { el.disabled = disabled; });
       }
     }
 
@@ -283,34 +312,21 @@
       }
     }
 
-    // ── Account: session-aware Sign in / user name + Log out ──────────
-    (function account() {
-      var link = document.querySelector(".account-link");
-      if (!link) return;
+    // ── Account gate. The chrome (nav.js) owns the identity chip and its menu;
+    // this page only refuses a signed-out visitor. A second menu here raced the
+    // chrome's and made the name disappear on some loads. ─────────────────────
+    (function accountGate() {
       fetch("/api/auth/get-session", { credentials: "same-origin" })
-        .then(function (r) { return r.ok ? r.json() : null; })
+        // A non-2xx is an outage, not a logout. The chrome already refuses to
+        // erase a real identity on a 500 (fee2c5f); this page gate used to take
+        // the same answer as "signed out" and eject a signed-in reader to
+        // /buzzy/landing. Only a 200 with no user may refuse.
+        .then(function (r) {
+          if (!r.ok) throw new Error("get-session " + r.status);
+          return r.json();
+        })
         .then(function (session) {
-          var user = session && session.user;
-          if (!user) { window.location.replace("/buzzy/landing"); return; }
-          var bzDisplayName = user.name || user.email || "Account";
-          link.textContent = bzDisplayName;
-          link.removeAttribute("href");
-          link.style.cursor = "default";
-          var out = document.createElement("a");
-          out.href = "#";
-          out.textContent = "Log out";
-          out.addEventListener("click", function (e) {
-            e.preventDefault();
-            fetch("/api/auth/sign-out", {
-              method: "POST",
-              credentials: "same-origin",
-              headers: { "content-type": "application/json" },
-              body: "{}",
-            }).then(function () { window.location.href = "/buzzy/"; });
-          });
-          var navEl = document.querySelector("#bzNav");
-          if (navEl && navEl.parentNode && navEl.contains(link)) navEl.parentNode.insertBefore(out, navEl.nextSibling);
-          else link.parentNode.insertBefore(out, link.nextSibling);
+          if (!(session && session.user)) window.location.replace("/buzzy/landing");
         })
         .catch(function () {});
     })();

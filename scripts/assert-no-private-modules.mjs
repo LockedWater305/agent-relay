@@ -44,7 +44,7 @@ const problems = [];
 
 function trackedFiles() {
   try {
-    return execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8" })
+    return execFileSync("git", ["ls-files", "-z"], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
       .split("\0")
       .filter(Boolean);
   } catch {
@@ -94,15 +94,17 @@ for (const abs of scanned) {
   }
 }
 
-// Name check, restricted to src/ so a legitimate `registry.ts` elsewhere (there is
-// one in packages/beezilla-adapter) is not reported as a leak.
-if (tracked) {
-  for (const f of tracked) {
-    if (f.startsWith(".private-stub/") || !f.startsWith("src/")) continue;
-    const base = f.split("/").pop();
-    if (!PRIVATE_FILES.includes(base)) continue;
-    const expected = `src/lib/private/${base}`;
-    if (f !== expected) problems.push(`${f} is one of the private modules but sits outside ${expected}`);
+// Check both tracked paths and build inputs. Release archives need the same
+// protection as git checkouts: old commercial modules have no sentinel.
+const candidates = new Set([
+  ...(tracked ?? []),
+  ...scanned.map((path) => relative(ROOT, path).split("\\").join("/")),
+]);
+for (const f of candidates) {
+  if (!f.startsWith("src/") || f.startsWith("src/lib/private/")) continue;
+  const base = f.split("/").pop();
+  if (PRIVATE_FILES.includes(base)) {
+    problems.push(`${f} is one of the private modules but sits outside src/lib/private/${base}`);
   }
 }
 
@@ -123,6 +125,12 @@ if (manifest) {
   // The synced files must be exactly what the manifest recorded: a module edited
   // in place after the sync is drift nobody notices until a bug.
   const dir = join(ROOT, "src/lib/private");
+  for (const abs of walk(dir)) {
+    const name = relative(dir, abs).split("\\").join("/");
+    if (name !== ".manifest.json" && !Object.hasOwn(manifest.files ?? {}, name)) {
+      problems.push(`src/lib/private/${name} is not recorded in the manifest`);
+    }
+  }
   for (const [name, digest] of Object.entries(manifest.files ?? {})) {
     const abs = join(dir, name);
     if (!existsSync(abs)) {

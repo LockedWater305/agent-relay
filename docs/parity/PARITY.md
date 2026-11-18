@@ -1,5 +1,11 @@
 # Parity — one product, two release lines
 
+> **Current acceptance (2026-11-18):** the November 3 counts and runtime
+> observations below are historical. Use the [desktop acceptance checkpoint](../DESKTOP-PARITY-2026-11-13.md)
+> and [gate inventory](phase-one-acceptance.json) for the published `d297b6f1`
+> source, retained old package and untested current native gates. Source-register
+> parity does not certify the current installed app or the served hosted revision.
+
 Dev Boards and BeeZilla ship from **one codebase on two clocks**:
 
 | Line | Tree | Branch | Ships to | Cadence |
@@ -45,7 +51,7 @@ its own branch** — the failure a user actually feels.
 
 Exit 2 means a tree could not be read (wrong path), never "something is wrong".
 
-## Current state — 2026-11-03 (parity reached)
+## Historical source/register state — 2026-11-03
 
 Web line `80c1f91`, desktop line `7b94027` — a merge of main into `feat/local-runtime`
 (38 ahead, 0 behind). **26 functions `both`, 6 `desktop-only`, 0 `web-only`, 0 migrations
@@ -73,7 +79,7 @@ the router instead of a static `.html` fallback.
 - `/api/buzzy/transcribe` POST with an empty clip → **400 `audio_too_short`** with a sentence, not a crash
 - migrations 0048/0049/0050 applied at boot; `tsc` clean; `vite build` "build complete"; inline `<script>` blocks parse in all 12 pages
 
-### What is left
+### Remaining items recorded on 2026-11-03
 
 | Item | State |
 |---|---|
@@ -82,10 +88,11 @@ the router instead of a static `.html` fallback.
 | `turn.ts` re-extraction | pure refactor, no behaviour change; do it when there is test coverage to prove the move |
 | Arena scraper | ranking is derived and refreshable by hand; no scraper |
 
-## Rebase discipline
+## Historical divergence note
 
-`feat/local-runtime` is **37 ahead / 156 behind** `github/main` as of 2026-11-03. The two lines
-have diverged for four days of web work (assets, graphs, frontier, pricing, music/3D, ASR).
-Do **not** merge main into the desktop branch blindly: `chat.nitro.ts` and `server.ts` are both
-touched on each side. Rebase, then re-run `npm run parity` — it will name exactly which
-functions the rebase broke.
+A separate November 3 note recorded `feat/local-runtime` as **37 ahead /
+156 behind** `github/main`, unlike the merged snapshot above. Its exact ref pair
+is not identified here, so these counts are retained only as historical notes.
+Future integration must use fresh refs, reviewed conflict resolution and appropriate
+verification; `npm run parity` checks source inventory. The current acceptance
+inventory governs execution limits and remaining native gates.

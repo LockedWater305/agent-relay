@@ -7,6 +7,7 @@
  */
 
 import type { Sql } from "@/lib/db";
+import { withSqlTransaction, requireRowCount } from "../sqlTransaction";
 
 export interface MaterializedDoc {
   id: string;
@@ -37,61 +38,74 @@ export interface VersionProvenance {
 export async function materializeDraft(
   sql: Sql,
   userId: string,
-  jobId: string,
+  jobId: string | null,
   title: string,
   content: string,
   provenance: VersionProvenance = {},
+  existingDocumentId?: string,
 ): Promise<MaterializedDoc> {
-  const id = documentIdForJob(jobId);
-  const existing = await sql<{ current_version: number; status: string }>`
-    SELECT current_version, status FROM buzzy_documents
-    WHERE id = ${id} AND user_id = ${userId} LIMIT 1
-  `;
-  const briefJson = provenance.slots ? JSON.stringify(provenance.slots) : null;
-  const reviewJson = provenance.review ? JSON.stringify(provenance.review) : null;
-  if (!existing.length) {
-    await sql`
-      INSERT INTO buzzy_documents (id, user_id, job_id, title, type, status, current_version, expert)
-      VALUES (${id}, ${userId}, ${jobId}, ${title.slice(0, 200)}, 'document', 'ready', 1, ${provenance.expert ?? null})
+  return withSqlTransaction(sql, async tx => {
+    // The same job lock used by approval covers even a missing canonical row.
+    // Standalone legacy edits name their existing document explicitly.
+    const jobs = jobId ? await tx<{ id: string; user_id: string }>`
+      SELECT id, user_id FROM buzzy_jobs WHERE id = ${jobId} FOR UPDATE
+    ` : [];
+    if (jobs.length && jobs[0].user_id !== userId) throw new Error("Job not found");
+    const id = existingDocumentId ?? (jobId ? documentIdForJob(jobId) : null);
+    if (!id) throw new Error("An existing document or owned job is required");
+    const existing = await tx<{ current_version: number; status: string; job_id: string | null }>`
+      SELECT current_version, status, job_id FROM buzzy_documents
+      WHERE id = ${id} AND user_id = ${userId} FOR UPDATE
     `;
-    await sql`
+    if (existingDocumentId && (!existing.length || existing[0].job_id !== jobId)) {
+      throw new Error("Document ownership changed");
+    }
+    if (!existing.length && !jobs.length) throw new Error("Job not found");
+    const briefJson = provenance.slots ? JSON.stringify(provenance.slots) : null;
+    const reviewJson = provenance.review ? JSON.stringify(provenance.review) : null;
+    const current = existing[0];
+    if (current) {
+      const latest = await tx<{ content: string }>`
+        SELECT content FROM buzzy_document_versions
+        WHERE doc_id = ${id} AND version = ${current.current_version} FOR UPDATE
+      `;
+      requireRowCount(latest, 1, "Current document version");
+      if (latest[0].content === content) return { id, version: current.current_version, changed: false };
+    }
+    const nextVersion = current ? current.current_version + 1 : 1;
+    if (!current) {
+      requireRowCount(await tx`
+        INSERT INTO buzzy_documents (id, user_id, job_id, title, type, status, current_version, expert)
+        VALUES (${id}, ${userId}, ${jobId}, ${title.slice(0, 200)}, 'document', 'ready', 1, ${provenance.expert ?? null})
+        RETURNING id
+      `, 1, "Document creation");
+    }
+    requireRowCount(await tx`
       INSERT INTO buzzy_document_versions
         (doc_id, version, content, parent_version, creator, brief_revision, expert, review)
-      VALUES
-        (${id}, 1, ${content}, NULL, ${provenance.creator ?? null}, ${briefJson}::jsonb,
-         ${provenance.expert ?? null}, ${reviewJson}::jsonb)
-    `;
-    return { id, version: 1, changed: true };
-  }
-  const current = existing[0];
-  const latest = await sql<{ content: string }>`
-    SELECT content FROM buzzy_document_versions
-    WHERE doc_id = ${id} AND version = ${current.current_version} LIMIT 1
-  `;
-  if (latest.length && latest[0].content === content) {
-    return { id, version: current.current_version, changed: false };
-  }
-  const nextVersion = current.current_version + 1;
-  await sql`
-    INSERT INTO buzzy_document_versions
-      (doc_id, version, content, parent_version, creator, brief_revision, expert, review)
-    VALUES
-      (${id}, ${nextVersion}, ${content}, ${current.current_version}, ${provenance.creator ?? null},
-       ${briefJson}::jsonb, ${provenance.expert ?? null}, ${reviewJson}::jsonb)
-  `;
-  // A revision re-opens review: an accepted document goes back to ready until
-  // the new version is accepted (QA-20 material-scope invalidates approval),
-  // and the old accepted_version pointer is cleared — approval must reference
-  // the exact version it accepted (QA-08).
-  await sql`
-    UPDATE buzzy_documents
-    SET current_version = ${nextVersion}, title = ${title.slice(0, 200)},
-        status = CASE WHEN status = 'accepted' THEN 'ready' ELSE status END,
-        accepted_version = NULL,
-        updated_at = now()
-    WHERE id = ${id} AND user_id = ${userId}
-  `;
-  return { id, version: nextVersion, changed: true };
+      VALUES (${id}, ${nextVersion}, ${content}, ${current?.current_version ?? null},
+        ${provenance.creator ?? null}, ${briefJson}::jsonb, ${provenance.expert ?? null}, ${reviewJson}::jsonb)
+      RETURNING doc_id
+    `, 1, "Version creation");
+    if (current) {
+      requireRowCount(await tx`
+        UPDATE buzzy_documents SET current_version = ${nextVersion}, title = ${title.slice(0, 200)},
+          status = CASE WHEN status = 'accepted' THEN 'ready' ELSE status END,
+          accepted_version = NULL, updated_at = now()
+        WHERE id = ${id} AND user_id = ${userId} RETURNING id
+      `, 1, "Document revision");
+    }
+    if (jobs.length) {
+      requireRowCount(await tx`
+        UPDATE buzzy_jobs SET
+          data = COALESCE(data, '{}'::jsonb) || ${JSON.stringify({ approved: false, draft: content })}::jsonb,
+          status = CASE WHEN status IN ('Approved', 'Done') THEN 'Draft ready' ELSE status END,
+          updated_at = now()
+        WHERE id = ${jobId} AND user_id = ${userId} RETURNING id
+      `, 1, "Revision approval invalidation");
+    }
+    return { id, version: nextVersion, changed: true };
+  });
 }
 
 // ── BZ-F016: changed-section summary ─────────────────────────────────────
@@ -156,48 +170,35 @@ export type AcceptanceResult =
  * revision is rejected, never silently applied to newer content.
  */
 export async function setDocumentAcceptance(
-  sql: Sql,
-  userId: string,
-  jobId: string,
-  accepted: boolean,
+  sql: Sql, userId: string, jobId: string, accepted: boolean,
   approvedText?: string | null,
 ): Promise<AcceptanceResult> {
-  const id = documentIdForJob(jobId);
-  const docs = await sql<{ current_version: number }>`
-    SELECT current_version FROM buzzy_documents WHERE id = ${id} AND user_id = ${userId} LIMIT 1
-  `;
-  if (!docs.length) return { ok: true }; // no materialized document — nothing to sync
-  if (accepted && typeof approvedText === "string") {
-    const v = await sql<{ content: string }>`
-      SELECT content FROM buzzy_document_versions
-      WHERE doc_id = ${id} AND version = ${docs[0].current_version} LIMIT 1
+  return withSqlTransaction(sql, async tx => {
+    // Consistent job -> document -> version order across all shared writers.
+    await tx`SELECT id FROM buzzy_jobs WHERE id = ${jobId} AND user_id = ${userId} FOR UPDATE`;
+    const id = documentIdForJob(jobId);
+    const docs = await tx<{ current_version: number }>`
+      SELECT current_version FROM buzzy_documents WHERE id = ${id} AND user_id = ${userId} FOR UPDATE
     `;
-    if (v.length && v[0].content !== approvedText) {
+    if (!docs.length) return { ok: true };
+    const versions = await tx<{ version: number; content: string }>`
+      SELECT version, content FROM buzzy_document_versions WHERE doc_id = ${id} FOR UPDATE
+    `;
+    const current = versions.find(v => v.version === docs[0].current_version);
+    if (accepted && (!current || (typeof approvedText === "string" && current.content !== approvedText))) {
       return { ok: false, code: "stale_version", currentVersion: docs[0].current_version };
     }
-  }
-  if (accepted) {
-    await sql`
-      UPDATE buzzy_documents
-      SET status = 'accepted', accepted_version = ${docs[0].current_version}, updated_at = now()
-      WHERE id = ${id} AND user_id = ${userId}
-    `;
-    await sql`
-      UPDATE buzzy_document_versions
-      SET accepted_at = now(), accepted_by = ${userId}
-      WHERE doc_id = ${id} AND version = ${docs[0].current_version}
-    `;
-  } else {
-    await sql`
-      UPDATE buzzy_documents
-      SET status = 'ready', accepted_version = NULL, updated_at = now()
-      WHERE id = ${id} AND user_id = ${userId}
-    `;
-    await sql`
-      UPDATE buzzy_document_versions
-      SET accepted_at = NULL, accepted_by = NULL
-      WHERE doc_id = ${id}
-    `;
-  }
-  return { ok: true };
+    requireRowCount(await tx`
+      UPDATE buzzy_documents SET status = ${accepted ? "accepted" : "ready"},
+        accepted_version = ${accepted ? docs[0].current_version : null}, updated_at = now()
+      WHERE id = ${id} AND user_id = ${userId} RETURNING id
+    `, 1, "Document acceptance");
+    requireRowCount(await tx`
+      UPDATE buzzy_document_versions SET accepted_at = CASE WHEN ${accepted} THEN now() ELSE NULL END,
+        accepted_by = ${accepted ? userId : null}
+      WHERE doc_id = ${id} AND (NOT ${accepted} OR version = ${docs[0].current_version})
+      RETURNING version
+    `, accepted ? 1 : versions.length, "Version acceptance");
+    return { ok: true };
+  });
 }

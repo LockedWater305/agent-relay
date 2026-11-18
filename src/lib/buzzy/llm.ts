@@ -2,10 +2,10 @@
  * Buzzy LLM harness — lightweight OpenAI-compatible chat completions.
  *
  * Reads BZ_CHAT_BASE_URL / BZ_CHAT_KEY / BZ_CHAT_MODEL from env.
- * Defaults to the Nous Inference API. Whether that is "cloud" or "local" is a
- * deployment fact, not an assumption: `local` and `provider` are derived from
- * BZ_CHAT_BASE_URL (see CATALOG_IS_LOCAL), so pointing it at localhost makes the
- * catalog genuinely local instead of merely claiming to be.
+ * Defaults to the Nous Inference API. Endpoint locality is a deployment fact,
+ * not catalog metadata: `local` is bounded by BZ_CHAT_BASE_URL (see
+ * CATALOG_IS_LOCAL). A loopback endpoint must itself be configured not to
+ * proxy prompts to the cloud; this harness is not an application-wide firewall.
  *
  * BZ_CHAT_MODELS is a JSON array of { label, model } objects.
  * If unset, defaults to a single "Marvin" entry.
@@ -27,9 +27,8 @@ const DEFAULT_MODEL = env("BZ_CHAT_MODEL") || "z-ai/glm-5.3-flash";
  *  - `provider` — who serves the model. Absent means "not declared", NOT "any".
  *    An entry with no provider cannot satisfy a provider preference; the policy
  *    refuses rather than assuming.
- *  - `local` — true only when the model runs on infrastructure the operator
- *    controls. Derived from BASE_URL when not declared, so pointing
- *    BZ_CHAT_BASE_URL at localhost makes the catalog genuinely local.
+ *  - `local` — true only when BASE_URL is a loopback endpoint. An entry may
+ *    explicitly opt out with false, but cannot label a remote endpoint local.
  *  - `priceInPerMTok` / `priceOutPerMTok` — USD per million tokens. Absent means
  *    "no price map", and the `cheapest` control refuses rather than guessing.
  */
@@ -42,10 +41,27 @@ export interface CatalogModel {
   priceOutPerMTok?: number;
 }
 
-const LOCAL_BASE = /^(https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)\b/i;
+/**
+ * Compare the parsed HTTP(S) hostname, never a URL prefix. In particular,
+ * localhost.evil.example and localhost@evil.example are remote endpoints.
+ * Wildcard bind addresses, private LAN hosts and container aliases are not
+ * loopback destinations and cannot satisfy a local-only inference request.
+ */
+export function isLoopbackModelEndpoint(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    if (url.username || url.password) return false;
+    const host = url.hostname;
+    // The URL parser canonicalises IPv4/IPv6 literals and validates octets.
+    return host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(host);
+  } catch {
+    return false;
+  }
+}
 
-/** True when BASE_URL points at operator-controlled infrastructure. */
-export const CATALOG_IS_LOCAL = LOCAL_BASE.test(BASE_URL);
+/** True only when the configured inference endpoint is loopback. */
+export const CATALOG_IS_LOCAL = isLoopbackModelEndpoint(BASE_URL);
 
 /** Provider inferred from BASE_URL when an entry does not declare one. */
 export const CATALOG_DEFAULT_PROVIDER = CATALOG_IS_LOCAL
@@ -70,12 +86,12 @@ function getModels(): CatalogModel[] {
       _models = [{ label: "Marvin", model: DEFAULT_MODEL }];
     }
   }
-  // Normalise: fill provider/local from the deployment's own base URL so a
-  // preference can be satisfied without every entry restating the obvious.
+  // Every catalog model currently uses the same BASE_URL. Metadata can opt
+  // out of locality, but cannot promote a remote endpoint into localOnly.
   _models = _models!.map((e) => ({
     ...e,
     provider: e.provider ?? CATALOG_DEFAULT_PROVIDER,
-    local: e.local ?? CATALOG_IS_LOCAL,
+    local: CATALOG_IS_LOCAL && (e.local === undefined || e.local === true),
   }));
   return _models!;
 }
@@ -111,6 +127,12 @@ export interface FullCompletion {
   finishReason: string | null;
 }
 
+function assertLocalInference(localOnly?: boolean): void {
+  if (localOnly && !CATALOG_IS_LOCAL) {
+    throw new Error("Local-only inference requires a loopback BZ_CHAT_BASE_URL; nothing was sent");
+  }
+}
+
 /**
  * Call the chat completions endpoint, returning everything the wire offers:
  * assistant text, tool calls, token usage, and latency.
@@ -125,14 +147,12 @@ export async function chatCompletionFull(
     maxTokens?: number;
     tools?: unknown[];
     toolChoice?: string | object;
+    /** Enforce the endpoint boundary even when a caller bypasses model policy. */
+    localOnly?: boolean;
   },
 ): Promise<FullCompletion> {
+  assertLocalInference(opts?.localOnly);
   const model = opts?.model || DEFAULT_MODEL;
-  // BASE_URL may or may not end in "/v1" — join paths, never use new URL()
-  // (an absolute path would REPLACE the base path and drop "/v1").
-  const url = new URL(
-    BASE_URL.replace(/\/+$/, "") + "/chat/completions",
-  );
   const body: Record<string, unknown> = {
     model,
     messages,
@@ -178,14 +198,18 @@ export async function chatCompletionFull(
  */
 export async function chatCompletionStream(
   messages: Array<{ role: string; content: string }>,
-  opts: { model?: string; temperature?: number; maxTokens?: number } | undefined,
+  opts: { model?: string; temperature?: number; maxTokens?: number; localOnly?: boolean } | undefined,
   onText: (delta: string) => void,
 ): Promise<FullCompletion> {
+  assertLocalInference(opts?.localOnly);
   const model = opts?.model || DEFAULT_MODEL;
   const url = BASE_URL.replace(/\/+$/, "") + "/chat/completions";
   const started = Date.now();
   const res = await fetch(url, {
     method: "POST",
+    // A local endpoint must not redirect prompts (including 307/308 bodies)
+    // to a remote service. Remote/Advocate endpoints retain normal redirects.
+    redirect: CATALOG_IS_LOCAL ? "error" : "follow",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
     body: JSON.stringify({
       model,
@@ -241,6 +265,7 @@ export async function chatCompletionStream(
 }
 
 async function postCompletionFull(body: Record<string, unknown>): Promise<FullCompletion> {
+  // Join rather than resolve an absolute path, which would drop a base /v1.
   const url = new URL(
     BASE_URL.replace(/\/+$/, "") + "/chat/completions",
   );
@@ -248,6 +273,7 @@ async function postCompletionFull(body: Record<string, unknown>): Promise<FullCo
 
   const res = await fetch(url.toString(), {
     method: "POST",
+    redirect: CATALOG_IS_LOCAL ? "error" : "follow",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${API_KEY}`,
@@ -335,7 +361,7 @@ async function postCompletionFull(body: Record<string, unknown>): Promise<FullCo
  */
 export async function chatCompletion(
   messages: Array<{ role: string; content: string }>,
-  opts?: { model?: string; temperature?: number; maxTokens?: number },
+  opts?: { model?: string; temperature?: number; maxTokens?: number; localOnly?: boolean },
 ): Promise<string> {
   const full = await chatCompletionFull(messages, opts);
   return full.content;

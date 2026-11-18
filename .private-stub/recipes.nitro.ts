@@ -7,9 +7,9 @@
  * answer instead of a 404 that reads like a missing feature.
  */
 export default function marketplaceDisabled() {
-  return {
+  return Response.json({
     ok: false,
     error: "The recipe marketplace is not enabled in this build",
     code: "marketplace_disabled",
-  };
+  }, { status: 503 });
 }

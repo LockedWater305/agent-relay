@@ -2,8 +2,10 @@
    The active company is kept in localStorage so a switch moves the whole workspace.
    Adding from a website shows a card. A line is a company fact only after Confirm or Change. */
 (function () {
+  // One document-wide store: soft pages share the header and live Talk listeners.
+  if (window.BZCompanies) return;
   var KEY = "bz_active_company";
-  var state = { companies: [], activeId: null, ready: false, started: false, signedOut: false };
+  var state = { companies: [], activeId: null, ready: false, started: false, signedOut: false, loadError: false };
   var listeners = [];
   var mounts = [];
   var adding = false;
@@ -15,6 +17,8 @@
   var editingId = "";
   var editDraft = "";
   var cardMode = "hidden"; // hidden | view | edit
+  var creator = null;
+  var selectionRevision = 0;
 
   function esc(s) {
     return String(s == null ? "" : s)
@@ -71,8 +75,13 @@
 
   function emit() {
     var current = active();
-    listeners.slice().forEach(function (fn) {
-      try { fn(current); } catch (e) { /* a page refresh must not break the tabs */ }
+    // Non-keepalive pages must not keep reading/writing through a detached
+    // callback. Talk stays connected inside the shell cache and still follows
+    // company changes; old Memory/Library roots and replaced headers do not.
+    listeners = listeners.filter(function (listener) { return !listener.owner || listener.owner.isConnected; });
+    listeners.slice().forEach(function (listener) {
+      if ((listener.owner && !listener.owner.isConnected) || listeners.indexOf(listener) < 0) return;
+      try { listener.fn(current); } catch (e) { /* a page refresh must not break the tabs */ }
     });
   }
 
@@ -283,6 +292,8 @@
     if (!id || state.activeId === id) return;
     var known = state.companies.some(function (c) { return c.id === id; });
     if (!known) return;
+    selectionRevision++;
+    closeCreate(false);
     state.activeId = id;
     cardMode = "hidden";
     try { localStorage.setItem(KEY, id); } catch (e) { /* private mode */ }
@@ -304,16 +315,19 @@
     return fetch("/api/buzzy/companies", { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then(function (r) {
         state.signedOut = r.status === 401;
+        state.loadError = !r.ok;
         return r.ok ? r.json() : { companies: [] };
       })
       .then(function (d) {
-        state.companies = (d && d.companies) || [];
+        state.loadError = state.loadError || !(d && Array.isArray(d.companies));
+        state.companies = d && Array.isArray(d.companies) ? d.companies : [];
         rememberActive();
         state.ready = true;
         renderAll();
         emit();
       })
       .catch(function () {
+        state.loadError = true;
         state.ready = true;
         renderAll();
         emit();
@@ -439,18 +453,147 @@
     });
   }
 
+  // The header's Add action is a small, name-only flow. It does not navigate
+  // away from a live conversation or expose website import as a side effect.
+  function closeCreate(restoreFocus) {
+    var current = creator;
+    if (!current) return;
+    creator = null; // late POST/JSON completion cannot choose a company
+    if (current.dialog.open) current.dialog.close();
+    current.dialog.remove();
+    if (restoreFocus !== false && current.opener && current.opener.isConnected) current.opener.focus();
+  }
+
+  function createCurrent(current) {
+    return creator === current && current.dialog.isConnected && current.dialog.open &&
+      window.BZCompanies === api && current.revision === selectionRevision &&
+      current.activeId === state.activeId && current.href === window.location.href &&
+      !(window.BeeZillaShell && window.BeeZillaShell.busy);
+  }
+
+  function openCreate(opener) {
+    if (!state.ready || (window.BeeZillaShell && window.BeeZillaShell.busy)) return;
+    if (creator && createCurrent(creator)) {
+      if (!creator.pending) creator.input.focus();
+      return;
+    }
+    closeCreate(false);
+    var dialog = document.createElement("dialog");
+    dialog.id = "bzCompanyCreate";
+    dialog.setAttribute("aria-labelledby", "bzCompanyCreateTitle");
+    var style = document.createElement("style");
+    // Keep these styles with the dialog, not in a page-owned head stylesheet
+    // which the shell disables while another page is active.
+    style.textContent =
+      "#bzCompanyCreate{width:min(28rem,calc(100vw - 2rem));box-sizing:border-box;padding:1.4rem;border:1px solid #444;border-radius:12px;background:#141414;color:#f2f2f2;font:16px/1.5 system-ui,sans-serif}" +
+      "#bzCompanyCreate::backdrop{background:rgba(0,0,0,.65)}" +
+      "#bzCompanyCreate h2{font-size:1.25rem;margin:0 0 .5rem}#bzCompanyCreate p{font-size:.9rem;margin:.6rem 0}" +
+      "#bzCompanyCreate label{display:block}#bzCompanyCreate input{box-sizing:border-box;width:100%;margin:.4rem 0 .8rem;padding:.6rem;border:1px solid #777;border-radius:6px;background:#0a0a0a;color:#fff;font:inherit}" +
+      "#bzCompanyCreate button{font:inherit;margin:.3rem .5rem 0 0;padding:.45rem .8rem;border:1px solid #ffc107;border-radius:6px;background:#ffc107;color:#111;cursor:pointer}" +
+      "#bzCompanyCreate button[data-company-cancel]{background:transparent;color:#ffc107}#bzCompanyCreate button:disabled{opacity:.55;cursor:wait}" +
+      "#bzCompanyCreateStatus{min-height:1.5em}#bzCompanyCreate :focus-visible{outline:2px solid #ffc107;outline-offset:3px}";
+    dialog.appendChild(style);
+    var title = document.createElement("h2");
+    title.id = "bzCompanyCreateTitle"; title.textContent = "Add a company"; dialog.appendChild(title);
+    var intro = document.createElement("p");
+    intro.textContent = "Use the name you use for this business. It will become your active company after it is saved.";
+    dialog.appendChild(intro);
+    var form = document.createElement("form");
+    var label = document.createElement("label");
+    label.textContent = "Company name";
+    var input = document.createElement("input");
+    input.id = "bzCompanyCreateName"; input.name = "name"; input.type = "text";
+    input.maxLength = 80; input.required = true; input.autocomplete = "organization";
+    label.appendChild(input); form.appendChild(label);
+    var submit = document.createElement("button");
+    submit.type = "submit"; submit.textContent = "Add company"; form.appendChild(submit);
+    var cancel = document.createElement("button");
+    cancel.type = "button"; cancel.textContent = "Cancel"; cancel.setAttribute("data-company-cancel", ""); form.appendChild(cancel);
+    var status = document.createElement("p");
+    status.id = "bzCompanyCreateStatus"; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
+    form.appendChild(status); dialog.appendChild(form);
+    var current = { dialog: dialog, input: input, opener: opener, pending: false,
+      revision: selectionRevision, activeId: state.activeId, href: window.location.href };
+    creator = current;
+    function fail(message, uncertain) {
+      if (!createCurrent(current)) return;
+      current.pending = false;
+      input.disabled = false;
+      submit.disabled = !!uncertain;
+      cancel.textContent = "Close";
+      status.textContent = message;
+      input.focus();
+    }
+    var uncertain = "Couldn't confirm whether the company was added. Close this form and reload the page to check before trying again.";
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      if (!createCurrent(current) || current.pending || submit.disabled) return;
+      var name = input.value.trim().replace(/\s+/g, " ");
+      if (!name || name.length > 80) { status.textContent = "Enter a company name of 1 to 80 characters."; input.focus(); return; }
+      current.pending = true;
+      input.disabled = true; submit.disabled = true; cancel.textContent = "Close";
+      status.textContent = "Adding company… Closing won't undo a request already sent.";
+      fetch("/api/buzzy/companies", { method: "POST", credentials: "same-origin", redirect: "error",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ name: name }), signal: AbortSignal.timeout(15000),
+      }).then(function (response) {
+        if (!createCurrent(current)) return null;
+        return readJson(response);
+      }).then(function (res) {
+        if (!createCurrent(current) || !res) return;
+        if (res.status === 401) { fail("Sign in to add a company.", false); return; }
+        if (res.status === 403) { fail("You don't have permission to add this company.", false); return; }
+        if (res.status === 400) { fail("Couldn't add that company. Check the name and try again.", false); return; }
+        var company = res.data && res.data.company;
+        if (!res.ok || !company || typeof company.id !== "string" || !/^co_[a-z0-9]{8,32}$/.test(company.id) ||
+            typeof company.name !== "string" || !company.name.trim() || company.name.length > 80) {
+          fail(uncertain, true); return;
+        }
+        // This exact owner-authenticated response is the authority. Never
+        // select an optimistic ID or let a retired form replace a newer choice.
+        closeCreate();
+        replaceCompany(company);
+        select(company.id);
+      }).catch(function () { fail(uncertain, true); });
+    });
+    cancel.addEventListener("click", function () { if (creator === current) closeCreate(); });
+    dialog.addEventListener("cancel", function (event) { event.preventDefault(); if (creator === current) closeCreate(); });
+    dialog.addEventListener("close", function () { if (creator === current) closeCreate(); });
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    input.focus();
+  }
+
+  if (window.addEventListener) {
+    window.addEventListener("popstate", function () { closeCreate(false); });
+    window.addEventListener("pagehide", function () { closeCreate(false); });
+  }
+
   var api = {
     ready: function () { return state.ready; },
+    // Memory must distinguish a verified empty account from a failed lookup.
+    loadError: function () { return state.loadError; },
     list: function () { return state.companies.slice(); },
     active: active,
     activeId: function () { return state.activeId; },
     // The chrome's dropdown needs to switch companies without rendering tabs.
     select: select,
-    onChange: function (fn) {
-      listeners.push(fn);
-      if (state.ready) {
-        try { fn(active()); } catch (e) { /* page owns its error */ }
+    openCreate: openCreate,
+    closeCreate: closeCreate,
+    onChange: function (fn, ownerElement) {
+      // Registration runs in the live page's bootstrap. A hard load has no
+      // #bzPage wrapper yet; its main/app node moves with that page later.
+      var page = document.getElementById("bzPage");
+      var owner = ownerElement || (page && (page.querySelector("main") || page)) ||
+        document.querySelector("main") || document.getElementById("app");
+      var listener = { fn: fn, owner: owner };
+      if (!owner || owner.isConnected) {
+        listeners.push(listener);
+        if (state.ready) {
+          try { fn(active()); } catch (e) { /* page owns its error */ }
+        }
       }
+      return function () { listeners = listeners.filter(function (item) { return item !== listener; }); };
     },
     mount: function (el) {
       if (!el || mounts.indexOf(el) >= 0) return;
@@ -462,7 +605,17 @@
 
   function boot() {
     injectStyle();
-    var el = document.getElementById("companyTabs");
+    // BZ-23: this used to be an unscoped getElementById("companyTabs"), which can
+    // hand back a copy sitting inside #bzPageCache (soft nav keeps the previous
+    // page alive there) instead of the live page's own node — the mount then
+    // renders into a display:none subtree and the visible control is empty.
+    // Only ever mount into the live page.
+    var el = document.querySelector("#bzPage #companyTabs") ||
+             (function () {
+               var cand = document.getElementById("companyTabs");
+               if (cand && (cand.closest("#bzPageCache") || cand.closest("#bzChrome"))) return null;
+               return cand;
+             })();
     if (el) api.mount(el);
     if (!state.started) { state.started = true; load(); }
   }

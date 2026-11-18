@@ -399,6 +399,7 @@ export default defineConfig(({ command }) => ({
       ? [
           nitro({
             preset: "node-server",
+            plugins: ["./src/lib/buzzy/page-alias.plugin.ts"],
             // Keep native/wasm DB drivers out of the bundle
             noExternals: false,
             externals: {
@@ -484,6 +485,16 @@ export default defineConfig(({ command }) => ({
                 // token's behalf, passes the provider payload through unchanged.
                 route: "/api/search",
                 handler: "./src/lib/search-gateway.nitro.ts",
+              },
+              {
+                // Public desktop client: verify/import/cache signed bundles, not
+                // the private marketplace's publish/license/run management plane.
+                route: "/api/recipes/local",
+                handler: "./src/lib/recipe-seal/local.nitro.ts",
+              },
+              {
+                route: "/api/recipes/local/**",
+                handler: "./src/lib/recipe-seal/local.nitro.ts",
               },
               {
                 route: "/api/recipes",

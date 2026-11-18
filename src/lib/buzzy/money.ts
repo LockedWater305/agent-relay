@@ -3,8 +3,8 @@
  * The page script is the check. This wrapper only types it and refuses a rewritten draft.
  */
 
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 
@@ -46,9 +46,31 @@ type CheckFn = (input: MoneyInput) => MoneyCheck;
 
 let checkFn: CheckFn | null = null;
 
+/** Only the checked-in source and the emitted server entry are asset roots. */
+export function resolveMoneyCheckAsset(moduleUrl: string): URL {
+  const location = new URL(moduleUrl);
+  if (location.protocol !== "file:" || location.search || location.hash) {
+    throw new Error("unsupported money check module layout");
+  }
+  let root: URL;
+  if (location.pathname.endsWith("/src/lib/buzzy/money.ts")) {
+    root = new URL("../../../", location);
+  } else if (location.pathname.endsWith("/server/index.mjs")) {
+    root = new URL("../", location);
+  } else {
+    throw new Error("unsupported money check module layout");
+  }
+  return new URL("public/buzzy/money-check.js", root);
+}
+
 function loadCheck(): CheckFn {
   if (checkFn) return checkFn;
-  const jsPath = join(dirname(fileURLToPath(import.meta.url)), "../../../public/buzzy/money-check.js");
+  const asset = resolveMoneyCheckAsset(import.meta.url);
+  const root = realpathSync(fileURLToPath(new URL("../../", asset)));
+  const jsPath = realpathSync(fileURLToPath(asset));
+  if (jsPath !== join(root, "public", "buzzy", "money-check.js") || !statSync(jsPath).isFile()) {
+    throw new Error("money check asset is outside its shipped public layout");
+  }
   const code = readFileSync(jsPath, "utf8");
   const sandbox: { checkMoney?: CheckFn } = {};
   runInNewContext(code, sandbox, { filename: "money-check.js" });

@@ -1,0 +1,1048 @@
+#!/usr/bin/env node
+/**
+ * Regression tests for Talk's asynchronous speech ownership and diagnostic mic.
+ * Run: node --test scripts/test-talk-voice-lifecycle.mjs
+ * Optional TALK_CANDIDATE points to another talk.html for isolated review.
+ * Only the shipped functions execute; all browser IO is deterministic and fake.
+ * No browser, audio device, network, provider, dependencies or source snapshots.
+ */
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import test from "node:test";
+
+const source = readFileSync(process.env.TALK_CANDIDATE ||
+  new URL("../public/buzzy/talk.html", import.meta.url), "utf8");
+function fn(name) {
+  const match = source.match(new RegExp(`^    (?:async )?function ${name}\\([^]*?^    \\}`, "m"));
+  assert.ok(match, `shipped function ${name} exists`);
+  return match[0];
+}
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+async function settle() { for (let i = 0; i < 30; i++) await Promise.resolve(); }
+function response(data = { ok: true, text: "spoken words" }, ok = true) {
+  return { ok, status: ok ? 200 : 500, json: async () => data };
+}
+function element() {
+  return { value: "", textContent: "", disabled: false, title: "", style: {}, listeners: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    setAttribute() {}, focus() {}, appendChild() {}, closest() { return null; },
+    addEventListener(type, callback) { this.listeners[type] = callback; },
+  };
+}
+const senders = ["sendHeardTurn", "sendForTranscription"];
+function speechHarness({ realSend = false, controller = true, wav = {} } = {}) {
+  const requests = [], sent = [], timers = [], notes = [], rendered = [], storage = [];
+  const nodes = new Map();
+  const node = (id) => { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); };
+  const c = {
+    chatNavigation: { generation: 0, pending: null, ensure: null, restore: 0, history: 0 },
+    AbortController: controller ? AbortController : undefined,
+    AbortSignal: { timeout: () => undefined },
+    voice: { mic: true, rec: null, sending: false, speaking: false, replies: false,
+      note: "", speechGeneration: 0, speechRequest: null, turnSeq: 0, cutTurn: -1 },
+    chatState: { sessionVerified: true, jobId: "original/job", sessionId: "original-session", boundCompanyId: "original-company",
+      jobContext: { title: "Original Job" }, slots: {}, messages: [] },
+    document: { getElementById: node, createElement: element, querySelector: () => null, querySelectorAll: () => [],
+      addEventListener() {}, removeEventListener() {} },
+    window: { location: { pathname: "/buzzy/talk" } },
+    sessionStorage: { getItem: () => null },
+    localStorage: { setItem: (...args) => storage.push(args), removeItem() {} },
+    history: { replaceState() {} },
+    fetch(url, init) { const request = deferred(); requests.push({ ...request, url, init }); return request.promise; },
+    TextDecoder,
+    performance: { now: () => 100 }, crypto: { randomUUID: () => "fake-id" },
+    setTimeout(callback) { timers.push(callback); return timers.length; }, setInterval() { return 1; }, clearInterval() {},
+    finishCapture: () => wav, jobNameFix: (s) => String(s || ""), brandName: (s) => String(s || ""),
+    setAvatarState() {}, paintVoice() {},
+    stageNote(text) { c.voice.note = text; notes.push(text); c.paintVoice(); },
+    rearmListening() { timers.push("rearm"); }, micLog() {},
+    cancelRecording() {}, preRollStop() {}, bargeDisarm() {}, dropCapture() {}, probeStop() {},
+    startListening() {}, stopSpeaking() {}, saveListenPref() {}, saveVoicePref() {},
+    srAvailable: () => true, voicePref: () => false, listenPref: () => false, mountAvatars() {},
+    toggleVoiceReplies() {}, clipHasSpeech: () => false,
+    PROBE_ON: false, capState: null,
+    bzJobCtx: (s) => s, resetDraftGate() {}, setBackVisible() {}, updateChrome() {},
+    restoreTranscript() {}, showRecentWork() {}, resetContextMeter() {}, setChatMascot() {},
+    renderChatMessages() { rendered.push(c.chatState.messages.slice()); }, renderSlotChecklist() {},
+    welcomeMessage: () => "Welcome", closeSessionsDrawer() {}, showChatScreen() {}, sessionsError() {},
+    loadCompanyPaper() {}, loadSessions() {},
+    activeCompanyId: () => c.chatState.boundCompanyId,
+    selectedModel: () => "test-model", getAuthHeaders: () => ({}),
+    pendingExecute: false, CHAT_BASE: "/chat", SESSIONS_BASE: "/sessions", paperBusy: false, paperLoad: 0, paperOperation: 0,
+    paintContext() {}, logVoiceMetrics() {}, maybeSpeak() {}, renderPaper() {},
+    setBriefEditWidth() {}, SLOT_LABELS: { challenge: "Challenge" },
+    sendChatMessage(event, request) {
+      sent.push({ jobId: c.chatState.jobId, sessionId: c.chatState.sessionId, text: node("chatInput").value });
+      if (c.voice.speechRequest === request) c.voice.speechRequest = null;
+    },
+  };
+  const names = ["chatContextSnapshot", "chatContextCurrent", "beginChatNavigation", "chatNavigationCurrent", "finishChatNavigation",
+    "validChatSession", "storeChatSession", "selectChatSession", "showChatFailure", "invalidateSpeechRequest", "speechContextChanged", "beginSpeechRequest", "speechRequestCurrent", "finishSpeechRequest",
+    "asrQueryString", "submitHeard", "sendHeardTurn", "sendForTranscription", "stopListening", "releaseMic", "toggleMic",
+    "initVoice", "goBackToRecent", "newChatNow", "openSession", "startNewChat", "applyChatCompany", "paintVoice"];
+  if (realSend) names.push("sendChatMessage", "ensureChatSession", "readThisBody", "submitPaper", "streamTextTurn", "streamVoiceTurn", "loadCompanyPaper", "loadContext", "postPaperLine", "saveSlotEdit", "submitMedia", "readDroppedFile", "checkAuthAndEnableInput");
+  if (realSend && source.includes("    function paintChatInputAvailability()")) names.push("paintChatInputAvailability");
+  runInNewContext(names.map(fn).join("\n"), c, { filename: "talk-speech-lifecycle.js" });
+  c.initVoice();
+  function start(sender = "sendForTranscription", text = "recognizer fallback") {
+    c[sender](sender === "sendHeardTurn" ? text : { wav: true });
+    return requests.at(-1);
+  }
+  return { c, requests, sent, timers, notes, node, rendered, storage, start,
+    stop() { c.window.BeeZillaVoice.stop(); },
+    openJob(id) { c.window.BeeZillaTalk.openJob(id); },
+  };
+}
+
+for (const sender of senders) {
+  test(`${sender}: unchanged context submits exactly once to the original conversation`, async () => {
+    const h = speechHarness(); const request = h.start(sender);
+    assert.equal(request.url, "/api/buzzy/transcribe?jobId=original%2Fjob&vocab=Original%20Job");
+    request.resolve(response()); await settle();
+    assert.deepEqual(h.sent, [{ jobId: "original/job", sessionId: "original-session", text: "spoken words" }]);
+    assert.equal(h.c.voice.speechRequest, null);
+  });
+  for (const outcome of ["success", "failure", "bad-json", "refused"]) {
+    test(`${sender}: Stop discards delayed ${outcome} without altering a new draft`, async () => {
+      const h = speechHarness(); const request = h.start(sender);
+      h.stop(); h.node("chatInput").value = "new typed draft";
+      const notes = h.notes.length, timers = h.timers.length;
+      assert.equal(request.init.signal.aborted, true);
+      if (outcome === "failure") request.reject(new Error("offline"));
+      else if (outcome === "bad-json") request.resolve({ ok: true, json: () => Promise.reject(new Error("bad json")) });
+      else request.resolve(response(outcome === "refused" ? { ok: false, error: "refused" } : undefined));
+      await settle();
+      assert.deepEqual(h.sent, []);
+      assert.equal(h.node("chatInput").value, "new typed draft");
+      assert.equal(h.c.voice.sending, false);
+      assert.equal(h.notes.length, notes, "stale callbacks do not paint errors");
+      assert.equal(h.timers.length, timers, "stale callbacks do not rearm");
+      assert.match(h.node("voiceStatus").textContent, /discarded.*Listen is off/i);
+    });
+  }
+  test(`${sender}: Stop while response JSON is pending prevents late submission`, async () => {
+    const h = speechHarness(); const request = h.start(sender); const body = deferred();
+    request.resolve({ ok: true, json: () => body.promise }); await settle();
+    h.stop(); h.c.voice.mic = true; h.node("chatInput").value = "new draft";
+    body.resolve({ ok: true, text: "stale body" }); await settle();
+    assert.deepEqual(h.sent, []); assert.equal(h.node("chatInput").value, "new draft");
+  });
+  test(`${sender}: A→B→A navigation cannot revive an old request`, async () => {
+    const h = speechHarness(); const request = h.start(sender);
+    h.openJob("new-job"); h.openJob("original/job");
+    assert.equal(h.c.voice.sending, false);
+    assert.match(h.node("voiceStatus").textContent, /discarded.*conversation changed/i);
+    h.node("chatInput").value = "new conversation draft";
+    request.resolve(response()); await settle();
+    assert.deepEqual(h.sent, []); assert.equal(h.node("chatInput").value, "new conversation draft");
+  });
+  test(`${sender}: Stop→Listen on in the same job does not revive a pending request`, async () => {
+    const h = speechHarness(); const request = h.start(sender);
+    h.stop(); h.c.toggleMic(); request.resolve(response()); await settle();
+    assert.deepEqual(h.sent, []); assert.equal(h.c.voice.mic, true);
+  });
+  test(`${sender}: completion checks job, session, company and context identity even outside navigation hooks`, async () => {
+    for (const mutate of [
+      (c) => { c.chatState.jobId = "other"; },
+      (c) => { c.chatState.sessionId = "other"; },
+      (c) => { c.chatState.boundCompanyId = "other"; },
+      (c) => { c.chatState = { ...c.chatState }; },
+    ]) {
+      const h = speechHarness(); const request = h.start(sender); mutate(h.c);
+      h.node("chatInput").value = "keep me"; request.resolve(response()); await settle();
+      assert.deepEqual(h.sent, []); assert.equal(h.node("chatInput").value, "keep me");
+      assert.equal(h.c.voice.sending, false); assert.equal(h.c.voice.speechRequest, null);
+    }
+  });
+  test(`${sender}: older success/failure cannot clear a newer request or submit its fallback`, async () => {
+    for (const failure of [false, true]) {
+      for (const newFirst of [false, true]) {
+        const h = speechHarness(); const old = h.start(sender, "old fallback");
+        h.stop(); h.c.toggleMic(); const fresh = h.start(sender, "new fallback");
+        const token = h.c.voice.speechRequest;
+        const finishOld = async () => {
+          if (failure) old.reject(new Error("old failure")); else old.resolve(response({ ok: true, text: "old result" }));
+          await settle();
+        };
+        if (newFirst) { fresh.resolve(response({ ok: true, text: "new result" })); await settle(); }
+        await finishOld();
+        if (!newFirst) {
+          assert.equal(h.c.voice.speechRequest, token); assert.equal(h.c.voice.sending, true);
+          fresh.resolve(response({ ok: true, text: "new result" })); await settle();
+        }
+        assert.deepEqual(h.sent.map((s) => s.text), ["new result"]);
+      }
+    }
+  });
+  test(`${sender}: no AbortController still discards stale results`, async () => {
+    const h = speechHarness({ controller: false }); const request = h.start(sender);
+    h.stop(); h.c.toggleMic(); request.resolve(response()); await settle(); assert.deepEqual(h.sent, []);
+  });
+  test(`${sender}: a late caller cannot start a request while Listen is off`, () => {
+    const h = speechHarness(); h.stop(); h.start(sender);
+    assert.equal(h.requests.length, 0); assert.deepEqual(h.sent, []);
+  });
+}
+
+test("a superseded request is aborted and cannot clear the direct replacement", async () => {
+  const h = speechHarness(); const old = h.start(); const fresh = h.start();
+  assert.equal(old.init.signal.aborted, true);
+  old.resolve(response()); await settle(); assert.equal(h.c.voice.sending, true); assert.deepEqual(h.sent, []);
+  fresh.resolve(response({ ok: true, text: "fresh" })); await settle(); assert.equal(h.sent[0].text, "fresh");
+});
+test("recognized text without a clip still submits only in a live Listen session", () => {
+  const h = speechHarness({ wav: null }); h.start("sendHeardTurn", "no clip fallback");
+  assert.equal(h.requests.length, 0); assert.equal(h.sent[0].text, "no clip fallback");
+  h.stop(); h.start("sendHeardTurn", "do not send"); assert.equal(h.sent.length, 1);
+});
+test("active transcriber failures keep the existing fallback/error behavior and relinquish ownership", async () => {
+  const sr = speechHarness(); sr.start("sendHeardTurn").reject(new Error("offline")); await settle();
+  assert.equal(sr.sent[0].text, "recognizer fallback");
+  for (const failure of ["offline", "refused", "empty"]) {
+    const h = speechHarness(); const request = h.start();
+    if (failure === "offline") request.reject(new Error("offline"));
+    else request.resolve(response(failure === "refused" ? { ok: false, error: "refused" } : { ok: true, text: "" }));
+    await settle(); assert.deepEqual(h.sent, []); assert.equal(h.c.voice.speechRequest, null);
+    assert.equal(h.c.voice.sending, false); assert.equal(h.timers.at(-1), "rearm");
+  }
+});
+
+for (const navigate of ["goBackToRecent", "newChatNow", "company", "openSession", "startNewChat"]) {
+  test(`${navigate}: real navigation revokes pending speech at intent and async commit`, async () => {
+    const h = speechHarness(); const pending = h.start();
+    if (navigate === "company") h.c.applyChatCompany({ id: "new-company", name: "New company" });
+    else if (navigate === "openSession") h.c.openSession({ id: "next-session" });
+    else h.c[navigate]();
+    assert.equal(pending.init.signal.aborted, true);
+    pending.resolve(response()); await settle(); assert.deepEqual(h.sent, []);
+    if (navigate === "openSession" || navigate === "startNewChat" || navigate === "newChatNow") {
+      const navigation = h.requests[1]; const during = h.start();
+      const session = { id: "next-session", companyId: "original-company", jobId: navigate === "startNewChat" ? "original/job" : null };
+      navigation.resolve(response(navigate === "openSession" ? { messages: [], session } : { session }));
+      await settle(); assert.equal(during.init.signal.aborted, true);
+      during.resolve(response()); await settle(); assert.deepEqual(h.sent, []);
+    }
+  });
+}
+
+for (const sender of senders) {
+  for (const action of ["stop", "job", "same-job"]) {
+    test(`${sender}: ${action} during chat-session creation cannot retarget speech or install the old session`, async () => {
+      const h = speechHarness({ realSend: true }); h.c.chatState.sessionId = null;
+      h.start(sender).resolve(response()); await settle();
+      assert.equal(h.requests[1].url, "/sessions");
+      if (action === "stop") { h.stop(); h.c.toggleMic(); }
+      else h.openJob(action === "job" ? "new-job" : "original/job");
+      h.node("chatInput").value = "new draft";
+      h.requests[1].resolve(response({ session: { id: "stale-created-session", companyId: "original-company" } }));
+      await settle();
+      assert.equal(h.c.chatState.sessionId, null);
+      assert.equal(h.node("chatInput").value, "new draft");
+      assert.equal(h.requests.length, 2, "no chat/paper POST after cancellation");
+      assert.equal(h.storage.length, 0, "stale session not persisted");
+    });
+  }
+  test(`${sender}: a newly created session continues the same spoken turn to the chat POST`, async () => {
+    const h = speechHarness({ realSend: true }); h.c.chatState.sessionId = null;
+    h.start(sender).resolve(response()); await settle();
+    h.requests[1].resolve(response({ session: { id: "created-session", jobId: "original/job", companyId: "original-company" } }));
+    await settle(); const chat = h.requests[2]; assert.equal(chat.url, "/chat");
+    const body = JSON.parse(chat.init.body);
+    assert.equal(body.jobId, "original/job"); assert.equal(body.sessionId, "created-session");
+    assert.equal(body.message, "spoken words"); assert.equal(h.c.voice.speechRequest, null);
+    chat.resolve(response({ ok: true, reply: "done" })); await settle();
+    assert.equal(h.c.voice.sending, false);
+  });
+}
+
+test("typed Send still accepts its DOM event without requiring a speech token", async () => {
+  const h = speechHarness({ realSend: true }); h.c.voice.mic = false;
+  h.node("chatInput").value = "typed words";
+  const task = h.c.sendChatMessage({ type: "click" }); await settle();
+  assert.equal(h.requests[0].url, "/chat");
+  assert.equal(JSON.parse(h.requests[0].init.body).message, "typed words");
+  h.requests[0].resolve(response({ ok: true, reply: "done" })); await task;
+});
+test("speech 'read this' handoff cannot submit a paper after Stop during session creation", async () => {
+  const h = speechHarness({ realSend: true }); h.c.chatState.sessionId = null;
+  h.start().resolve(response({ ok: true, text: "read this: original paper words" })); await settle();
+  assert.equal(h.requests[1].url, "/sessions"); h.stop(); h.openJob("new-job");
+  h.node("chatInput").value = "keep this";
+  h.requests[1].resolve(response({ session: { id: "old-session" } })); await settle();
+  assert.equal(h.requests.length, 2); assert.equal(h.c.chatState.sessionId, null);
+  assert.equal(h.node("chatInput").value, "keep this"); assert.equal(h.c.paperBusy, false);
+});
+test("uncanceled speech 'read this' continues to the original paper POST", async () => {
+  const h = speechHarness({ realSend: true }); h.c.chatState.sessionId = null;
+  h.start().resolve(response({ ok: true, text: "read this: paper words" })); await settle();
+  h.requests[1].resolve(response({ session: { id: "created-session", jobId: "original/job", companyId: "original-company" } })); await settle();
+  assert.equal(h.requests[2].url, "/api/buzzy/papers");
+  const body = JSON.parse(h.requests[2].init.body);
+  assert.equal(body.jobId, "original/job"); assert.equal(body.sessionId, "created-session");
+  assert.equal(body.text, "paper words"); assert.equal(h.c.voice.speechRequest, null);
+  h.requests[2].resolve(response({ paper: {}, reply: "done" })); await settle();
+  assert.equal(h.c.paperBusy, false);
+});
+
+function stream() {
+  const tracks = [0, 1].map(() => ({ stops: 0, stop() { this.stops++; } }));
+  return { tracks, getTracks: () => tracks };
+}
+function probeHarness({ on = true, mic = true, syncError = false } = {}) {
+  const requests = [], rings = [];
+  const c = { PROBE_ON: on, voice: { mic, probeStream: null, probeAcquiring: null, probeGaveUp: false },
+    navigator: { mediaDevices: { getUserMedia(options) {
+      if (syncError) throw new Error("sync failure");
+      const request = deferred(); requests.push({ ...request, options }); return request.promise;
+    } } },
+    probeRingStart() { rings.push(c.voice.probeStream); }, probeRingStop() {}, aecSettings: () => ({ ec: false }),
+  };
+  runInNewContext(["probeStart", "probeStop"].map(fn).join("\n"), c);
+  return { c, requests, rings };
+}
+test("probe is opt-in, Listen-only, and absent getUserMedia is harmless", () => {
+  for (const options of [{ on: false }, { mic: false }]) {
+    const h = probeHarness(options); h.c.probeStart(); assert.equal(h.requests.length, 0);
+  }
+  const h = probeHarness(); h.c.navigator.mediaDevices = null; h.c.probeStart(); assert.equal(h.requests.length, 0);
+});
+test("multiple pending probe starts share one acquisition and Stop releases every track", async () => {
+  const h = probeHarness(); h.c.probeStart(); h.c.probeStart(); h.c.probeStart();
+  assert.equal(h.requests.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.requests[0].options)), {
+    audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+  });
+  const s = stream(); h.requests[0].resolve(s); await settle();
+  assert.equal(h.c.voice.probeStream, s); assert.equal(h.c.voice.probeAcquiring, null);
+  h.c.probeStart(); assert.equal(h.requests.length, 1);
+  h.c.voice.mic = false; h.c.probeStop(); h.c.probeStop();
+  assert.deepEqual(s.tracks.map((t) => t.stops), [1, 1]); assert.equal(h.c.voice.probeStream, null);
+});
+test("probe Stop before permission resolves releases the late stream without starting a ring", async () => {
+  const h = probeHarness(); h.c.probeStart(); h.c.voice.mic = false; h.c.probeStop();
+  const s = stream(); h.requests[0].resolve(s); await settle();
+  assert.deepEqual(s.tracks.map((t) => t.stops), [1, 1]); assert.equal(h.rings.length, 0);
+  assert.equal(h.c.voice.probeStream, null); assert.equal(h.c.voice.probeAcquiring, null);
+});
+test("probe rapid off/on releases obsolete streams in either resolution order", async () => {
+  for (const order of [[0, 1], [1, 0]]) {
+    const h = probeHarness(); h.c.probeStart(); h.c.probeStop(); h.c.probeStart(); h.c.probeStart();
+    assert.equal(h.requests.length, 2); const streams = [stream(), stream()];
+    for (const index of order) { h.requests[index].resolve(streams[index]); await settle(); }
+    assert.equal(h.c.voice.probeStream, streams[1]); assert.equal(h.rings.length, 1);
+    assert.deepEqual(streams[0].tracks.map((t) => t.stops), [1, 1]);
+    assert.deepEqual(streams[1].tracks.map((t) => t.stops), [0, 0]);
+    h.c.probeStop(); assert.deepEqual(streams[1].tracks.map((t) => t.stops), [1, 1]);
+  }
+});
+test("obsolete probe rejection cannot poison a new session or clear its pending request", async () => {
+  for (const newFirst of [false, true]) {
+    const h = probeHarness(); h.c.probeStart(); h.c.probeStop(); h.c.probeStart();
+    const token = h.c.voice.probeAcquiring; const s = stream();
+    if (newFirst) { h.requests[1].resolve(s); await settle(); }
+    h.requests[0].reject(new Error("obsolete denial")); await settle();
+    assert.equal(h.c.voice.probeGaveUp, false); assert.equal(h.c.voice.probeErr || null, null);
+    if (!newFirst) {
+      assert.equal(h.c.voice.probeAcquiring, token);
+      h.requests[1].resolve(s); await settle();
+    }
+    assert.equal(h.c.voice.probeStream, s); h.c.probeStop();
+  }
+});
+test("current probe denial is one attempt per session, and Stop permits a fresh attempt", async () => {
+  const h = probeHarness(); h.c.probeStart(); h.requests[0].reject(new Error("denied")); await settle();
+  assert.equal(h.c.voice.probeAcquiring, null); assert.equal(h.c.voice.probeGaveUp, true);
+  h.c.probeStart(); assert.equal(h.requests.length, 1);
+  h.c.probeStop(); h.c.probeStart(); assert.equal(h.requests.length, 2);
+  const s = stream(); h.requests[1].resolve(s); await settle(); h.c.probeStop();
+  assert.deepEqual(s.tracks.map((t) => t.stops), [1, 1]);
+});
+test("synchronous probe permission failure relinquishes the acquisition token", () => {
+  const h = probeHarness({ syncError: true }); assert.doesNotThrow(() => h.c.probeStart());
+  assert.equal(h.c.voice.probeAcquiring, null); assert.equal(h.c.voice.probeGaveUp, true);
+  h.c.probeStop(); assert.equal(h.c.voice.probeGaveUp, false);
+});
+
+
+test("successful recognized submission clears a prior cancellation note", async () => {
+  const h = speechHarness(); h.c.voice.note = "Pending speech discarded";
+  h.start("sendHeardTurn").resolve(response()); await settle();
+  assert.equal(h.c.voice.note, "");
+  assert.match(h.node("voiceStatus").textContent, /^Listening/);
+});
+test("terminal speech paper commands release ownership and busy state without posting", async () => {
+  for (const reason of ["empty", "no-company", "paper-busy"]) {
+    const h = speechHarness({ realSend: true });
+    if (reason === "no-company") h.c.chatState.boundCompanyId = null;
+    if (reason === "paper-busy") h.c.paperBusy = true;
+    h.start().resolve(response({ ok: true, text: reason === "empty" ? "read this" : "read this: words" }));
+    await settle();
+    assert.equal(h.requests.length, 1); assert.equal(h.c.voice.speechRequest, null);
+    assert.equal(h.c.voice.sending, false); assert.equal(h.timers.at(-1), "rearm");
+  }
+});
+
+// Session selection also owns a turn already past transcription. These use
+// the actual sender/navigation code, not a fabricated disabled-input state.
+for (const selection of ["startNewChat", "openSession"]) {
+  test(`${selection}: failed selection during a live turn leaves composer usable and ignores stale reply`, async () => {
+    const h = speechHarness({ realSend: true });
+    h.c.voice.mic = false;
+    h.node("chatInput").value = "original question";
+    const sending = h.c.sendChatMessage(); await settle();
+    assert.equal(h.node("chatInput").disabled, true);
+    assert.equal(h.node("chatSend").disabled, true);
+    const selecting = selection === "openSession" ? h.c.openSession({ id: "other-session" }) : h.c.startNewChat();
+    h.requests[1].resolve(response({ error: "offline" }, false)); await selecting;
+    assert.equal(h.node("chatInput").disabled, false);
+    assert.equal(h.node("chatSend").disabled, false);
+    h.node("chatInput").value = "new draft retained";
+    h.requests[0].resolve(response({ ok: true, reply: "obsolete reply" })); await sending;
+    assert.equal(h.node("chatInput").value, "new draft retained");
+    assert.equal(h.node("chatInput").disabled, false);
+    assert.equal(h.node("chatSend").disabled, false);
+    assert.equal(h.c.chatState.sessionId, "original-session");
+    assert.equal(h.c.chatState.messages.some(m => m.content === "obsolete reply"), false);
+  });
+}
+
+test("failed selection relinquishes voice turn busy state without stopping Listen", async () => {
+  const h = speechHarness({ realSend: true });
+  h.start().resolve(response()); await settle();
+  assert.equal(h.c.voice.sending, true);
+  const selecting = h.c.startNewChat();
+  assert.equal(h.c.voice.sending, false);
+  assert.equal(h.c.voice.mic, true);
+  h.requests[2].resolve(response({ error: "offline" }, false)); await selecting;
+  h.requests[1].resolve(response({ ok: true, reply: "obsolete voice reply" })); await settle();
+  assert.equal(h.c.voice.sending, false);
+  assert.equal(h.c.voice.mic, true);
+  assert.equal(h.node("chatSend").disabled, false);
+});
+
+test("failed ensure keeps typed text and never starts a chat POST", async () => {
+  const h = speechHarness({ realSend: true }); h.c.chatState.sessionId = null;
+  h.node("chatInput").value = "unsent draft";
+  const sending = h.c.sendChatMessage();
+  h.requests[0].resolve(response({ error: "offline" }, false)); await sending;
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.node("chatInput").value, "unsent draft");
+  assert.equal(h.c.chatState.sessionId, null);
+});
+
+for (const lane of ["streamTextTurn", "streamVoiceTurn"]) {
+  test(`${lane}: late stream chunks are cancelled without painting the newly selected conversation`, async () => {
+    const h = speechHarness({ realSend: true }); const chunk = deferred(); let cancelled = 0;
+    const task = h.c[lane]({}, {}, 0, 1);
+    h.requests[0].resolve({ ok: true, headers: new Headers({ "content-type": "text/event-stream" }),
+      body: { getReader: () => ({ read: () => chunk.promise, cancel: async () => { cancelled++; } }) } });
+    await settle();
+    h.c.goBackToRecent();
+    const before = h.c.chatState.messages.slice();
+    chunk.resolve({ done: false, value: new TextEncoder().encode('event: text\ndata: {"t":"stale words"}\n\n') });
+    assert.equal(await task, null);
+    assert.equal(cancelled, 1);
+    assert.deepEqual(h.c.chatState.messages, before);
+    assert.equal(h.rendered.length, 0);
+  });
+}
+
+test("a company paper cannot retarget a selected empty session to its old job", async () => {
+  const h = speechHarness({ realSend: true }); h.c.chatState.jobId = null;
+  h.c.loadCompanyPaper("original-company");
+  h.requests[0].resolve(response({ paper: { id: "old-paper", companyId: "original-company", jobId: "old-paper-job" } })); await settle();
+  assert.equal(h.c.chatState.jobId, null);
+  assert.equal(h.c.chatState.sessionId, "original-session");
+});
+
+test("an older context-meter response cannot paint a newer conversation", async () => {
+  const h = speechHarness({ realSend: true }); const painted = [];
+  h.c.paintContext = value => painted.push(value);
+  h.c.loadContext(); h.c.goBackToRecent();
+  h.requests[0].resolve(response({ ok: true, context: { pct: 90 } })); await settle();
+  assert.deepEqual(painted, []);
+});
+
+test("repeated typed Send while ensure is pending submits exactly one turn", async () => {
+  const h = speechHarness({ realSend: true }); h.c.voice.mic = false; h.c.chatState.sessionId = null;
+  h.node("chatInput").value = "one question";
+  const first = h.c.sendChatMessage(), repeated = h.c.sendChatMessage();
+  assert.equal(h.requests.length, 1);
+  h.requests[0].resolve(response({ session: { id: "created-session", jobId: "original/job", companyId: "original-company" } })); await settle();
+  assert.equal(h.requests.length, 2, "one session POST and one chat POST");
+  assert.equal(h.c.chatState.messages.filter(m => m.role === "user").length, 1);
+  h.requests[1].resolve(response({ ok: true, reply: "one reply" })); await Promise.all([first, repeated]);
+  assert.equal(h.c.chatState.messages.filter(m => m.content === "one reply").length, 1);
+});
+
+test("an unverified reload pointer cannot send before transcript metadata arrives", async () => {
+  const h = speechHarness({ realSend: true }); h.c.chatState.sessionVerified = false;
+  h.node("chatInput").value = "wait for metadata";
+  await h.c.sendChatMessage();
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.node("chatInput").value, "wait for metadata");
+  assert.equal(h.c.chatState.messages.length, 0);
+});
+
+for (const outcome of ["response", "json", "error"]) {
+  test(`paper POST late ${outcome} cannot change a new chat or clear its active paper operation`, async () => {
+    const h = speechHarness({ realSend: true }); const body = deferred();
+    const original = h.c.submitPaper({ text: "original paper" }); await settle();
+    if (outcome === "json") { h.requests[0].resolve({ ok: true, status: 200, json: () => body.promise }); await settle(); }
+    const selected = h.c.newChatNow();
+    h.requests[1].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await selected;
+    const next = h.c.submitPaper({ text: "new paper" }); await settle();
+    assert.equal(h.c.paperBusy, true);
+    const data = { paper: { id: "old-paper", jobId: "old-job", companyId: "original-company" }, reply: "obsolete paper reply" };
+    if (outcome === "json") body.resolve(data);
+    else if (outcome === "error") h.requests[0].reject(new Error("offline"));
+    else h.requests[0].resolve(response(data));
+    await original;
+    assert.equal(h.c.chatState.jobId, null);
+    assert.equal(h.c.chatState.sessionId, "new-session");
+    assert.equal(h.c.chatState.messages.some(m => m.content === "obsolete paper reply"), false);
+    assert.equal(h.c.paperBusy, true, "old finally cannot release the new operation");
+    h.requests[2].resolve(response({ paper: { id: "new-paper", jobId: "new-job" }, reply: "new paper reply" })); await next;
+    assert.equal(h.c.chatState.jobId, "new-job"); assert.equal(h.c.paperBusy, false);
+  });
+}
+
+test("late paper edit response cannot restore the old paper after selection", async () => {
+  const h = speechHarness({ realSend: true }); const painted = [];
+  h.c.chatState.paper = { id: "old-paper" }; h.c.renderPaper = paper => painted.push(paper);
+  h.c.postPaperLine("line", "edit", "changed");
+  h.c.goBackToRecent(); const before = painted.length;
+  h.requests[0].resolve(response({ paper: { id: "old-paper" } })); await settle();
+  assert.equal(painted.length, before); assert.equal(h.c.paperBusy, false);
+});
+
+test("late slot edit cannot overwrite new slots or enable a new pending selection", async () => {
+  const h = speechHarness({ realSend: true });
+  h.c.saveSlotEdit("challenge", "old edit");
+  const next = h.c.newChatNow();
+  assert.equal(h.node("chatSend").disabled, true);
+  h.requests[0].resolve(response({ ok: true, slots: { challenge: "obsolete result" } })); await settle();
+  assert.notEqual(h.c.chatState.slots.challenge, "obsolete result");
+  assert.equal(h.node("chatSend").disabled, true, "old finally cannot unlock pending selection");
+  h.requests[1].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await next;
+  assert.deepEqual(Object.keys(h.c.chatState.slots), []);
+});
+
+for (const failure of [false, true]) {
+  test(`late media upload ${failure ? 'failure' : 'success'} cannot append to another conversation`, async () => {
+    const h = speechHarness({ realSend: true });
+    const uploading = h.c.submitMedia({ name: "old-file.png", type: "image/png", size: 2 });
+    h.c.goBackToRecent();
+    if (failure) h.requests[0].reject(new Error("offline"));
+    else h.requests[0].resolve(response({ ok: true, id: "old-asset", bytes: 2 }));
+    await uploading;
+    assert.equal(h.c.chatState.messages.length, 0);
+  });
+}
+
+test("failed selection removes only the interrupted turn's visible busy nodes", async () => {
+  const h = speechHarness({ realSend: true }); h.c.voice.mic = false;
+  h.node("chatInput").value = "original turn";
+  const first = h.c.sendChatMessage(); await settle();
+  const removed = [];
+  h.c.document.querySelectorAll = selector => {
+    assert.equal(selector, "#thinkingIndicator, #chatMessages .streaming");
+    return [{ remove: () => removed.push("old spinner") }, { remove: () => removed.push("old partial reply") }];
+  };
+  const selecting = h.c.startNewChat();
+  assert.deepEqual(removed, ["old spinner", "old partial reply"]);
+  h.requests[1].resolve(response({ error: "offline" }, false)); await selecting;
+  h.node("chatInput").value = "new turn";
+  h.c.document.querySelectorAll = () => [{ remove: () => removed.push("new spinner") }];
+  const next = h.c.sendChatMessage(); await settle();
+  h.requests[0].resolve(response({ ok: true, reply: "obsolete reply" })); await first;
+  assert.deepEqual(removed, ["old spinner", "old partial reply"]);
+  assert.equal(h.node("chatSend").disabled, true);
+  h.requests[2].resolve(response({ ok: true, reply: "current reply" })); await next;
+});
+
+function wireFileEntry(h, entry) {
+  if (entry === "Read") {
+    const start = source.indexOf('    document.getElementById("paperRead").onclick = function () {');
+    const end = source.indexOf('    (function wirePaperDrop()', start);
+    assert.ok(start >= 0 && end > start);
+    runInNewContext(source.slice(start, end), h.c);
+    return file => { h.node("paperFile").files = [file]; h.node("paperRead").onclick(); };
+  }
+  const start = source.indexOf('    (function wirePaperDrop()');
+  const end = source.indexOf('    document.getElementById("paperToggle").onclick', start);
+  assert.ok(start >= 0 && end > start);
+  runInNewContext(source.slice(start, end), h.c);
+  return file => h.node("paperDrop").listeners.drop({ preventDefault() {}, dataTransfer: { files: [file] } });
+}
+for (const entry of ["Read", "Drop"]) {
+  for (const outcome of ["load", "error"]) {
+    test(`${entry}: FileReader ${outcome} after New chat cannot submit old text or paint an old error`, async () => {
+      const h = speechHarness({ realSend: true }); const readers = [];
+      h.c.FileReader = class { constructor() { readers.push(this); } readAsText() {} };
+      wireFileEntry(h, entry)({ name: "old-conversation.txt", type: "text/plain", size: 12 });
+      assert.equal(readers.length, 1); assert.equal(h.requests.length, 0);
+      const selecting = h.c.newChatNow();
+      h.requests[0].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await selecting;
+      h.node("paperNote").textContent = "new conversation note";
+      if (outcome === "load") { readers[0].result = "old-only text"; readers[0].onload(); }
+      else readers[0].onerror();
+      await settle();
+      assert.equal(h.requests.length, 1, "only the New chat request; no old paper/media POST");
+      assert.equal(h.node("paperNote").textContent, "new conversation note");
+      assert.equal(h.c.chatState.messages.length, 0);
+    });
+  }
+}
+
+test("Read: unchanged FileReader handoff still submits the selected paper", async () => {
+  const h = speechHarness({ realSend: true }); const readers = [];
+  h.c.FileReader = class { constructor() { readers.push(this); } readAsText() {} };
+  wireFileEntry(h, "Read")({ name: "current.txt", type: "text/plain", size: 12 });
+  readers[0].result = "current-only text"; readers[0].onload(); await settle();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].url, "/api/buzzy/papers");
+  assert.equal(JSON.parse(h.requests[0].init.body).text, "current-only text");
+  h.requests[0].resolve(response({ paper: {}, reply: "read" })); await settle();
+  assert.equal(h.c.paperBusy, false);
+});
+
+for (const action of ["read this", "media"]) {
+  test(`pending restore: ${action} cannot add local messages and strand session verification`, async () => {
+    const h = speechHarness({ realSend: true }); h.c.chatState.jobId = null; h.c.chatState.sessionVerified = false;
+    runInNewContext(fn("restoreTranscript"), h.c);
+    const restoring = h.c.restoreTranscript();
+    if (action === "read this") {
+      h.node("chatInput").value = "read this";
+      await h.c.sendChatMessage();
+      assert.equal(h.node("chatInput").value, "read this");
+    } else await h.c.submitMedia({ name: "pending.png", type: "image/png", size: 2 });
+    assert.equal(h.requests.length, 1, "only the pending transcript request");
+    assert.equal(h.c.chatState.messages.length, 0);
+    h.requests[0].resolve(response({ session: { id: "original-session", jobId: "resolved-job", companyId: "original-company" },
+      messages: [{ role: "user", content: "original question" }, { role: "assistant", content: "original reply" }], slots: {} }));
+    await restoring;
+    assert.equal(h.c.chatState.sessionVerified, true);
+    assert.equal(h.c.chatState.jobId, "resolved-job");
+    assert.equal(await h.c.ensureChatSession(), "original-session");
+    assert.equal(h.requests.length, 1);
+  });
+}
+
+// Auth is a separate asynchronous request. Its success/cache fallback cannot
+// take ownership of the composer from the active send or a newer selection.
+function authHarness(cached = true) {
+  const h = speechHarness({ realSend: true }); h.c.voice.mic = false;
+  h.c.chatState._signedOut = false;
+  h.c.window.localStorage = { getItem: () => cached ? JSON.stringify({ name: "Synthetic Owner" }) : null };
+  return h;
+}
+function answerAuth(request, outcome) {
+  if (outcome === "network error") request.reject(new Error("synthetic offline"));
+  else if (outcome === "HTTP error") request.resolve(response({ error: "temporary" }, false));
+  else if (outcome === "JSON error") request.resolve({ ok: true, status: 200, json: () => Promise.reject(new Error("synthetic JSON")) });
+  else request.resolve(response({ user: { id: "synthetic-owner" } }));
+}
+for (const outcome of ["success", "HTTP error", "network error", "JSON error"]) {
+  test(`auth ${outcome} during a live typed turn cannot unlock or duplicate Send`, async () => {
+    const h = authHarness(); h.c.checkAuthAndEnableInput();
+    h.node("chatInput").value = "first question";
+    const first = h.c.sendChatMessage(); await settle();
+    assert.equal(h.requests[1].url, "/chat");
+    answerAuth(h.requests[0], outcome); await settle();
+    const disabledDuringTurn = [h.node("chatInput").disabled, h.node("chatSend").disabled];
+    h.node("chatInput").value = "second draft";
+    const repeated = h.c.sendChatMessage(); await settle();
+    const posts = h.requests.filter(r => r.url === "/chat");
+    for (const request of posts) request.resolve(response({ ok: true, reply: "synthetic reply" }));
+    await Promise.all([first, repeated]);
+    assert.equal(posts.length, 1, "one active typed turn despite the auth callback");
+    assert.deepEqual(disabledDuringTurn, [true, true], "auth must preserve live turn's composer lock");
+    assert.equal(h.node("chatInput").value, "second draft", "blocked repeated Send retains typed text");
+    assert.equal(h.node("chatInput").disabled, false);
+    assert.equal(h.node("chatSend").disabled, false);
+  });
+}
+
+test("auth success after typed completion leaves the composer usable", async () => {
+  const h = authHarness(); h.c.checkAuthAndEnableInput();
+  h.node("chatInput").value = "question"; const sending = h.c.sendChatMessage(); await settle();
+  h.requests[1].resolve(response({ ok: true, reply: "reply" })); await sending;
+  answerAuth(h.requests[0], "success"); await settle();
+  assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+});
+
+test("auth signed-out result during a live turn remains disabled after finish", async () => {
+  const h = authHarness(); h.c.checkAuthAndEnableInput();
+  h.node("chatInput").value = "question"; const sending = h.c.sendChatMessage(); await settle();
+  h.requests[0].resolve(response({ user: null })); await settle();
+  h.requests[1].resolve(response({ ok: true, reply: "reply" })); await sending;
+  assert.equal(h.c.chatState._signedOut, true);
+  assert.equal(h.node("chatInput").disabled, true); assert.equal(h.node("chatSend").disabled, true);
+});
+
+test("auth from an old selection cannot disable the newly selected session", async () => {
+  const h = authHarness(); h.c.checkAuthAndEnableInput();
+  const selecting = h.c.openSession({ id: "new-session" });
+  h.requests[1].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" }, messages: [], slots: {} })); await selecting;
+  h.requests[0].resolve(response({ user: null })); await settle();
+  assert.equal(h.c.chatState.sessionId, "new-session");
+  assert.equal(h.c.chatState._signedOut, false);
+  assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+});
+
+for (const outcome of ["success", "HTTP error"]) {
+  test(`auth ${outcome} during ensure does not strand the composer when ensure fails`, async () => {
+    const h = authHarness(); h.c.chatState.sessionId = null;
+    h.c.checkAuthAndEnableInput();
+    h.node("chatInput").value = "unsent question";
+    const sending = h.c.sendChatMessage();
+    assert.equal(h.requests[1].url, "/sessions");
+    answerAuth(h.requests[0], outcome); await settle();
+    const busy = h.node("chatSend").disabled;
+    h.requests[1].resolve(response({ error: "session unavailable" }, false)); await sending;
+    assert.equal(busy, true);
+    assert.equal(h.requests.length, 2, "no chat POST after ensure failure");
+    assert.equal(h.node("chatInput").value, "unsent question");
+    assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+  });
+}
+
+test("auth error without cached identity leaves a live turn locked without inventing logout", async () => {
+  const h = authHarness(false); h.c.checkAuthAndEnableInput();
+  h.node("chatInput").value = "question"; const sending = h.c.sendChatMessage(); await settle();
+  answerAuth(h.requests[0], "network error"); await settle();
+  assert.equal(h.c.chatState._signedOut, false);
+  assert.equal(h.node("chatInput").disabled, true); assert.equal(h.node("chatSend").disabled, true);
+  h.requests[1].resolve(response({ ok: true, reply: "reply" })); await sending;
+  assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+});
+
+test("auth success during a turn error still releases only the finished turn", async () => {
+  const h = authHarness(); h.c.checkAuthAndEnableInput();
+  h.node("chatInput").value = "question"; const sending = h.c.sendChatMessage(); await settle();
+  answerAuth(h.requests[0], "success"); await settle();
+  h.requests[1].resolve({ ok: true, status: 200, json: () => Promise.reject(new Error("synthetic turn decode error")) }); await sending;
+  assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+  h.node("chatInput").value = "retry"; const retry = h.c.sendChatMessage(); await settle();
+  assert.equal(h.requests.length, 3);
+  h.requests[2].resolve(response({ ok: true, reply: "retry reply" })); await retry;
+});
+
+for (const oldOutcome of ["success", "HTTP error", "network error"]) {
+  test(`auth older ${oldOutcome} cannot overwrite a newer signed-out result`, async () => {
+    const h = authHarness(); h.c.checkAuthAndEnableInput(); h.c.checkAuthAndEnableInput();
+    h.requests[1].resolve(response({ user: null })); await settle();
+    answerAuth(h.requests[0], oldOutcome); await settle();
+    assert.equal(h.c.chatState._signedOut, true);
+    assert.equal(h.node("chatInput").disabled, true); assert.equal(h.node("chatSend").disabled, true);
+  });
+}
+
+test("auth older parsed JSON cannot change a newer selection", async () => {
+  const h = authHarness(); const body = deferred();
+  h.c.checkAuthAndEnableInput();
+  h.requests[0].resolve({ ok: true, status: 200, json: () => body.promise }); await settle();
+  const selecting = h.c.newChatNow();
+  h.requests[1].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await selecting;
+  body.resolve({ user: null }); await settle();
+  assert.equal(h.c.chatState.sessionId, "new-session"); assert.equal(h.c.chatState._signedOut, false);
+  assert.equal(h.node("chatSend").disabled, false);
+});
+
+for (const outcome of ["success", "HTTP error"]) {
+  test(`auth ${outcome} cannot enable Send while New chat is pending`, async () => {
+    const h = authHarness(); const selecting = h.c.newChatNow();
+    h.c.checkAuthAndEnableInput(); answerAuth(h.requests[1], outcome); await settle();
+    assert.equal(h.node("chatSend").disabled, true);
+    assert.equal(h.node("chatInput").disabled, false, "typing may continue during selection");
+    h.requests[0].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await selecting;
+    assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+  });
+}
+
+for (const olderFirst of [true, false]) {
+  test(`auth during speech interruption preserves latest turn ownership (older finishes ${olderFirst ? 'first' : 'last'})`, async () => {
+    const h = authHarness(); h.c.voice.mic = true;
+    h.c.checkAuthAndEnableInput();
+    h.node("chatInput").value = "first typed question";
+    const first = h.c.sendChatMessage(); await settle();
+    const speech = h.start(); speech.resolve(response({ ok: true, text: "spoken follow up" })); await settle();
+    assert.equal(h.requests[3].url, "/chat", "speech deliberately bypasses typed turn's lock");
+    assert.equal(JSON.parse(h.requests[3].init.body).message, "spoken follow up");
+    answerAuth(h.requests[0], "success"); await settle();
+    assert.equal(h.node("chatSend").disabled, true);
+    if (olderFirst) {
+      h.requests[1].resolve(response({ ok: true, reply: "old typed reply" })); await first;
+      assert.equal(h.node("chatSend").disabled, true, "old finally cannot unlock the newer speech turn");
+      h.requests[3].resolve(response({ ok: true, reply: "latest spoken reply" })); await settle();
+    } else {
+      h.requests[3].resolve(response({ ok: true, reply: "latest spoken reply" })); await settle();
+      assert.equal(h.node("chatSend").disabled, false, "latest completion is not held by an older draining turn");
+      h.node("chatInput").value = "newer typed turn";
+      const next = h.c.sendChatMessage(); await settle();
+      assert.equal(h.requests[4].url, "/chat");
+      h.requests[1].resolve(response({ ok: true, reply: "old typed reply" })); await first;
+      assert.equal(h.node("chatSend").disabled, true, "old finally cannot release a third turn");
+      h.requests[4].resolve(response({ ok: true, reply: "newest typed reply" })); await next;
+    }
+    assert.equal(h.c.voice.mic, true); assert.equal(h.c.voice.sending, false);
+    assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+  });
+}
+
+
+test("auth turn ownership: Stop before the resolved ensure continuation leaves no orphaned turn", async () => {
+  const h = authHarness(); h.c.voice.mic = true;
+  const request = h.c.beginSpeechRequest(); h.c.voice.sending = true;
+  h.node("chatInput").value = "cancelled speech";
+  const sending = h.c.sendChatMessage(undefined, request);
+  h.stop(); await sending;
+  assert.ok(!h.c.chatNavigation.turn, "canceled speech never acquires turn ownership");
+  assert.equal(h.requests.length, 0);
+  h.node("chatInput").value = "typed retry";
+  const retry = h.c.sendChatMessage(); await settle();
+  assert.equal(h.requests.length, 1); assert.equal(h.requests[0].url, "/chat");
+  h.requests[0].resolve(response({ ok: true, reply: "retry reply" })); await retry;
+});
+
+for (const outcome of ["Stop", "error", "empty"]) {
+  test(`auth success during ASR preserves usable composer after ${outcome}`, async () => {
+    const h = authHarness(); h.c.voice.mic = true; h.c.checkAuthAndEnableInput();
+    const asr = h.start();
+    assert.equal(h.c.voice.sending, true);
+    answerAuth(h.requests[0], "success"); await settle();
+    assert.equal(h.node("chatInput").disabled, false, "ASR is not a chat-turn lock");
+    if (outcome === "Stop") { h.stop(); asr.resolve(response()); }
+    else if (outcome === "error") asr.reject(new Error("synthetic ASR error"));
+    else asr.resolve(response({ ok: true, text: "" }));
+    await settle();
+    assert.equal(h.c.voice.sending, false);
+    assert.equal(h.node("chatInput").disabled, false); assert.equal(h.node("chatSend").disabled, false);
+    h.node("chatInput").value = "typed retry";
+    const retry = h.c.sendChatMessage(); await settle();
+    assert.equal(h.requests[2].url, "/chat");
+    h.requests[2].resolve(response({ ok: true, reply: "retry reply" })); await retry;
+  });
+}
+
+// Real sender, renderer and stream functions against a small connected DOM.
+// Unlike the general speech fixture, innerHTML detaches old children and an
+// absent spinner ID really returns null. This reproduces the native error UI.
+function thinkingHarness({ lane = "buffered" } = {}) {
+  const h = authHarness();
+  const all = [], intervals = new Map(); let nextInterval = 1;
+  function domElement() {
+    const el = element(); el.children = []; el.parentNode = null;
+    el.removeChild = child => {
+      const i = el.children.indexOf(child);
+      if (i < 0) throw new Error("not a child");
+      el.children.splice(i, 1); child.parentNode = null; return child;
+    };
+    el.remove = () => { if (el.parentNode) el.parentNode.removeChild(el); };
+    el.appendChild = child => {
+      child.remove(); el.children.push(child); child.parentNode = el; return child;
+    };
+    el.insertBefore = (child, next) => {
+      child.remove(); const i = next ? el.children.indexOf(next) : el.children.length;
+      assert.ok(i >= 0); el.children.splice(i, 0, child); child.parentNode = el; return child;
+    };
+    Object.defineProperty(el, "firstChild", { get: () => el.children[0] || null });
+    let html = "";
+    Object.defineProperty(el, "innerHTML", {
+      get: () => html,
+      set(value) {
+        for (const child of [...el.children]) el.removeChild(child);
+        html = value;
+        // Only the four fixed indicator IDs need child-node lookup here.
+        for (const match of String(value).matchAll(/id="([^"]+)"/g)) {
+          const child = domElement(); child.id = match[1]; el.appendChild(child);
+        }
+      },
+    });
+    el.querySelectorAll = () => [];
+    all.push(el); return el;
+  }
+  const container = domElement(); container.id = "chatMessages";
+  function connected(el) { return el === container || !!el.parentNode && connected(el.parentNode); }
+  const busyIds = new Set(["thinkingIndicator", "thinkingElapsed", "bzStageLabel", "bzStageBar"]);
+  const thinking = () => all.filter(el => el.id === "thinkingIndicator" && connected(el));
+  const streaming = () => all.filter(el => /(?:^|\s)streaming(?:\s|$)/.test(el.className || "") && connected(el));
+  h.c.document.createElement = domElement;
+  h.c.document.getElementById = id => id === "chatMessages" ? container : busyIds.has(id)
+    ? all.find(el => el.id === id && connected(el)) || null : h.node(id);
+  h.c.document.querySelectorAll = selector => {
+    assert.equal(selector, "#thinkingIndicator, #chatMessages .streaming");
+    return [...thinking(), ...streaming()];
+  };
+  h.c.setInterval = callback => { const id = nextInterval++; intervals.set(id, callback); return id; };
+  h.c.clearInterval = id => intervals.delete(id);
+  h.c.shouldOfferWork = () => false;
+  runInNewContext(fn("renderChatMessages"), h.c);
+  if (lane !== "buffered") h.c.ReadableStream = function () {};
+  h.c.voice.mic = lane === "voice";
+  return { ...h, container, thinking, streaming, intervals };
+}
+async function startThinking(h, text = "synthetic question") {
+  h.node("chatInput").value = text;
+  const sending = h.c.sendChatMessage(); await settle();
+  assert.equal(h.requests.at(-1).url, "/chat");
+  assert.equal(h.thinking().length, 1, "live turn has a real attached indicator");
+  assert.equal(h.node("chatSend").disabled, true);
+  return { sending, request: h.requests.at(-1), indicator: h.thinking()[0] };
+}
+function assertTurnSettled(h) {
+  assert.equal(h.thinking().length, 0, "finished turn leaves no thinking indicator");
+  assert.equal(h.streaming().length, 0, "finished turn leaves no in-progress partial bubble");
+  assert.equal(h.intervals.size, 0, "elapsed clock has stopped");
+  assert.ok(!h.c.chatNavigation.turn);
+  assert.equal(h.node("chatInput").disabled, false);
+  assert.equal(h.node("chatSend").disabled, false);
+}
+function streamFixture(request) {
+  const reads = []; let cancelled = 0;
+  request.resolve({ ok: true, headers: new Headers({ "content-type": "text/event-stream" }), body: {
+    getReader: () => ({ read: () => { const next = deferred(); reads.push(next); return next.promise; },
+      cancel: async () => { cancelled++; } }),
+  } });
+  return { reads, get cancelled() { return cancelled; },
+    frame(event, data) { reads.at(-1).resolve({ done: false, value: new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`) }); },
+  };
+}
+for (const outcome of ["JSON parse", "transport", "timeout", "abort"]) {
+  test(`thinking cleanup: buffered ${outcome} releases its indicator and permits retry`, async () => {
+    const h = thinkingHarness(); const first = await startThinking(h);
+    if (outcome === "JSON parse") {
+      first.request.resolve({ ok: true, status: 200, json: async () => { throw new SyntaxError("synthetic bad JSON"); } });
+    } else {
+      const error = new Error("synthetic failed request");
+      error.name = outcome === "timeout" ? "TimeoutError" : outcome === "abort" ? "AbortError" : "TypeError";
+      first.request.reject(error); await settle();
+      assert.equal(h.requests.length, 2, "buffered transport retry remains bounded");
+      assert.equal(h.requests[1].init.body, h.requests[0].init.body, "retry keeps the same attempt ID");
+      h.requests[1].reject(error);
+    }
+    await first.sending;
+    assert.match(h.node("chatError").textContent, outcome === "timeout" ? /too long/ : /Couldn't reach/);
+    assertTurnSettled(h);
+    const retry = await startThinking(h, "retry after error");
+    retry.request.resolve(response({ ok: true, reply: "synthetic retry reply" })); await retry.sending;
+    assertTurnSettled(h);
+  });
+}
+for (const lane of ["text", "voice"]) {
+  for (const outcome of ["SSE error", "reader rejection", "reader abort", "missing final reply"]) {
+    test(`thinking cleanup: ${lane} ${outcome} removes spinner and its partial stream`, async () => {
+      const h = thinkingHarness({ lane }); const first = await startThinking(h);
+      const stream = streamFixture(first.request); await settle();
+      stream.frame("text", { t: "partial synthetic text" }); await settle();
+      assert.equal(h.streaming().length, 1, "actual stream function paints its partial bubble");
+      if (outcome === "SSE error") stream.frame("error", { error: "synthetic stream error" });
+      else if (outcome === "missing final reply") stream.reads.at(-1).resolve({ done: true });
+      else {
+        const error = new Error("synthetic reader failure");
+        if (outcome === "reader abort") error.name = "AbortError";
+        stream.reads.at(-1).reject(error);
+      }
+      await first.sending;
+      assert.match(h.node("chatError").textContent, /Couldn't reach/);
+      assert.equal(h.streaming().length, 0, "failed stream removes its unfinished partial bubble");
+      assertTurnSettled(h);
+    });
+  }
+  test(`thinking cleanup: successful ${lane} stream remains rendered as a completed reply`, async () => {
+    const h = thinkingHarness({ lane }); const first = await startThinking(h);
+    const stream = streamFixture(first.request); await settle();
+    stream.frame("text", { t: "partial text" }); await settle();
+    stream.frame("done", { ok: true, reply: "complete reply" }); await settle();
+    stream.reads.at(-1).resolve({ done: true }); await first.sending;
+    assertTurnSettled(h);
+    assert.match(h.container.innerHTML, /complete reply/);
+  });
+  for (const outcome of ["late chunk", "late rejection"]) {
+    test(`thinking cleanup: ${lane} selection cancellation and ${outcome} cannot remove a newer spinner`, async () => {
+      const h = thinkingHarness({ lane }); const first = await startThinking(h);
+      const stream = streamFixture(first.request); await settle();
+      stream.frame("text", { t: "old partial" }); await settle();
+      const selecting = h.c.startNewChat();
+      assert.equal(h.thinking().length, 0, "selection removes old busy UI at intent");
+      assert.equal(h.streaming().length, 0);
+      h.requests.at(-1).resolve(response({ error: "synthetic selection failed" }, false)); await selecting;
+      const next = await startThinking(h, "new question");
+      if (outcome === "late chunk") stream.frame("text", { t: "old late text" });
+      else stream.reads.at(-1).reject(new Error("old delayed failure"));
+      await first.sending;
+      assert.deepEqual(h.thinking(), [next.indicator], "older cleanup touches only its captured node");
+      assert.equal(h.node("chatSend").disabled, true);
+      assert.equal(h.intervals.size, 1, "new elapsed clock remains live");
+      if (outcome === "late chunk") assert.equal(stream.cancelled, 1);
+      const current = streamFixture(next.request); await settle();
+      current.frame("done", { ok: true, reply: "current reply" }); await settle();
+      current.reads.at(-1).resolve({ done: true }); await next.sending;
+      assertTurnSettled(h);
+    });
+  }
+}
+for (const outcome of ["JSON parse", "transport"]) {
+  test(`thinking cleanup: interrupted older ${outcome} cannot remove the newer speech turn's spinner`, async () => {
+    const h = thinkingHarness(); const first = await startThinking(h);
+    h.c.voice.mic = true;
+    const speech = h.start(); speech.resolve(response({ ok: true, text: "spoken follow up" })); await settle();
+    assert.equal(h.requests.at(-1).url, "/chat");
+    const next = { request: h.requests.at(-1), indicator: h.thinking()[0] };
+    assert.notEqual(next.indicator, first.indicator, "real render detaches the previous indicator");
+    if (outcome === "JSON parse") first.request.resolve({ json: async () => { throw new SyntaxError("old invalid JSON"); } });
+    else {
+      first.request.reject(new Error("old transport")); await settle();
+      h.requests.at(-1).reject(new Error("old retry transport"));
+    }
+    await first.sending;
+    assert.deepEqual(h.thinking(), [next.indicator]);
+    assert.equal(h.node("chatSend").disabled, true);
+    assert.equal(h.intervals.size, 1);
+    next.request.resolve(response({ ok: true, reply: "new speech reply" })); await settle();
+    assertTurnSettled(h);
+  });
+}
+for (const outcome of ["SSE error", "reader rejection"]) {
+  test(`thinking cleanup: interrupted older ${outcome} preserves the newer stream's partial bubble and spinner`, async () => {
+    const h = thinkingHarness({ lane: "text" }); const first = await startThinking(h);
+    const oldStream = streamFixture(first.request); await settle();
+    oldStream.frame("text", { t: "old partial" }); await settle();
+    h.c.voice.mic = true;
+    const speech = h.start(); speech.resolve(response({ ok: true, text: "spoken follow up" })); await settle();
+    const currentIndicator = h.thinking()[0];
+    assert.notEqual(currentIndicator, first.indicator);
+    const currentStream = streamFixture(h.requests.at(-1)); await settle();
+    currentStream.frame("text", { t: "new partial" }); await settle();
+    const currentBubble = h.streaming()[0];
+    assert.equal(h.streaming().length, 1);
+    if (outcome === "SSE error") oldStream.frame("error", { error: "old failed stream" });
+    else oldStream.reads.at(-1).reject(new Error("old failed reader"));
+    await first.sending;
+    assert.deepEqual(h.thinking(), [currentIndicator]);
+    assert.deepEqual(h.streaming(), [currentBubble]);
+    assert.equal(h.node("chatSend").disabled, true);
+    assert.equal(h.intervals.size, 1);
+    currentStream.frame("done", { ok: true, reply: "current speech reply" }); await settle();
+    currentStream.reads.at(-1).resolve({ done: true }); await settle();
+    assertTurnSettled(h);
+  });
+}
+test("thinking cleanup: voice Stop keeps an accepted turn pending until its stream ends", async () => {
+  const h = thinkingHarness({ lane: "voice" }); const first = await startThinking(h);
+  const stream = streamFixture(first.request); await settle();
+  stream.frame("text", { t: "pending reply" }); await settle();
+  h.stop();
+  assert.equal(h.c.voice.mic, false);
+  assert.deepEqual(h.thinking(), [first.indicator], "Stop ends Listen, not an accepted chat request");
+  assert.equal(h.node("chatSend").disabled, true);
+  stream.reads.at(-1).reject(Object.assign(new Error("stream aborted"), { name: "AbortError" }));
+  await first.sending;
+  assertTurnSettled(h);
+});

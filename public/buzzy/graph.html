@@ -57,7 +57,7 @@
     </a>
     <nav id="bzNav">
       <a href="/buzzy/talk" data-nav="talk">Talk</a>
-      <a href="/buzzy/library" data-nav="library" target="_blank" rel="noopener">Library</a>
+      <a href="/buzzy/library" data-nav="library">Library</a>
       <a href="/buzzy/capabilities" data-nav="capabilities">Capabilities</a>
       <a href="/buzzy/memory" data-nav="memory">Memory</a>
       <a href="/buzzy/experts" data-nav="experts">Experts</a>
@@ -130,13 +130,18 @@
 
   <script>
   (function () {
-    var state = { graphId: null, nodes: [], edges: [], sel: null, linkFrom: null, seq: 0 };
+    var state = { graphId: null, description: null, nodes: [], edges: [], sel: null, linkFrom: null, seq: 0 };
     var canvas = document.getElementById("canvas");
     var svg = document.getElementById("edges");
     var statusEl = document.getElementById("status");
 
     function say(msg, cls) { statusEl.textContent = msg; statusEl.className = "hint " + (cls || ""); }
-    function rid() { return "n" + (++state.seq); }
+    function rid() {
+      // Reopened graphs can have gaps or custom keys; node count is not an ID.
+      var key;
+      do { key = "n" + (++state.seq); } while (byId(key));
+      return key;
+    }
     function byId(id) { for (var i = 0; i < state.nodes.length; i++) if (state.nodes[i].key === id) return state.nodes[i]; return null; }
 
     // ── config that differs per kind ─────────────────────────────────────
@@ -338,9 +343,11 @@
 
     // ── save / load ──────────────────────────────────────────────────────
     document.getElementById("save").addEventListener("click", function () {
+      var owner = state;
       var body = {
         id: state.graphId || undefined,
         title: (document.getElementById("title").value || "Untitled workflow").trim(),
+        description: state.description,
         nodes: state.nodes.map(function (n) { return { key: n.key, kind: n.kind, title: n.title, config: n.config, x: n.x, y: n.y }; }),
         edges: state.edges.map(function (e) { return { from: e.from, to: e.to, kind: e.kind }; })
       };
@@ -349,16 +356,17 @@
       fetch("/api/buzzy/graphs", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
         .then(function (r) { return r.json(); })
         .then(function (j) {
+          if (state !== owner) return;
           if (!j.ok) { say(j.error || "Save failed.", "bad"); return; }
           state.graphId = j.id;
           say("Saved · version " + j.version, "ok");
           loadList();
         })
-        .catch(function () { say("Save failed — check the connection.", "bad"); });
+        .catch(function () { if (state === owner) say("Save failed — check the connection.", "bad"); });
     });
 
     document.getElementById("new").addEventListener("click", function () {
-      state = { graphId: null, nodes: [], edges: [], sel: null, linkFrom: null, seq: 0 };
+      state = { graphId: null, description: null, nodes: [], edges: [], sel: null, linkFrom: null, seq: 0 };
       document.getElementById("title").value = "";
       draw(); inspect(); say("");
     });
@@ -434,22 +442,31 @@
     }
 
     function open(id) {
+      var request = {};
+      state.openRequest = request;
       fetch("/api/buzzy/graphs/" + encodeURIComponent(id), { credentials: "same-origin" })
         .then(function (r) { return r.json(); })
         .then(function (j) {
-          if (!j.ok) { say(j.error || "Could not open.", "bad"); return; }
+          if (state.openRequest !== request) return;
+          if (!j || !j.ok) { say(j && j.error || "Could not open.", "bad"); return; }
           var g = j.graph;
-          state.graphId = g.id;
-          state.nodes = g.nodes.map(function (n) {
+          if (!g || g.id !== id || !Array.isArray(g.nodes) || !Array.isArray(g.edges) ||
+              (g.description !== null && typeof g.description !== "string")) {
+            say("Could not open this workflow.", "bad"); return;
+          }
+          var nodes = g.nodes.map(function (n) {
             return { key: n.key, kind: n.kind, title: n.title || n.key, config: n.config || {}, x: n.x || 30, y: n.y || 30 };
           });
-          state.seq = state.nodes.length;
-          state.edges = g.edges.map(function (e) { return { from: e.from, to: e.to, kind: e.kind }; });
+          var edges = g.edges.map(function (e) { return { from: e.from, to: e.to, kind: e.kind }; });
+          // Commit loaded identity and its metadata together; old Save replies
+          // still belong to the previous canvas, not this selected workflow.
+          state = { graphId: g.id, description: g.description,
+            nodes: nodes, edges: edges, sel: null, linkFrom: null, seq: nodes.length, openRequest: request };
           document.getElementById("title").value = g.title;
-          state.sel = null;
           draw(); inspect();
           say("Opened v" + g.version, "ok");
-        });
+        })
+        .catch(function () { if (state.openRequest === request) say("Could not open — check the connection.", "bad"); });
     }
 
     // Session check: the resolver and the graph API both need a signed-in owner.
