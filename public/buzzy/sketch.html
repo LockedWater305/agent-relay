@@ -1942,21 +1942,50 @@
         a.href = url; a.download = "sketch-" + Date.now() + ".jpg"; a.click();
       });
     });
+    var libraryFileBusy = false;
+    var lastLibraryFile = null;
     document.getElementById("cvLibrary").addEventListener("click", function () {
+      if (libraryFileBusy) return;
+      var button = document.getElementById("cvLibrary");
       var note = document.getElementById("cvStatus");
+      libraryFileBusy = true;
+      button.disabled = true;
       note.textContent = "Filing the board…";
       ensureJob().then(function (id) {
         return renderBoard(1, "image/png").then(function (dataUrl) {
+          // A link failure is not an image failure. Repeated clicks for the same
+          // board must not upload another copy just to retry that failed link.
+          if (lastLibraryFile && lastLibraryFile.jobId === id && lastLibraryFile.dataUrl === dataUrl) {
+            return lastLibraryFile.response;
+          }
           return fetch("/api/buzzy/art", {
             method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" },
             body: JSON.stringify({ action: "file", jobId: id, dataUrl: dataUrl, name: "board-" + Date.now() + ".png" }),
-          }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d, status: r.status }; }); });
+          }).then(function (r) { return r.json().then(function (d) {
+            var response = { ok: r.ok, d: d, status: r.status };
+            if (r.ok && d.ok && d.image && d.image.id) {
+              lastLibraryFile = { jobId: id, dataUrl: dataUrl, response: response };
+            }
+            return response;
+          }); });
         });
       }).then(function (res) {
-        if (!res.ok) { note.textContent = res.d.error || "Could not file it."; setStatus(res.d.error || "Could not file the board."); return; }
-        note.textContent = "Saved to the Library as " + res.d.image.name + ".";
-        setStatus("Board filed to the Library.");
-      }).catch(function (e) { note.textContent = "Failed: " + e.message; });
+        if (!res.ok || !res.d.ok || !res.d.image) {
+          var error = res.d.error || "Could not confirm the save. Check your Library before saving again.";
+          note.textContent = error; setStatus(error); return;
+        }
+        var message = res.d.projectLinked === false
+          ? (res.d.message || "The image is saved in your Library, but its project link is incomplete. Do not save it again to retry the link.")
+          : "Saved to the Library as " + res.d.image.name + ".";
+        note.textContent = message;
+        setStatus(message);
+      }).catch(function () {
+        var message = "Could not confirm the save. Check your Library before saving again; the image may already be saved.";
+        note.textContent = message; setStatus(message);
+      }).finally(function () {
+        libraryFileBusy = false;
+        button.disabled = false;
+      });
     });
 
     function setStatus(t) { statusEl.textContent = t; }

@@ -127,17 +127,34 @@ export default defineEventHandler(async (event) => {
       ? body.name.trim().replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80)
       : `sketch-${Date.now()}.${ext}`;
     const stored = await storeImage(user.id, bytes, name, parsed[1] as string);
+    let assetLinked = false;
+    let artifactLinked = false;
     try {
-      await sql`UPDATE buzzy_assets SET job_id = ${jobId} WHERE user_id = ${user.id} AND id = ${stored.id}`;
-      await sql`
-        UPDATE buzzy_jobs SET
-          data = jsonb_set(COALESCE(data, '{}'::jsonb), '{artifacts}', COALESCE(data->'artifacts', '[]'::jsonb) || ${JSON.stringify([
-            { kind: "image", id: String(stored.id), url: `/api/buzzy/assets/${stored.id}`, name, bytes: stored.bytes, type: parsed[1] },
-          ])}::jsonb, true),
-          updated_at = now()
-        WHERE id = ${jobId} AND user_id = ${user.id}`;
-    } catch { /* the file is stored either way */ }
-    return json(200, { ok: true, image: { id: String(stored.id), url: `/api/buzzy/assets/${stored.id}`, name, bytes: stored.bytes, type: parsed[1] } });
+      const linked = await sql`UPDATE buzzy_assets SET job_id = ${jobId} WHERE user_id = ${user.id} AND id = ${stored.id} RETURNING id`;
+      assetLinked = linked.length > 0;
+      if (assetLinked) {
+        const recorded = await sql`
+          UPDATE buzzy_jobs SET
+            data = jsonb_set(COALESCE(data, '{}'::jsonb), '{artifacts}', COALESCE(data->'artifacts', '[]'::jsonb) || ${JSON.stringify([
+              { kind: "image", id: String(stored.id), url: `/api/buzzy/assets/${stored.id}`, name, bytes: stored.bytes, type: parsed[1] },
+            ])}::jsonb, true),
+            updated_at = now()
+          WHERE id = ${jobId} AND user_id = ${user.id} RETURNING id`;
+        artifactLinked = recorded.length > 0;
+      }
+    } catch { /* Preserve the saved image; report incomplete linking below. */ }
+    const projectLinked = assetLinked && artifactLinked;
+    return json(200, {
+      ok: true,
+      saved: true,
+      projectLinked,
+      linkage: { assetLinked, artifactLinked },
+      code: projectLinked ? "saved" : "saved_link_incomplete",
+      message: projectLinked
+        ? "Saved to the Library and linked to this project."
+        : "The image is saved in your Library, but its project link is incomplete. It may not appear under this project or company. Do not save it again to retry the link; that would create another copy.",
+      image: { id: String(stored.id), url: `/api/buzzy/assets/${stored.id}`, name, bytes: stored.bytes, type: parsed[1] },
+    });
   }
 
   // Region edit. "Make the coat red" on a finished picture used to mean re-rolling
