@@ -1380,6 +1380,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
     function goDocs() {
       setPhase("Library");
+      var savedFirst = Boolean(window.beezilla && window.BeeZillaLibraryVault);
       var syncMarkup = window.BeeZillaLibraryVault ? "<p id='librarySyncStatus' class='muted' role='status'></p>" : "";
       // Sync every job that has content so folders never look stale.
       catalog.jobs.forEach(syncJobDocs);
@@ -1478,7 +1479,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           }).length
         : 0;
       app.innerHTML =
-        "<img class='mascot-sm' src='/buzzy/brand/revision6_expressions_16-smiling.png' alt='BeeZilla' />" +
+        (savedFirst ? "" : "<img class='mascot-sm' src='/buzzy/brand/revision6_expressions_16-smiling.png' alt='BeeZilla' />") +
         "<h1>" + (co ? "Library · " + escHtml(co.name) : "Library") + "</h1>" + syncMarkup +
         (recovered ? "<p class='muted'>" + recovered + " recovered historical folder(s) are not assigned to this company. <button id='showRecoveredFolders' class='secondary'>" + (showRecoveredFolders ? "Hide recovered history" : "Show recovered history") + "</button></p>" : "") +
         "<p class='muted'>" + (co
@@ -1489,7 +1490,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         // Artifacts first: a track or an image is a outcome you can use right here,
         // while a document is a thing you have to open. The shelf used to be a file
         // list with no player, so a generated track could only be downloaded blind.
+        (savedFirst ? "<p class='muted'>Saved files across all companies, not filtered by the selected company. The newest view shows up to 60 files. Saved does not mean finished or approved. The collapsed session organizer below preserves the existing path-ordered list of up to 200 files, which may overlap this view.</p>" : "") +
         "<div id='artifactShelf' class='artifact-shelf'><p class='muted'>Loading artifacts…</p></div>" +
+        (savedFirst ? "<details><summary>Saved documents · " + folders.length + " folders</summary>" : "") +
         "<div class='docs-folders'>" +
         (folders.length
           ? folders.map((f) =>
@@ -1500,7 +1503,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
                   " · latest " + new Date(f.docs[0].updatedAt || f.docs[0].createdAt).toLocaleDateString() + "</div>" +
               "</div>").join("")
           : "<p class='muted'>No documents yet. Documents appear here as your jobs produce drafts and deliverables.</p>") +
-        "</div>";
+        "</div>" + (savedFirst ? "</details>" : "");
       app.querySelectorAll(".docfolder[data-folder]").forEach((el) => {
         el.onclick = () => { docsOpenFolder = el.getAttribute("data-folder"); goDocs(); };
       });
@@ -1543,6 +1546,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     function loadArtifactShelf() {
       var host = document.getElementById("artifactShelf");
       if (!host || !host.isConnected || !/^\/buzzy\/library(?:\.html)?\/?$/.test(window.location.pathname)) return;
+      var savedFirst = Boolean(window.beezilla && window.BeeZillaLibraryVault);
       var request = {};
       host.__bzArtifactRequest = request;
       // The shell can move the URL before it replaces the mounted DOM. A
@@ -1551,7 +1555,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       function current() {
         return host.isConnected && document.getElementById("artifactShelf") === host && host.__bzArtifactRequest === request;
       }
-      return fetch("/api/buzzy/assets?limit=60", { credentials: "same-origin", redirect: "error", headers: { Accept: "application/json" } })
+      return fetch("/api/buzzy/assets?limit=60" + (savedFirst ? "&order=newest" : ""), { credentials: "same-origin", redirect: "error", headers: { Accept: "application/json" } })
         .then(function (r) {
           if (!current()) return null;
           if (!r.ok) throw new Error("Asset list unavailable");
@@ -1564,13 +1568,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           if (!Array.isArray(items)) throw new Error("Invalid asset list");
           var assetUrls = items.map(artifactAssetUrl);
           if (!items.length) {
-            host.innerHTML = "";
+            host.innerHTML = savedFirst ? "<p class='muted'>No saved files yet. Your saved documents remain below.</p>" : "";
             return;
           }
           var audioCount = items.filter(function (i) { return artifactKind(i) === "audio"; }).length;
           var total = items.reduce(function (a, i) { return a + (Number(i.bytes) || 0); }, 0);
           host.innerHTML =
-            "<div class='shelf-head'><span class='shelf-title'>Artifacts</span>" +
+            "<div class='shelf-head'><span class='shelf-title'>" + (savedFirst ? "Saved files · newest first" : "Artifacts") + "</span>" +
             "<span class='shelf-meta'>" + items.length + " file" + (items.length === 1 ? "" : "s") +
             (audioCount ? " · " + audioCount + " audio" : "") + " · " + humanBytes(total) + "</span></div>" +
             "<div class='shelf-grid'>" +
@@ -1608,7 +1612,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       holder.className = "docs-folders";
       holder.id = "serverFiles";
       holder.innerHTML = "<p class='muted'>Looking for files your sessions produced…</p>";
-      app.appendChild(holder);
+      if (window.beezilla && window.BeeZillaLibraryVault) {
+        const organizer = document.createElement("details");
+        organizer.id = "sessionFileOrganizer";
+        organizer.innerHTML = "<summary>More files from sessions · existing organizer</summary><p class='muted'>All companies · up to 200 files in path order. Includes files shown above.</p>";
+        organizer.appendChild(holder);
+        app.appendChild(organizer);
+      } else {
+        app.appendChild(holder);
+      }
 
       fetch("/api/buzzy/assets", { headers: { Accept: "application/json" }, credentials: "same-origin" })
         .then((r) => (r.ok ? r.json() : null))

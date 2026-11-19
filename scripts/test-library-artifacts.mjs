@@ -18,7 +18,7 @@ export function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{
 const json=(data,status=200)=>Response.json(data,{status});
 const row=(id=11,extra={})=>({id,filename:'Quarterly report.md',content_type:'text/markdown',bytes:42,created_at:'2026-11-16T00:00:00Z',...extra});
 
-export async function backend(t){
+export async function backend(t,options={}){
  const db=new DatabaseSync(':memory:'),queries=[],requests=[];let user='owner',forbidden=0;
  db.exec(`CREATE TABLE buzzy_jobs(id TEXT PRIMARY KEY,user_id TEXT,title TEXT);
  CREATE TABLE buzzy_assets(id INTEGER PRIMARY KEY,user_id TEXT,job_id TEXT,filename TEXT,rel_path TEXT,content_type TEXT,bytes INTEGER,created_at TEXT,body BLOB);
@@ -38,7 +38,7 @@ export async function backend(t){
  const before=snapshot();
  const sql=async(strings,...params)=>{let text=strings[0];params.forEach((_,i)=>text+='$'+(i+1)+strings[i+1]);queries.push({text,params:plain(params)});assert.match(text,/^\s*SELECT/,'read-only asset workflow');return db.prepare(text.replace(/::text/g,'').replace(/\$(\d+)/g,':p$1')).all(Object.fromEntries(params.map((x,i)=>['p'+(i+1),x])));};
  const ctx=vm.createContext({Headers,Buffer,Uint8Array,URLSearchParams});
- const deps={h3:{defineEventHandler:f=>f,getMethod:e=>e.req.method,getHeader:(e,k)=>e.req.headers.get(k),setResponseStatus:(e,n)=>e.status=n,setResponseHeader:(e,k,v)=>e.headers.set(k,v)},'@/lib/auth/verify.server':{getSessionUserFromHeaders:async()=>user?{id:user}:null},'@/lib/db':{getSql:async()=>sql},'./paper':{cleanFilename}};
+ const deps={'../runtime':{isLocalRuntime:()=>Boolean(options.local)},h3:{defineEventHandler:f=>f,getMethod:e=>e.req.method,getHeader:(e,k)=>e.req.headers.get(k),setResponseStatus:(e,n)=>e.status=n,setResponseHeader:(e,k,v)=>e.headers.set(k,v)},'@/lib/auth/verify.server':{getSessionUserFromHeaders:async()=>user?{id:user}:null},'@/lib/db':{getSql:async()=>sql},'./paper':{cleanFilename}};
  const source=stripTypeScriptTypes(read('src/lib/buzzy/chat.nitro.ts'));
  const module=new vm.SourceTextModule(source,{context:ctx});
  await module.link(id=>{const declaration=[...source.matchAll(/import\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]/g)].find(m=>m[2]===id);assert.ok(declaration,id);const names=declaration[1].split(',').map(x=>x.trim()).filter(Boolean);return new vm.SyntheticModule(names,function(){for(const name of names)this.setExport(name,deps[id]?.[name]??(()=>{forbidden++;throw Error('Forbidden dependency '+id+'.'+name);}));},{context:ctx});});
@@ -67,6 +67,7 @@ export function ui(fetcher,options={}){
  document.getElementById=id=>{function find(node){if(node.id===id)return node;for(const c of node.children){const result=find(c);if(result)return result;}return null;}return find(document.body);};
  const location={pathname:'/buzzy/library',search:'',...options.location};
  const window={location,addEventListener(name,fn,opts){if(!events.has(name))events.set(name,[]);events.get(name).push({fn,once:opts?.once});},removeEventListener(name,fn){events.set(name,(events.get(name)||[]).filter(x=>x.fn!==fn));}};
+ if(options.local){window.beezilla={};window.BeeZillaLibraryVault={};}
  const fetch=async(url,init)=>{calls.push({url,init});return url.includes('?limit=60')?fetcher(url,init):(options.otherFetch?options.otherFetch(url,init):json({items:[]}));};
  const ctx=vm.createContext({document,window,location,fetch,console,URLSearchParams,catalog:{jobs:[]},state:{screen:'docs'},docsOpenFolder:null,docsOpenDoc:null,docsOpenFromLink:null,showRecoveredFolders:false,setPhase(){},syncJobDocs(){},loadDocs:()=>({}),paintLibrarySync(){},render(){app.innerHTML='Jobs';}});
  const source=read('public/buzzy/library.html'),names=['escHtml','escAttr','goDocs','artifactKind','humanBytes','loadArtifactShelf','renderServerFiles'];
@@ -115,3 +116,43 @@ test('query-distinct navigation that replaces the grid invalidates its pending r
 test('a retired Library closure does not begin a new shelf request on another route',async()=>{const u=ui(async()=>json({items:[row()]}));await tick();u.navigate('/buzzy/talk');const count=u.calls.length;u.ctx.loadArtifactShelf();await tick();assert.equal(u.calls.length,count);});
 
 test('same mounted Library remains usable after a temporary shell URL and Back',async()=>{const gate=deferred();const u=ui(async()=>gate.promise);const host=u.shelf();u.navigate('/buzzy/talk');gate.resolve(json({items:[row()]}));await tick();u.navigate('/buzzy/library');u.emit('popstate');await tick();assert.equal(u.shelf(),host);assert.deepEqual(urls(host.innerHTML),['/api/buzzy/assets/11']);});
+
+
+test('local saved-file view is newest-first with collapsed legacy organizer and unchanged vault',async t=>{
+ const h=await backend(t,{local:true}),u=ui(h.fetch,{local:true,otherFetch:h.fetch});await tick();
+ assert.deepEqual(h.requests.map(r=>r.url),['/api/buzzy/assets','/api/buzzy/assets?limit=60&order=newest']);
+ assert.deepEqual(urls(u.shelf().innerHTML),[14,13,12,11].map(id=>'/api/buzzy/assets/'+id));
+ assert.match(u.shelf().innerHTML,/Saved files · newest first/);
+ assert.match(u.app.innerHTML,/Saved files across all companies, not filtered by the selected company/);
+ assert.match(u.app.innerHTML,/<details><summary>Saved documents/);
+ assert.match(u.app.innerHTML,/librarySyncStatus/);
+ assert.doesNotMatch(u.app.innerHTML,/mascot-sm/);
+ assert.equal(u.document.getElementById('serverFiles').parentNode.id,'sessionFileOrganizer');
+ assert.match(u.document.getElementById('sessionFileOrganizer').innerHTML,/up to 200 files in path order/);
+ assert.doesNotMatch(u.document.getElementById('sessionFileOrganizer').innerHTML,/<details[^>]*open/);
+ assert.doesNotMatch(u.shelf().innerHTML,/Keep working on it|Continue/,'no fabricated conversation action');
+});
+test('newest ordering only affects explicit local request, with limit applied after sorting',async t=>{
+ const local=await backend(t,{local:true});
+ const newest=await (await local.fetch('/api/buzzy/assets?limit=1&order=newest')).json();assert.equal(newest.items[0].id,14);
+ const original=await (await local.fetch('/api/buzzy/assets?limit=1')).json();assert.equal(original.items[0].id,11);
+ const cloud=await backend(t);const unchanged=await (await cloud.fetch('/api/buzzy/assets?limit=1&order=newest')).json();assert.equal(unchanged.items[0].id,11);
+});
+test('empty or failed local list retains saved document access and honest message',async()=>{
+ const empty=ui(async()=>json({items:[]}),{local:true});await tick();assert.match(empty.shelf().innerHTML,/No saved files yet/);assert.match(empty.app.innerHTML,/Saved documents/);assert.match(empty.app.innerHTML,/Saved files across all companies/);
+ const failed=ui(async()=>json({error:'synthetic'},500),{local:true});await tick();assert.match(failed.shelf().innerHTML,/could not be loaded/);assert.match(failed.app.innerHTML,/Saved documents/);assert.match(failed.app.innerHTML,/Saved files across all companies/);
+});
+
+test('older session file omitted from newest sixty remains accessible in collapsed organizer',async()=>{
+ const recent=Array.from({length:60},(_,i)=>row(i+101));
+ const older=row(9,{filename:'Older-session-file.png'});
+ const u=ui(async()=>json({items:recent}),{local:true,otherFetch:async()=>json({items:[older,...recent]})});await tick();
+ assert.equal(urls(u.shelf().innerHTML).length,60);
+ assert.ok(!urls(u.shelf().innerHTML).includes('/api/buzzy/assets/9'));
+ const holder=u.document.getElementById('serverFiles');
+ assert.equal(holder.parentNode.tagName,'details');
+ assert.ok(urls(holder.innerHTML).includes('/api/buzzy/assets/9'));
+ assert.match(holder.innerHTML,/Older-session-file.png/);
+ assert.match(u.app.innerHTML,/Saved documents/);
+ assert.match(u.app.innerHTML,/librarySyncStatus/);
+});

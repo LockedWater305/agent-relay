@@ -838,6 +838,7 @@ export default defineEventHandler(async (event) => {
     const prefix = (qs.get("prefix") || "").slice(0, 200);
     const want = Math.min(Math.max(Number(qs.get("limit") || 200), 1), 1000);
     const offset = Math.max(Number(qs.get("offset") || 0), 0);
+    const newest = qs.get("order") === "newest" && isLocalRuntime();
     const sql = await getSql();
     const totals = await sql<{ files: string; total_bytes: string }>`
       SELECT COUNT(*)::text AS files, COALESCE(SUM(bytes), 0)::text AS total_bytes
@@ -858,7 +859,9 @@ export default defineEventHandler(async (event) => {
       LEFT JOIN buzzy_jobs j ON j.id = a.job_id
       WHERE a.user_id = ${user.id}
         AND (${prefix} = '' OR a.rel_path LIKE ${prefix + "%"})
-      ORDER BY a.rel_path ASC
+      ORDER BY CASE WHEN ${newest ? 1 : 0} = 1 THEN a.created_at END DESC NULLS LAST,
+               CASE WHEN ${newest ? 1 : 0} = 1 THEN a.id END DESC NULLS LAST,
+               a.rel_path ASC
       LIMIT ${want} OFFSET ${offset}
     `;
     return {
