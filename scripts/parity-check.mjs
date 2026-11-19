@@ -101,8 +101,16 @@ function pageSetOf(root) {
   const file = join(root, "src/lib/buzzy/pages.nitro.ts");
   if (!existsSync(file)) return { declared: [], file: null };
   const src = readFileSync(file, "utf8");
-  const m = src.match(/const PAGES = new Set\(\[([^\]]*)\]\)/);
+  let m = src.match(/const PAGES = new Set(?:<string>)?\(\[([^\]]*)\]\)/);
+  // The desktop handler imports its static page list from page-alias.ts.
+  // Read only the known literal declaration; never execute repository source.
+  if (!m && /import\s*\{[^}]*\bBUZZY_PAGE_NAMES\b[^}]*\}\s*from\s*["']\.\/page-alias["']/.test(src) &&
+      /const PAGES = new Set(?:<string>)?\(BUZZY_PAGE_NAMES\)/.test(src)) {
+    const aliases = join(root, "src/lib/buzzy/page-alias.ts");
+    if (existsSync(aliases)) m = readFileSync(aliases, "utf8").match(/export const BUZZY_PAGE_NAMES = Object\.freeze\(\[([^\]]*)\] as const\)/);
+  }
   const declared = m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]).sort() : [];
+  if (!m) throw new Error(`Cannot statically read page declarations in ${file}; routing parity is unknown`);
   return { declared, file };
 }
 

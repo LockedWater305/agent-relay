@@ -214,7 +214,7 @@
         ],
         "pages": [
           "talk",
-          "index",
+          "library",
           "memory",
           "remember",
           "experts",
@@ -232,7 +232,7 @@
         ],
         "pages": [
           "talk",
-          "index",
+          "library",
           "memory",
           "remember",
           "experts",
@@ -244,7 +244,7 @@
           "graph"
         ]
       },
-      "note": "Same 12 pages, same #bzNav block, same absolute asset URLs as web \u2014 the desktop no longer carries its own per-page navs."
+      "note": "Source inventory only: library.html is the Library asset on both revisions; index.html is deliberately absent. This declaration does not establish identical navigation or Library behavior."
     },
     {
       "id": "library.documents",
@@ -257,7 +257,7 @@
           "src/lib/buzzy/paper.ts"
         ],
         "pages": [
-          "index"
+          "library"
         ],
         "routes": [
           "/api/buzzy/documents",
@@ -273,7 +273,7 @@
           "src/lib/buzzy/paper.ts"
         ],
         "pages": [
-          "index"
+          "library"
         ],
         "routes": [
           "/api/buzzy/documents",
@@ -283,7 +283,7 @@
           "/api/buzzy/review"
         ]
       },
-      "note": "/buzzy/library serves index.html on both surfaces."
+      "note": "Source inventory only: library.html is the Library asset on both revisions; index.html is deliberately absent. This declaration does not establish identical navigation or Library behavior."
     },
     {
       "id": "assets.shelf",
