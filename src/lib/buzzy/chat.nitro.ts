@@ -1456,7 +1456,11 @@ export default defineEventHandler(async (event) => {
       const accountMode = pm[0]?.mode;
       if (accountMode === "lockdown") privacy = "lockdown";
       else if (!privacy && (accountMode === "advocate" || accountMode === "open")) privacy = accountMode;
-    } catch { /* no table yet: the request's own value stands */ }
+    } catch {
+      // An unreadable policy is not permission to make outbound requests.
+      setResponseStatus(event, 503);
+      return { ok: false, code: "privacy_policy_unavailable", error: "Your privacy settings could not be verified. Please try again later." };
+    }
 
     // ── Plan + quota, before any provider call ───────────────────────────────
     // The web app calls the provider from OUR server, not through /api/inference,
@@ -2485,7 +2489,11 @@ export default defineEventHandler(async (event) => {
         setResponseStatus(event, 403);
         return { ok: false, error: "Reading web pages is off while privacy is set to Lockdown.", code: "lockdown" };
       }
-    } catch { /* no table yet: not in Lockdown */ }
+    } catch {
+      // An unreadable policy is not permission to make outbound requests.
+      setResponseStatus(event, 503);
+      return { ok: false, code: "privacy_policy_unavailable", error: "Your privacy settings could not be verified. Please try again later." };
+    }
     const url = (queryValue(fullPath, "url") ?? "").trim().slice(0, 2000);
     if (!url) {
       setResponseStatus(event, 400);
