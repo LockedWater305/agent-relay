@@ -13,6 +13,7 @@
 import { defineEventHandler, getMethod, setResponseStatus } from "h3";
 import { getSessionUserFromHeaders } from "@/lib/auth/verify.server";
 import { getSql } from "@/lib/db";
+import { isLocalRuntime } from "../runtime";
 import { checkQuota, recordUsage } from "./entitlements";
 import { artConfigured, generateImage, storeImage, imageModel } from "./art";
 
@@ -106,6 +107,58 @@ export default defineEventHandler(async (event) => {
         updated_at = now()
       WHERE id = ${jobId} AND user_id = ${user.id}`;
     return json(200, { ok: true, saved: true });
+  }
+
+  // Local drawing storage only: existing owner/auth and durable local database.
+  if (action === "file") {
+    if (!isLocalRuntime()) return json(403, { error: "Saving this drawing is available only in the local desktop runtime.", code: "local_only" });
+    if (!jobId) return json(400, { error: "jobId is required to file a board", code: "bad_request" });
+    const owned = await sql`SELECT id FROM buzzy_jobs WHERE id = ${jobId} AND user_id = ${user.id} LIMIT 1`;
+    if (!owned.length) return json(404, { error: "No such project", code: "not_found" });
+    const dataUrl = typeof body.dataUrl === "string" ? body.dataUrl : "";
+    const parsed = /^data:(image\/(?:png|jpeg));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+    if (!parsed) return json(400, { error: "dataUrl must be a base64 PNG or JPEG", code: "bad_request" });
+    const bytes = Buffer.from(parsed[2] as string, "base64");
+    if (bytes.byteLength === 0) return json(400, { error: "That image is empty.", code: "bad_request" });
+    if (bytes.byteLength > 16 * 1024 * 1024) return json(413, { error: "That image is over 16 MB.", code: "too_large" });
+    const ext = parsed[1] === "image/jpeg" ? "jpg" : "png";
+    const name = typeof body.name === "string" && body.name.trim()
+      ? body.name.trim().replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80)
+      : `sketch-${Date.now()}.${ext}`;
+    const stored = await storeImage(user.id, bytes, name, parsed[1] as string);
+    if (!Number.isSafeInteger(stored.id) || stored.id <= 0) return json(500, { error: "Could not confirm the saved image. Check the local Library before retrying.", code: "save_unconfirmed" });
+    let assetLinked = false;
+    let artifactLinked = false;
+    try {
+      const linked = await sql`UPDATE buzzy_assets SET job_id = ${jobId} WHERE user_id = ${user.id} AND id = ${stored.id} AND (job_id IS NULL OR job_id = ${jobId}) RETURNING id`;
+      assetLinked = linked.length > 0;
+      if (assetLinked) {
+        const recorded = await sql`
+          UPDATE buzzy_jobs SET
+            data = jsonb_set(COALESCE(data, '{}'::jsonb), '{artifacts}', COALESCE(data->'artifacts', '[]'::jsonb) ||
+              CASE WHEN EXISTS (
+                SELECT 1 FROM jsonb_array_elements(COALESCE(data->'artifacts', '[]'::jsonb)) artifact
+                WHERE artifact->>'kind' = 'image' AND artifact->>'id' = ${String(stored.id)}
+              ) THEN '[]'::jsonb ELSE ${JSON.stringify([
+              { kind: "image", id: String(stored.id), url: `/api/buzzy/assets/${stored.id}`, name, bytes: stored.bytes, type: parsed[1] },
+            ])}::jsonb END, true),
+            updated_at = now()
+          WHERE id = ${jobId} AND user_id = ${user.id} RETURNING id`;
+        artifactLinked = recorded.length > 0;
+      }
+    } catch { /* Preserve the saved image; report incomplete linking below. */ }
+    const projectLinked = assetLinked && artifactLinked;
+    return json(200, {
+      ok: true,
+      saved: true,
+      projectLinked,
+      linkage: { assetLinked, artifactLinked },
+      code: projectLinked ? "saved" : "saved_link_incomplete",
+      message: projectLinked
+        ? "Saved to the Library and linked to this project."
+        : "The image is saved in your Library, but its project link is incomplete. It may not appear under this project or company. The image is already stored. Re-saving is not needed to preserve it.",
+      image: { id: String(stored.id), url: `/api/buzzy/assets/${stored.id}`, name, bytes: stored.bytes, type: parsed[1] },
+    });
   }
 
   // Region edit. "Make the coat red" on a finished picture used to mean re-rolling

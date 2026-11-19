@@ -51,6 +51,7 @@ export async function fixture(t,board=savedBoard){
  const provider=()=>{providerCalls++;throw Error('Provider/generation activity forbidden');};
  const route=new vm.SourceTextModule(stripTypeScriptTypes(read('src/lib/buzzy/art.nitro.ts')),{context});
  await route.link(id=>{
+  if(id==='../runtime')return dependency({isLocalRuntime:()=>true});
   if(id==='h3')return dependency({defineEventHandler:f=>f,getMethod:e=>e.req.method,setResponseStatus(){}});
   if(id==='@/lib/db')return dependency({getSql:async()=>sql});
   if(id==='@/lib/auth/verify.server')return dependency({getSessionUserFromHeaders:async()=>user?{id:user}:null});
