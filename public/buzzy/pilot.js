@@ -74,6 +74,19 @@
         // The chat header's New button; the draft banner and History drawer have their own.
         return [{ sel: "#newSessionBtn, #newChatBtn, #drawerNewChat", name: "the New chat button" }];
       case "speak":
+        // Ending voice is safe on any page, even before chrome controls mount.
+        // Never toggle: an already-off or absent engine must remain off.
+        if (v === "off") return [{ name: "Stop listening", perform: function () {
+          var engine = window.BeeZillaVoice;
+          if (engine && typeof engine.stop === "function") engine.stop();
+          else {
+            // Talk may mount later. Clear only its existing saved voice intent.
+            try {
+              localStorage.setItem("bz_listen_mode", "0");
+              localStorage.setItem("bz_voice_replies", "0");
+            } catch (_) { return false; }
+          }
+        } }];
         // One voice switch: Talk to BeeZilla (#micBtn) starts listening and speaks
         // replies together, and turns both off (toggleMic), so "speak on" is that
         // button pressed. The header's voice switch is gone (owner, 2026-11-18).
@@ -246,6 +259,8 @@
   };
 
   Run.prototype.press = async function (p) {
+    if (this.stopped) return "stopped";
+    if (p.perform) return p.perform() === false ? "missing" : "ok";
     var target = await find(p.sel, p.optional ? 600 : 2500);
     if (this.stopped) return "stopped";
     if (!target) {

@@ -1698,7 +1698,7 @@
           ? "BeeZilla can hear you on every page until you press Stop"
           : "Touch the page and BeeZilla listens again";
       cut.hidden = !speaking;
-      stop.hidden = !on;
+      stop.hidden = !(on || armed);
       // The mic marker is a property of the TAB, not of the page: this is the
       // one writer for it, so a soft hop and a start/stop both land here.
       bzTitle.apply();

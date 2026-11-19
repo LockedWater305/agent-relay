@@ -5196,7 +5196,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         });
     }
 
+    var pendingVoiceResume = null;
+    function cancelVoiceResume() {
+      var pending = pendingVoiceResume;
+      pendingVoiceResume = null;
+      if (pending) {
+        document.removeEventListener("pointerdown", pending, true);
+        document.removeEventListener("keydown", pending, true);
+      }
+    }
+
     function toggleMic() {
+      cancelVoiceResume();
       voice.armed = false;
       voice.mic = !voice.mic;
       saveListenPref(voice.mic);
@@ -5310,6 +5321,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       window.BeeZillaVoice = {
         toggle: toggleMic,
         stop: function () {
+          cancelVoiceResume();
           voice.mic = false;
           voice.armed = false;
           saveListenPref(false);
@@ -5453,14 +5465,19 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // So the intent comes back ARMED, not running: the mic pill says "Mic paused",
       // aria-pressed stays false because nothing is listening yet, and the
       // first gesture in this document starts it. One click, no lie.
+      cancelVoiceResume();
       if (listenPref()) {
         voice.mic = false;
         voice.armed = true;
         voice.replies = true;
         paintVoice();
-        var resume = function () {
-          document.removeEventListener("pointerdown", resume, true);
-          document.removeEventListener("keydown", resume, true);
+        var resume = function (event) {
+          if (pendingVoiceResume !== resume || !voice.armed) return;
+          // Native button clicks own activation. Capture must not start voice
+          // before Stop, End, or Talk receives its click (including keyboard).
+          if (event && event.target && event.target.closest &&
+              event.target.closest("#bzMicStop, #voiceStageEnd, #micBtn")) return;
+          cancelVoiceResume();
           voice.armed = false;
           // startListening() starts the recogniser; voice.mic is the declared
           // state it publishes, so the page and the mic pill agree the moment the
@@ -5469,6 +5486,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           if (!voice.mic) { voice.mic = true; startListening(); }
           paintVoice();
         };
+        pendingVoiceResume = resume;
         document.addEventListener("pointerdown", resume, true);
         document.addEventListener("keydown", resume, true);
       }
