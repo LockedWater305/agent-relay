@@ -183,7 +183,7 @@
   <button id="gridBtn" title="Gridlines">Grid</button>
   <button id="rulerBtn" title="Rulers">Rulers</button>
   <button id="canvasBtn" title="Canvas size, background, open, file to the Library">Canvas…</button>
-  <select id="op" title="Shape style">
+  <select id="shapeStyle" title="Shape style">
     <option value="outline">Outline</option>
     <option value="fill">Fill</option>
     <option value="both" selected>Outline + fill</option>
@@ -1767,7 +1767,7 @@
     sizeEl.addEventListener("input", function () { size = Number(sizeEl.value); sizeVal.textContent = size; });
     var tolEl = document.getElementById("tol"), tolVal = document.getElementById("tolVal");
     tolEl.addEventListener("input", function () { tolerance = Number(tolEl.value); tolVal.textContent = tolerance; });
-    document.getElementById("op").addEventListener("change", function (e) { op = e.target.value; });
+    document.getElementById("shapeStyle").addEventListener("change", function (e) { op = e.target.value; });
 
     document.getElementById("colorP").addEventListener("input", function (e) { colorP = e.target.value; });
     document.getElementById("colorS").addEventListener("input", function (e) { colorS = e.target.value; });
