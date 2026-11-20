@@ -7202,7 +7202,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             '<div class="sc-actions">' +
             '<button type="button" class="sc-open">Open</button>' +
             '<button type="button" class="sc-rename">Rename</button>' +
-            '<button type="button" class="sc-summarize">Summarize</button>' +
+            '<button type="button" class="sc-summarize" title="Uses only a local model when Local Only is on">Summarize</button>' +
             "</div>";
           card.querySelector(".sc-open").addEventListener("click", function () { openSession(s); });
           card.querySelector(".sc-rename").addEventListener("click", function () { renameSession(s, card); });
@@ -7269,14 +7269,21 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
     function summarizeSession(s) {
-      fetch(SESSIONS_BASE + "/" + encodeURIComponent(s.id) + "/summary", {
+      return fetch(SESSIONS_BASE + "/" + encodeURIComponent(s.id) + "/summary", {
         method: "POST",
         credentials: "same-origin",
       }).then(function (r) {
         if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
-        if (!r.ok) throw new Error("summary failed");
+        if (!r.ok) return r.json().then(function (data) {
+          if (data && (data.code === "summary_local_unavailable" || data.code === "summary_policy_unavailable") && typeof data.error === "string") {
+            alert(data.error);
+            return null;
+          }
+          throw new Error("summary failed");
+        });
         return r.json();
       }).then(function (data) {
+        if (!data) return;
         s.summary = data.summary || s.summary;
         // Refresh the list so the new summary shows.
         loadSessions();

@@ -4824,7 +4824,12 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 404);
       return { error: "session not found", code: "not_found" };
     }
-    const summary = await summarizeSessionNow(sql, summaryMatch[1], user.id);
+    const result = await summarizeSessionNow(sql, summaryMatch[1], user.id);
+    if (!result.ok) {
+      setResponseStatus(event, result.status);
+      return { code: result.code, error: result.error };
+    }
+    const { summary } = result;
     return { summary, note: summary ? undefined : "No messages to summarize yet." };
   }
 

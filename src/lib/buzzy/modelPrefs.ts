@@ -44,14 +44,21 @@ function asNumber(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-export async function readModelPrefs(sql: Sql, userId: string): Promise<ModelPrefs> {
+export async function readModelPrefs(
+  sql: Sql,
+  userId: string,
+  { requireStoredObject = false }: { requireStoredObject?: boolean } = {},
+): Promise<ModelPrefs> {
   const rows = (await sql`
     select prefs from ar_operator_prefs where user_id = ${userId} limit 1
   `) as Array<{ prefs: unknown }>;
 
   const raw = rows[0]?.prefs;
-  const prefs: Record<string, unknown> =
-    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const isObject = raw !== null && typeof raw === "object" && !Array.isArray(raw);
+  if (requireStoredObject && rows.length && !isObject) {
+    throw new Error("Saved model settings are not a JSON object.");
+  }
+  const prefs: Record<string, unknown> = isObject ? (raw as Record<string, unknown>) : {};
 
   // An absent control keeps the default. A present but malformed privacy
   // control must not become false: stale rows such as localOnly: "true" would

@@ -16,6 +16,8 @@
  */
 
 import { chatCompletion } from "./llm";
+import { selectModel } from "./modelPolicy";
+import { readModelPrefs } from "./modelPrefs";
 
 const SUMMARY_MODEL = process.env.BZ_SUMMARY_MODEL?.trim() || "google/gemini-3.1-flash-lite";
 const MAX_WORDS = 30;
@@ -43,20 +45,43 @@ function clipWords(text: string, words = MAX_WORDS): string {
 }
 
 /**
- * Generate and store a fresh one-line summary. Returns the stored text, or null
- * when the session has nothing to summarise.
+ * Generate and store a fresh one-line summary. A policy refusal must not read
+ * transcript content, call a provider or replace an existing summary.
  */
 export async function summarizeSessionNow(
   sql: any,
   sessionId: string,
   userId: string,
-): Promise<string | null> {
+): Promise<
+  | { ok: true; summary: string | null }
+  | { ok: false; status: 409 | 503; code: "summary_local_unavailable" | "summary_policy_unavailable"; error: string }
+> {
+  // Manual summaries do not enter chatLoop. Read the owner's current setting
+  // here, also covering a queued refresh that runs after a preference change.
+  let model = SUMMARY_MODEL;
+  let localOnly: boolean;
+  try {
+    const prefs = await readModelPrefs(sql, userId, { requireStoredObject: true });
+    localOnly = prefs.localOnly;
+    if (localOnly) {
+      const decision = selectModel({ jobType: "general", phase: "extraction",
+        preference: prefs.preference, provider: prefs.provider, localOnly,
+        budgetCapCents: prefs.budgetCapCents, spentCents: prefs.spentCents });
+      if (decision.refused || !decision.model) return { ok: false, status: 409,
+        code: "summary_local_unavailable",
+        error: "No local model is available with these settings. No conversation was sent." };
+      model = decision.model;
+    }
+  } catch {
+    return { ok: false, status: 503, code: "summary_policy_unavailable",
+      error: "Could not verify your model settings. No conversation was sent." };
+  }
   const msgs = (await sql`
     SELECT role, content FROM buzzy_chat_messages
     WHERE session_id = ${sessionId} AND user_id = ${userId}
     ORDER BY created_at DESC LIMIT 40
   `) as Array<{ role: string; content: string }>;
-  if (!msgs.length) return null;
+  if (!msgs.length) return { ok: true, summary: null };
   const chronological = [...msgs].reverse();
 
   // The owner's own opening line is the honest fallback if the model fails.
@@ -81,7 +106,7 @@ export async function summarizeSessionNow(
         },
         { role: "user", content: transcript },
       ],
-      { model: SUMMARY_MODEL, temperature: 0.2, maxTokens: 160 },
+      { model, localOnly, temperature: 0.2, maxTokens: 160 },
     );
     summary = clipWords(raw);
   } catch {
@@ -89,7 +114,7 @@ export async function summarizeSessionNow(
   }
 
   const value = summary || fallback;
-  if (!value) return null;
+  if (!value) return { ok: true, summary: null };
 
   // Give an unnamed conversation a real name. A row called "New session" is
   // unreadable in a list; the owner's opening words are the honest label.
@@ -124,7 +149,7 @@ export async function summarizeSessionNow(
   } catch (err) {
     console.warn("[buzzy/sessions] summary write failed:", err instanceof Error ? err.message : err);
   }
-  return value;
+  return { ok: true, summary: value };
 }
 
 /**

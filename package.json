@@ -82,7 +82,7 @@
     "test:office-original-links": "node --experimental-vm-modules --test scripts/test-office-original-links.mjs",
     "test:library-artifacts": "node --experimental-vm-modules --test scripts/test-library-artifacts.mjs",
     "test:library-vault": "node --experimental-vm-modules --test scripts/test-library-vault-backend.mjs scripts/test-library-vault-client.mjs scripts/test-desktop-library-transition.mjs scripts/test-library-port-regression.mjs",
-    "test:talk-sessions": "node --experimental-vm-modules --test scripts/test-talk-session-lifecycle.mjs scripts/test-talk-voice-lifecycle.mjs",
+    "test:talk-sessions": "node --experimental-vm-modules --test scripts/test-talk-session-lifecycle.mjs scripts/test-talk-voice-lifecycle.mjs scripts/test-session-summary-privacy.mjs",
     "test:memory-scope": "node --experimental-vm-modules --test scripts/test-memory-scope-backend.mjs scripts/test-memory-scope-ui.mjs",
     "test:company-create": "node --experimental-vm-modules --test scripts/test-company-create-ui.mjs scripts/test-company-create-backend.mjs",
     "test:graph-authoring": "node --experimental-vm-modules --test scripts/test-graph-authoring.mjs",
