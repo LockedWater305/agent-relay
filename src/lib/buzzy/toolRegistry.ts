@@ -35,6 +35,8 @@ export interface ToolPolicy {
   gate: ToolGate;
   /** false = declared for documentation/back-compat, never offered. */
   offered: boolean;
+  /** Search providers and public page reads are unavailable on Local Only turns. */
+  onlineLookup?: true;
   timeoutMs: number;
   maxResultBytes: number;
   cost: ToolCost;
@@ -50,6 +52,7 @@ export const TOOL_POLICIES: ToolPolicy[] = [
     schema: WEB_SEARCH_TOOL,
     gate: "always",
     offered: true,
+    onlineLookup: true,
     timeoutMs: 9000,
     maxResultBytes: 12_000,
     cost: "metered",
@@ -60,6 +63,7 @@ export const TOOL_POLICIES: ToolPolicy[] = [
     schema: READ_WEB_PAGE_TOOL,
     gate: "always",
     offered: true,
+    onlineLookup: true,
     timeoutMs: 38_000,
     maxResultBytes: 120_000,
     cost: "metered",
@@ -101,6 +105,7 @@ export const TOOL_POLICIES: ToolPolicy[] = [
     schema: FETCH_WEBSITE_TOOL,
     gate: "always",
     offered: false,
+    onlineLookup: true,
     timeoutMs: 12_000,
     maxResultBytes: 30_000,
     cost: "free",
@@ -161,15 +166,22 @@ export const TOOL_POLICIES: ToolPolicy[] = [
 export interface ToolContext {
   /** True once the brief is complete or the owner asked for the deliverable. */
   draftGateOpen: boolean;
+  /** Read from the authenticated owner's saved model preferences, never a turn argument. */
+  localOnly?: boolean;
+}
+
+function canOffer(policy: ToolPolicy, ctx: ToolContext): boolean {
+  return policy.offered && (policy.gate === "always" || ctx.draftGateOpen) &&
+    !(ctx.localOnly && policy.onlineLookup);
 }
 
 /** The schemas the model is allowed to see on this turn. */
 export function offeredTools(ctx: ToolContext): unknown[] {
-  return TOOL_POLICIES.filter((p) => p.offered && (p.gate === "always" || ctx.draftGateOpen)).map((p) => p.schema);
+  return TOOL_POLICIES.filter((p) => canOffer(p, ctx)).map((p) => p.schema);
 }
 
 export function offeredToolNames(ctx: ToolContext): string[] {
-  return TOOL_POLICIES.filter((p) => p.offered && (p.gate === "always" || ctx.draftGateOpen)).map((p) => p.name);
+  return TOOL_POLICIES.filter((p) => canOffer(p, ctx)).map((p) => p.name);
 }
 
 export function policyFor(name: string): ToolPolicy | undefined {
@@ -183,6 +195,9 @@ export function policyFor(name: string): ToolPolicy | undefined {
 export function refusalFor(name: string, ctx: ToolContext): string | null {
   const policy = policyFor(name);
   if (!policy) return `${name} is not a tool BeeZilla has.`;
+  if (ctx.localOnly && policy.onlineLookup) {
+    return "Online lookup was skipped because Local Only is on. Do not claim that you searched the web or read this page.";
+  }
   if (!policy.offered) {
     return `${name} is not available in this conversation — ${policy.withheldReason ?? "it has been retired."}`;
   }

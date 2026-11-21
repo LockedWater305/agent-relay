@@ -2573,7 +2573,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       const html = ordered.map((m) => {
         const cls = m.role === "user" ? "bubble me" : "bubble";
         const escaped = String(m.content).replace(/</g, "&lt;").replace(/\n/g, "<br>");
-        var bubble = '<div class="' + cls + '">' + escaped + "</div>";
+        var notice = m.onlineLookupSkipped === true
+          ? '<div class="bz-what" role="status">Online lookup skipped because Local Only is on.</div>' : "";
+        var bubble = notice + '<div class="' + cls + '">' + escaped + "</div>";
         if (m.document && m.document.downloadUrl) {
           bubble += renderFileCard(m.document);
         }
@@ -6844,11 +6846,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             renderSlotChecklist();
           }
           paintContext(data.context);
-          document.getElementById("chatError").textContent = data.error || "Something went wrong.";
-          document.getElementById("chatError").classList.remove("hidden");
+          var policyReply = (data.code === "model_policy_error" || data.onlineLookupSkipped === true) &&
+            typeof data.reply === "string" && data.reply.trim() !== "" ? data.reply : "";
+          var errorNode = document.getElementById("chatError");
+          errorNode.textContent = policyReply ? "" : (data.error || "Something went wrong.");
+          errorNode.classList.toggle("hidden", Boolean(policyReply));
           chatState.messages.push({
             role: "assistant",
-            content: "Sorry about that — I couldn't process your message. Please try again.",
+            content: policyReply || "Sorry about that — I couldn't process your message. Please try again.",
+            onlineLookupSkipped: data.onlineLookupSkipped === true,
           });
           renderChatMessages();
           return;
@@ -6868,6 +6874,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           artifacts: data.artifacts || null,
           timings: data.timings || null,
           tools: data.tools || null,
+          onlineLookupSkipped: data.onlineLookupSkipped === true,
         });
 
         // Update slots if present

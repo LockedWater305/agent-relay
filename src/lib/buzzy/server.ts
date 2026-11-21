@@ -61,6 +61,9 @@ import { isDraftRequest, isFileRequest, isExplicitDocumentRequest, isExecuteComm
 
 // ── Persona prompt ─────────────────────────────────────────────────────
 
+const WEB_PERSONA = `- WEB: you can search the live web and read any public page. If the person asks "what's the current X", "look up Y", or gives you a link, that is your job — the tools exist. Never say you "can't browse", "can't search the web", "don't have internet access" or "can't check that online"; doing so is false. If a lookup genuinely fails, say the lookup failed, not that you lack the ability. Cite the page you actually read.`;
+const LOCAL_WEB_PERSONA = "- WEB: Local Only is on for this turn. Do not perform or claim an online lookup.";
+
 const PERSONA = `You are BeeZilla, a no-nonsense project manager who turns a client's problem into a clear, actionable scope of work. Speak in plain business English — no jargon, no acronyms, no "mission"/"claim" talk, no small talk, no filler praise ("good call", "nice", "sorry you're dealing with that"). Style rules:
 - Be brief: 1–3 sentences per turn. Ask exactly ONE question per turn.
 - Stay focused on the problem and the decisions needed: what's being done, scope, materials/supplier, budget, timing, and how success gets checked.
@@ -75,13 +78,14 @@ const PERSONA = `You are BeeZilla, a no-nonsense project manager who turns a cli
 - IMPORTANT — job type: if the client's message is clearly a different kind of job (creative writing, a story, copy, a poem, a technical explainer), work THAT job. Do not refuse it and do not drag in unrelated earlier problems. Only ask scope-of-work questions that fit the actual request.
 - Only use details from THIS conversation. Never mention or reuse problems from other jobs.
 - WORK MODE: the client may send a filled-in Work definition (task, people, end goal, how they'll check it). Treat every line as a stated decision — emit the matching [slot: …] markers for what it contains, ask only for what is still missing, one question. In ordinary chat, when the request is clearly a multi-step effort the client will come back to AND at least two decisions are captured, ask once — in one sentence — whether they want to set it up as work. Never ask twice, and never ask for a one-off question.
-- WEB: you can search the live web and read any public page. If the person asks "what's the current X", "look up Y", or gives you a link, that is your job — the tools exist. Never say you "can't browse", "can't search the web", "don't have internet access" or "can't check that online"; doing so is false. If a lookup genuinely fails, say the lookup failed, not that you lack the ability. Cite the page you actually read.
+${WEB_PERSONA}
 - FILES AND THE LIBRARY: every deliverable you produce is saved automatically as a versioned document in the owner's Library, with Markdown, PDF and Word copies. You have no filesystem of your own, but that does not matter — never say you "can't save files", have "no file-storage tool", or ask the owner to copy text out of the chat. If the owner asks to save something to their Library, produce or revise the deliverable so it is saved there — and only then say it is in the Library. A turn that produced no document has nothing to point at: say what you did not produce, never claim a file exists because the phrasing was requested.
 You never mention models, tokens, or technical internals.`;
 
 /** The persona is the only thing that differs between the two UI modes. */
-export function personaForMode(mode: "chat" | "work"): string {
-  return mode === "work" ? PERSONA : CHAT_PERSONA;
+export function personaForMode(mode: "chat" | "work", localOnly = false): string {
+  const base = mode === "work" ? PERSONA : CHAT_PERSONA;
+  return localOnly ? base.replace(WEB_PERSONA, LOCAL_WEB_PERSONA) : base;
 }
 
 // Conversation mode: ordinary chat. No scope interview, no decisions box.
@@ -92,7 +96,7 @@ const CHAT_PERSONA = `You are BeeZilla in conversation. This is ordinary chat �
 - Do NOT run a scope interview. Do not ask about the challenge, the difficulties, who is involved, or the end goal unless they are asking you to get a real piece of work done.
 - If they ask you to actually accomplish something that needs a real effort (get bids, chase a refund, prepare a contract), answer what you can here, then say in one sentence that you can set it up as work — the Work tab does that. Offer once; never push twice.
 - Never write a price, penalty, date, or fact the person did not state. If you do not know, say so.
-- WEB: you can search the live web and read any public page. If the person asks "what's the current X", "look up Y", or gives you a link, that is your job — the tools exist. Never say you "can't browse", "can't search the web", "don't have internet access" or "can't check that online"; doing so is false. If a lookup genuinely fails, say the lookup failed, not that you lack the ability. Cite the page you actually read.
+${WEB_PERSONA}
 - Only use details from THIS conversation.
 You never mention models, tokens, or technical internals.`;
 
@@ -321,6 +325,8 @@ export interface ChatResponse {
   }>;
   /** What ran this turn, in order — the "what happened" strip reads this. */
   tools?: Array<{ name: string; ms: number; ok: boolean; code?: string }>;
+  /** The saved Local Only preference blocked an online lookup on this turn. */
+  onlineLookupSkipped?: true;
   /** The file this turn produced, with links the chat can show inline. */
   document?: { filename: string; contentType: string; bytes: number | null; documentId?: string; downloadUrl: string; libraryUrl: string; approvalRequired?: boolean };
   error?: string;
@@ -543,12 +549,17 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   );
   let savedPrefs: Awaited<ReturnType<typeof readModelPrefs>>;
   let routedModel: string | undefined;
+  const webLookupIntent = needsWebLookup(message);
+  let onlineLookupSkipped = false;
+  const lookupStatus = (): Pick<ChatResponse, "onlineLookupSkipped"> =>
+    onlineLookupSkipped ? { onlineLookupSkipped: true } : {};
   try {
     // BZ-F012 / BZ-F041 / BZ-F043: versioned, reasoned model-selection policy.
     // The operator's saved controls are read here (ownership-scoped to this
     // turn's userId) and validated before use — a stale or hand-edited pref
     // must not change routing silently, so the fallback is recorded.
-    savedPrefs = await readModelPrefs(sql, userId);
+    savedPrefs = await readModelPrefs(sql, userId, { requireStoredObject: true });
+    onlineLookupSkipped = savedPrefs.localOnly && webLookupIntent;
     const decision = selectModel({
       jobType,
       phase: draftGateOpen ? "deliverable" : "discovery",
@@ -586,9 +597,10 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
     if (decision.refused) {
       return {
         ok: false,
-        reply: "",
+        reply: onlineLookupSkipped ? "I couldn't use a local model with your current settings." : "",
         error: decision.reason,
         code: decision.refusedReason ?? "model_refused",
+        ...lookupStatus(),
       };
     }
     routedModel = decision.model || undefined;
@@ -600,6 +612,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
       reply: "I couldn't check your model settings. Nothing was sent to an inference provider.",
       error: err instanceof Error ? err.message : "Model settings unavailable",
       code: "model_policy_error",
+      ...lookupStatus(),
     };
   }
 
@@ -720,15 +733,18 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
       "tool returns success. Never say a track is done, that a player is attached, or that it is in the " +
       "Library unless generate_music returned this turn; a description is not a deliverable."
     : "";
-  const persona = personaForMode(mode) + audioRule + (mode === "work" ? planFirst + playbookBlock + resumeRecap : "");
+  const persona = personaForMode(mode, savedPrefs.localOnly) + audioRule + (mode === "work" ? planFirst + playbookBlock + resumeRecap : "");
   // Freshness: without a date the model cannot tell a superseded price from the
   // current one. It answered "78 cents" the day USPS's own page said 82.
   const todayISO = new Date().toISOString().slice(0, 10);
-  const freshnessBlock =
-    `\n\nTODAY IS ${todayISO}. When the request says current, now, today, latest or how much, ` +
-    "prefer the most recent source you read and state the date it was published. " +
-    "If a page shows an old price or an old deadline, look for a newer official page before stating it — " +
-    "a superseded figure is worse than 'I could not confirm'.";
+  const freshnessBlock = savedPrefs.localOnly
+    ? `\n\nTODAY IS ${todayISO}. Live web lookup is off for this turn. ` +
+      "Do not claim that you searched, opened a web page, or verified current online facts. " +
+      "Use the owner's material and distinguish it from live verification."
+    : `\n\nTODAY IS ${todayISO}. When the request says current, now, today, latest or how much, ` +
+      "prefer the most recent source you read and state the date it was published. " +
+      "If a page shows an old price or an old deadline, look for a newer official page before stating it — " +
+      "a superseded figure is worse than 'I could not confirm'.";
   // Research that ends in a file must carry its receipts.
   const wantsSources = wantsLibraryFile || /\b(research|look ?up|find out|sources?|cite|verify|current|latest)\b/i.test(message);
   const sourcesBlock = wantsSources
@@ -877,8 +893,10 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   // So when the request is a lookup, the harness does it and hands the model
   // what it read, with the URLs. The model cannot skip the research.
   const researchIntent = /\b(research|look ?up|find out|check|verify|current|latest|today|right now|how much|price|cost|deadline|hours)\b/i.test(message);
-  const runWebPrepass = surface === "voice" || (surface === "text" && (needsWebLookup(message) || (wantsLibraryFile && researchIntent)));
-  if (runWebPrepass) {
+  const runWebPrepass = surface === "voice" || webLookupIntent || (wantsLibraryFile && researchIntent);
+  // Merely mentioning "today" or a URL is not consent to send chat text or
+  // open that page while Local Only is on. The model's tools use the same gate.
+  if (!savedPrefs.localOnly && runWebPrepass) {
     const webCtx = await buildVoiceWebContext(message);
     for (const call of webCtx.calls) {
       await recordToolCall(sql, {
@@ -910,7 +928,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   // The registry is the single source of truth for what may be called. No
   // hand-assembled arrays here: adding a tool must not require editing this
   // function, and a gated tool must never leak into the offered set.
-  const toolCtx = { draftGateOpen };
+  const toolCtx = { draftGateOpen, localOnly: savedPrefs.localOnly };
   // Only a turn that can actually produce something gets a tool surface. An
   // always-on tool list forced every chat turn onto the buffered path (a
   // non-empty tool list is what disables streaming), which is the 12s answer.
@@ -981,7 +999,9 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
         model: spoken.model,
         finishReason: spoken.finishReason,
       };
-    } else if (typeof req.onText === "function" && !(loopTools && loopTools.length)) {
+    // When lookup was skipped, send the settled answer with its notice rather
+    // than flashing unreviewed model prose ahead of that notice.
+    } else if (typeof req.onText === "function" && !(loopTools && loopTools.length) && !onlineLookupSkipped) {
       // Typed turns stream too. Buffered, a 489-char answer arrived 12.6s after
       // the question with nothing on screen; the same answer streams its first
       // words at ~1s. Tool turns stay buffered — a tool call needs the whole
@@ -1012,13 +1032,16 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
         // limitation the product does not have.
         const refusal = refusalFor(tc.name, toolCtx);
         if (refusal) {
+          const policy = policyFor(tc.name);
+          const privacyRefusal = savedPrefs.localOnly && policy?.onlineLookup === true;
+          if (privacyRefusal) onlineLookupSkipped = true;
           followUpMessages.push({
             role: "user",
             content: `tool_refused (${tc.name}): ${refusal} Do not tell the owner BeeZilla cannot do it — state what is still missing in one sentence, then continue.`,
           });
           await recordToolCall(sql, {
             userId, jobId, sessionId, turnId: req.attemptId ?? null,
-            tool: tc.name, gate: policyFor(tc.name)?.gate ?? null, ok: false, errorCode: "refused",
+            tool: tc.name, gate: policy?.gate ?? null, ok: false, errorCode: privacyRefusal ? "local_only" : "refused",
           });
           continue;
         }
@@ -1233,7 +1256,8 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
             role: "user",
             content:
               "That was a tool artifact, not an answer. Reply to the person now, in your own words, " +
-              "using what the tools returned. No tool names, no bare URLs, no JSON.",
+              (savedPrefs.localOnly ? "using the supplied and local information; no online lookup ran. " : "using any results actually available. ") +
+              "No tool names, no bare URLs, no JSON.",
           },
         ],
         { model: routedModel, maxTokens: 1200, localOnly: savedPrefs.localOnly },
@@ -1242,10 +1266,11 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
         console.error("[buzzy/chat] reply stayed a tool echo after retry");
         return {
           ok: false,
-          reply: "",
-          error: "I gathered the sources but couldn't put the answer together. Try again — nothing was saved.",
+          reply: "I couldn't turn that response into an answer. Please try again.",
+          error: "The model did not produce a usable reply.",
           code: "empty_reply",
           context: ctx,
+          ...lookupStatus(),
         };
       }
     }
@@ -1253,13 +1278,15 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
     // reply.content holds the model's last text — surface it as-is below. Never silent.
   } catch (err) {
     console.error("[buzzy/chat] LLM request failed:", err instanceof Error ? err.message : err);
+    const localFailure = "The local model couldn't finish the reply. Check that it's running, then try again.";
     return {
       ok: false,
-      reply: "Sorry, I'm having trouble connecting right now. Please try again in a moment.",
-      error: err instanceof Error ? err.message : "LLM request failed",
+      reply: savedPrefs.localOnly ? localFailure : "Sorry, I'm having trouble connecting right now. Please try again in a moment.",
+      error: savedPrefs.localOnly ? localFailure : err instanceof Error ? err.message : "LLM request failed",
       code: "llm_error",
       context: ctx,
       slots: Object.keys(newlyExtracted).length ? newlyExtracted : undefined,
+      ...lookupStatus(),
     };
   }
 
@@ -1553,6 +1580,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   const response: ChatResponse = {
     ok: true,
     reply: cleanReply,
+    ...lookupStatus(),
     context: ctx,
     timings: {
       extractMs,
