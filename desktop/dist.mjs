@@ -19,8 +19,8 @@
  *   <install>/resources/app/            .output/ scripts/ bin/ package.json node_modules/
  */
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, posix, resolve } from "node:path";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeCspManifest } from "../scripts/build-desktop-csp.mjs";
 import { productionDependencyClosure, copyProductionDependency, ensurePgliteAssets } from "./stage-inputs.mjs";
@@ -33,11 +33,41 @@ const OUT = join(ROOT, "dist-desktop"); // package.json build.directories.output
 
 const log = (msg) => console.log(`[dist] ${msg}`);
 
-function run(cmd, args, opts = {}) {
-  execFileSync(cmd, args, { cwd: ROOT, stdio: "inherit", ...opts });
+// Invoke the pinned JS entry rather than an npm shim (npx.cmd is not a native
+// executable on Windows). Never search PATH/parent node_modules or install here.
+function lockedCli(cwd, name, bin) {
+  const lockfile = join(cwd, "package-lock.json");
+  const pin = JSON.parse(readFileSync(lockfile, "utf8")).packages?.[`node_modules/${name}`];
+  if (typeof pin?.version !== "string" || typeof pin.integrity !== "string" || !pin.integrity || pin.bin?.[name] !== bin) {
+    throw new Error(`${name}: ${lockfile} does not pin ${bin}`);
+  }
+
+  const pkg = join(realpathSync(cwd), "node_modules", name);
+  const manifest = join(pkg, "package.json");
+  const entry = join(pkg, bin);
+  for (const file of [manifest, entry]) {
+    if (!existsSync(file)) {
+      throw new Error(`${name}: missing installed file ${file}; install the locked dependencies separately in ${cwd}`);
+    }
+    if (!statSync(file).isFile() || relative(file, realpathSync(file)) !== "") {
+      throw new Error(`${name}: expected a regular file at the locked install path ${file}`);
+    }
+  }
+  const installed = JSON.parse(readFileSync(manifest, "utf8"));
+  const declared = typeof installed.bin === "string" ? installed.bin : installed.bin?.[name];
+  if (installed.name !== name || installed.version !== pin.version ||
+      typeof declared !== "string" || declared.replace(/^\.\//, "") !== bin) {
+    throw new Error(`${name}: installed package does not match locked ${pin.version} and entry ${bin}`);
+  }
+  return entry;
+}
+
+function runCli(cwd, entry, args, env = process.env) {
+  execFileSync(process.execPath, [entry, ...args], { cwd, env, stdio: "inherit", shell: false });
 }
 
 async function stage() {
+  const vite = lockedCli(ROOT, "vite", "bin/vite.js");
   rmSync(STAGE, { recursive: true, force: true });
   mkdirSync(APP, { recursive: true });
 
@@ -46,7 +76,7 @@ async function stage() {
   // packaged app ended up running pre-pin-file server code and reporting zero
   // publisher keys while the shipped publishers.json had one.
   log("building the runtime (vite build)…");
-  run("npx", ["vite", "build"], { env: { ...process.env, NODE_ENV: "production" } });
+  runCli(ROOT, vite, ["build"], { ...process.env, NODE_ENV: "production" });
   // dist uses Vite directly, so npm's postbuild hook does not run here.
   // Generate from the exact trees that will be copied, before staging anything.
   await writeCspManifest(ROOT);
@@ -294,13 +324,11 @@ function localTestBanner() {
  * target writes the app under dist-desktop/ (macOS: mac-arm64/BeeZilla.app,
  * Windows: win-unpacked/). It is not an installer and not a release.
  */
-function packDir() {
+function packDir(builder) {
   const flag = { darwin: "--mac", win32: "--win", linux: "--linux" }[process.platform];
   if (!flag) throw new Error(`no electron-builder target for ${process.platform}`);
   log(`running electron-builder ${flag} dir (unpacked, no installer, no publish)…`);
-  execFileSync("npx", ["electron-builder", flag, "dir", "--publish", "never"], {
-    cwd: DESKTOP, stdio: "inherit",
-  });
+  runCli(DESKTOP, builder, [flag, "dir", "--publish", "never"]);
   // The production node_modules is added by the afterPack hook (after-pack.cjs)
   // for every target, because extraResources drops a top-level node_modules.
   // Check it really landed: without it the packaged runtime cannot start.
@@ -327,12 +355,13 @@ function unpackedResources() {
 
 const mode = process.argv[2] ?? "stage";
 if (mode === "dir") localTestBanner();
+const builder = mode === "all" || mode === "dir"
+  ? lockedCli(DESKTOP, "electron-builder", "cli.js")
+  : null;
 if (mode === "stage" || mode === "all" || mode === "dir") await stage();
 if (mode === "all") {
   log("running electron-builder…");
-  execFileSync("npx", ["electron-builder", "--win", "nsis", "--publish", "never"], {
-    cwd: DESKTOP, stdio: "inherit",
-  });
+  runCli(DESKTOP, builder, ["--win", "nsis", "--publish", "never"]);
   log("installer written to dist-desktop/");
 }
-if (mode === "dir") packDir();
+if (mode === "dir") packDir(builder);
