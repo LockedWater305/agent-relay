@@ -50,13 +50,28 @@ class Element {
     this.parentNode = null;
     this.style = {};
     this.textContent = "";
+    this.innerHTML = "";
+    this.value = "";
     this.listeners = new Map();
+    const classNames = new Set();
+    this.classList = {
+      add: name => classNames.add(name), remove: name => classNames.delete(name), contains: name => classNames.has(name),
+      toggle(name, force = !classNames.has(name)) { if (force) classNames.add(name); else classNames.delete(name); return force; },
+    };
   }
   get id() { return this.getAttribute("id") || ""; }
   set id(value) { this.setAttribute("id", value); }
   get src() { return this.hasAttribute("src") ? new URL(this.getAttribute("src"), ORIGIN).href : ""; }
   get attributes() { return [...this.attrs].map(([name, value]) => ({ name, value })); }
   get firstChild() { return this.children[0] || null; }
+  get disabled() { return this.hasAttribute("disabled"); }
+  set disabled(value) {
+    if (this.disabled === Boolean(value)) return;
+    if (value) this.setAttribute("disabled", ""); else this.removeAttribute("disabled");
+    this.disabledChanged?.();
+  }
+  contains(node) { for (let el = node; el; el = el.parentNode) if (el === this) return true; return false; }
+  focus() {}
   setAttribute(name, value) { this.attrs.set(name, String(value)); }
   getAttribute(name) { return this.attrs.get(name) ?? null; }
   hasAttribute(name) { return this.attrs.has(name); }
@@ -144,7 +159,7 @@ function makeDocument() {
   return document;
 }
 
-function pageDocument(key, external = false) {
+function pageDocument(key, external = false, decorate) {
   const doc = makeDocument();
   doc.title = titles[key.split("?")[0]] || key;
   const style = doc.head.appendChild(doc.createElement("style"));
@@ -160,11 +175,12 @@ function pageDocument(key, external = false) {
   script.textContent = (key.split("?")[0] === LIBRARY ? libraryRedirect + "\n" : "") +
     (key.split("?")[0] === TALK ? "var chatState = {};\n" + talkParams : "") +
     `window.pageRuns.push({ key: ${JSON.stringify(key)}, active: document.getElementById("bzPage").getAttribute("data-bz-path") });`;
+  decorate?.(key, main, script);
   return doc;
 }
 
-export function harness(initialKey = TALK) {
-  const document = pageDocument(initialKey);
+export function harness(initialKey = TALK, decorate) {
+  const document = pageDocument(initialKey, false, decorate);
   // The hard-loaded page has already run its own scripts.
   document.body.querySelector("script").remove();
   let url = new URL(initialKey, ORIGIN);
@@ -215,7 +231,7 @@ export function harness(initialKey = TALK) {
     scrollTo(_x, y) { context.scrollY = y; },
     BeeZillaChrome: { boot() { boots.push(location.pathname); } },
     BeeZillaTitle: { page: document.title, setPage(title) { this.page = title; document.title = title; } },
-    DOMParser: class { parseFromString(text) { const data = JSON.parse(text); return pageDocument(data.key, data.external); } },
+    DOMParser: class { parseFromString(text) { const data = JSON.parse(text); return pageDocument(data.key, data.external, decorate); } },
     fetch(href, options) {
       const target = new URL(href);
       const key = target.pathname + target.search;
@@ -622,4 +638,170 @@ test("latest fetch failure reloads the existing history entry, including after B
   assert.equal(h.pushes.length, 2, "traversal fallback must not push");
   assert.equal(h.history.length, 3);
   assert.equal(h.location.pathname, LIBRARY);
+});
+
+// Two retained Talk visits own different DOM nodes with the same IDs. Use the
+// real shell's cache/traversal and the shipped sender, renderers and event wiring.
+// The network and media hooks are inert; no app or sockets start in this suite.
+const workTalk = TALK + "?mode=work";
+const typedDraft = "  Work on the originating conversation  ";
+const siblingDraft = "A different pending draft";
+const moneyCheckSource = readFileSync(new URL("../public/buzzy/money-check.js", import.meta.url), "utf8");
+
+function talkTurnHarness() {
+  const known = new Map();
+  const requests = [];
+  const effects = [];
+  const reply = deferred();
+  const h = harness(TALK, (key, main, script) => {
+    if (key.split("?")[0] !== TALK) return;
+    const add = (parent, id) => { const el = parent.appendChild(main.owner.createElement("div")); el.id = id; return el; };
+    const screen = add(main, "chatScreen");
+    const composer = add(screen, "composerCard");
+    for (const id of ["chatInput", "chatSend", "chatDoIt", "chatError"]) add(composer, id);
+    add(screen, "chatMessages");
+    const banner = add(screen, "draftBanner");
+    for (const id of ["draftBody", "draftWarning", "restorePrevious", "downloadCsvBtn", "moneyCheck", "approveDraft", "confirmOutward", "draftMeta", "draftSendNote"]) add(banner, id);
+    script.textContent += `\nwindow.mountTalkTurn(${JSON.stringify(key)});`;
+  });
+  const fetchShell = h.context.fetch;
+  Object.assign(h.context, {
+    AbortSignal, ReadableStream, TextDecoder, performance: { now: () => 0 },
+    crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000000" },
+    MutationObserver: class {
+      constructor(callback) { this.callback = callback; }
+      observe(node, options) {
+        assert.equal(node.id, "chatSend");
+        assert.equal(options.attributeFilter.includes("disabled"), true);
+        node.disabledChanged = () => queueMicrotask(() => this.callback([{ target: node, attributeName: "disabled" }]));
+      }
+    },
+    setTimeout() { effects.push("timer"); }, setInterval() { return 1; }, clearInterval() {},
+    fetch(href, init) {
+      if (!href.startsWith("/api/")) return fetchShell(href, init);
+      assert.equal(href, "/api/buzzy/chat", "no other API is used in these tests");
+      assert.equal(init.method, "POST");
+      requests.push(JSON.parse(init.body));
+      return reply.promise;
+    },
+    rememberTalkTurn(key, visit) { known.set(key, visit); },
+    typedFixtureEffect(effect) { effects.push(effect); },
+    mountTalkTurn(key) {
+      const functions = ["chatContextSnapshot", "chatContextCurrent", "sendChatMessage", "ensureChatSession",
+        "readThisBody", "streamTextTurn", "renderChatMessages", "paintChatInputAvailability", "draftBodyEl",
+        "openDraftReview", "setDraftWarning", "renderMoneyCheck", "currentMoneyCheck", "briefLinesForCheck",
+        "paperFactsForCheck", "paintDraftGate", "approvalMatches", "mdTableToCsv", "esc"];
+      // The f875 preimage has all event wiring inline. Later revisions may use a
+      // binder within that same block. Run both through the exact current wiring.
+      if (talkSource.includes("    function bindTypedChatComposer(")) functions.push("bindTypedChatComposer");
+      const production = functions.map(name => {
+        const body = talkSource.match(new RegExp(`^    (?:async )?function ${name}\\([^]*?^    }`, "m"));
+        assert.ok(body, `Talk's actual ${name} is required`);
+        return body[0];
+      }).join("\n");
+      const bindings = talkSource.match(/^    \/\/ Wire up chat events\n[^]*?(?=^    \/\/ .*Chat \/ Work mode wiring)/m)?.[0];
+      const labels = talkSource.match(/^    const SLOT_LABELS = \{[^]*?^    \};/m)?.[0];
+      assert.ok(bindings && labels, "Talk's actual bindings and brief labels are required");
+      vm.runInContext(`(function () {
+        const key = ${JSON.stringify(key)}, work = key !== ${JSON.stringify(TALK)};
+        const node = id => document.getElementById(id);
+        const chatState = {sessionId: work ? "work-owner" : "other-owner", sessionVerified: true, slots: {},
+          mode: work ? "work" : "chat", messages: [{ role: "assistant", content: work ? "Work history" : "Other history" }],
+          paper: work ? {kind: "invoice", facts: [{key:"amount", label:"Amount", value:"$100.00", status:"confirmed"}]} : null};
+        const chatNavigation = {generation: 0}, voice = {mic: false, replies: false, turnSeq: 0};
+        const SESSIONS_BASE = "/api/buzzy/sessions", CHAT_BASE = "/api/buzzy/chat";
+        let pendingExecute = false;
+        function activeCompanyId() { return null; }
+        function getAuthHeaders() { return {}; }
+        function selectedModel() { return "fixture"; }
+        function shouldOfferWork() { return false; }
+        function setChatMascot() {}
+        function renderSlotChecklist() {}
+        function paintContext() {}
+        function maybeSpeak() { typedFixtureEffect("speak"); }
+        function startListening() { typedFixtureEffect("listen"); }
+        function logVoiceMetrics() { typedFixtureEffect("metrics"); }
+        ${labels}
+        ${production}
+        ${bindings}
+        for (const id of ["chatError", "draftBanner", "draftWarning", "restorePrevious", "moneyCheck"]) node(id).classList.add("hidden");
+        node("confirmOutward").disabled = true;
+        renderChatMessages();
+        const view = node("chatScreen");
+        rememberTalkTurn(key, {view, node: id => view.querySelector("#" + id)});
+      })();`, h.context, { filename: "actual Talk turn and controls", timeout: 1000 });
+    },
+  });
+  vm.runInContext(moneyCheckSource, h.context, { filename: "money-check.js", timeout: 1000 });
+  h.context.mountTalkTurn(TALK); // model the initial hard load, before the shell creates its wrapper
+  return { h, known, requests, effects, reply };
+}
+
+async function finishCachedTurn(response) {
+  const f = talkTurnHarness();
+  const { h } = f;
+  const other = f.known.get(TALK).node;
+  other("chatInput").value = siblingDraft;
+  assert.equal(await h.shell.go(workTalk), true);
+  const origin = f.known.get(workTalk).node;
+  origin("chatInput").value = typedDraft;
+  const sending = origin("chatSend").onclick();
+  await h.flush();
+  assert.equal(origin("chatSend").disabled, true);
+  assert.equal(origin("chatDoIt").disabled, true);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].sessionId, "work-owner");
+  h.history.back();
+  await h.idle();
+  h.assertPage(TALK);
+  assert.equal(h.document.getElementById("chatInput"), other("chatInput"));
+  other("chatSend").disabled = true;
+  await h.flush();
+  const snapshot = () => [other("chatInput").value, other("chatError").textContent, other("chatMessages").innerHTML,
+    other("chatSend").disabled, other("chatDoIt").disabled, other("draftBanner").classList.contains("hidden"),
+    other("draftBody").value, other("draftWarning").textContent, other("approveDraft").disabled];
+  const before = snapshot();
+  f.reply.resolve(response);
+  await sending;
+  await h.flush();
+  assert.deepEqual(snapshot(), before, "the mounted sibling never receives the cached Talk turn");
+  h.history.forward();
+  await h.idle();
+  h.assertPage(workTalk);
+  assert.equal(h.document.getElementById("chatInput"), origin("chatInput"));
+  assert.equal(origin("chatSend").disabled, false);
+  assert.equal(f.requests.length, 1, "Back/Forward and replies do not send again or approve work");
+  assert.deepEqual(f.effects, [], "no new audio, Listen, or turn metrics from a cached result");
+  return origin;
+}
+
+test("Back during a cold typed refusal leaves the other Talk alone and restores draft, Send and Do it on Forward", async () => {
+  const origin = await finishCachedTurn(Response.json({ ok: false, notSent: true, code: "no_inference_config",
+    error: "Set up inference in Settings. This chat request was not sent to an inference provider." }, { status: 503 }));
+  assert.equal(origin("chatInput").value, typedDraft);
+  assert.equal(origin("chatDoIt").disabled, false, "the original companion control follows its own Send");
+  assert.match(origin("chatError").textContent, /Your draft is back/);
+  assert.doesNotMatch(origin("chatMessages").innerHTML, /Work on the originating conversation/);
+});
+
+test("Back during a stored typed reply preserves both Talk transcripts and shows the replay on its own Forward", async () => {
+  const origin = await finishCachedTurn(Response.json({ ok: true, reconciled: true, reply: "Stored work reply", slots: {} }));
+  assert.match(origin("chatMessages").innerHTML, /Stored work reply/);
+  assert.equal(origin("chatInput").value, "");
+});
+
+test("Back during a Work SSE draft keeps the review and its existing approval gates in the originating Talk", async () => {
+  const draft = "Check the work proposal\n\n| Total | $125.00 |";
+  const warning = "The total needs review.";
+  const outcome = { ok: true, reply: draft, warning, draft: true, jobId: "fixture-job", slots: {}, previousDraft: "Earlier draft" };
+  const origin = await finishCachedTurn(new Response(`event: done\ndata: ${JSON.stringify(outcome)}\n\n`,
+    { headers: { "Content-Type": "text/event-stream" } }));
+  assert.match(origin("chatMessages").innerHTML, /Check the work proposal/);
+  assert.equal(origin("draftBanner").classList.contains("hidden"), false);
+  assert.equal(origin("draftBody").value, draft);
+  assert.equal(origin("draftWarning").textContent, warning);
+  assert.equal(origin("restorePrevious").classList.contains("hidden"), false);
+  assert.match(origin("moneyCheck").innerHTML, /\$100\.00/);
+  assert.equal(origin("approveDraft").disabled, true, "the actual amount check still blocks approval");
+  assert.equal(origin("confirmOutward").disabled, true, "nothing is automatically approved");
 });
