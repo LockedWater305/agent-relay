@@ -12,6 +12,7 @@
  */
 import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { managedSearchConnection, writeCredentialRecord } from "./inference.mjs";
 
 export const SEARCH_STORE_FILE = "search.json";
 
@@ -78,9 +79,11 @@ export function clearSearchKey(dataDir) {
  * Stored beside the BYOK key (never instead of it — BYOK wins at resolve time) so a
  * user who later adds their own Brave key is not fighting a hidden credential.
  */
-export function saveManagedSearch(dataDir, { token, gateway, expiresAt }, cipher = {}) {
+export function saveManagedSearch(dataDir, { token, gateway, expiresAt, managedConnectionId }, cipher = {}) {
   const value = (token ?? "").trim();
   if (!value) throw new Error("a search token is required");
+  const current = managedSearchConnection(dataDir);
+  if (current === null || current !== managedConnectionId) throw new Error("The managed search connection is no longer current.");
   const encrypted = Boolean(cipher.encrypt);
   const payload = {
     managedTokenCipher: encrypted ? Buffer.from(cipher.encrypt(value)).toString("base64") : value,
@@ -93,14 +96,12 @@ export function saveManagedSearch(dataDir, { token, gateway, expiresAt }, cipher
   // Merge rather than overwrite: a BYOK key already in the file must survive.
   let existing = {};
   try {
-    existing = JSON.parse(readFileSync(file, "utf8")) ?? {};
-  } catch {}
-  writeFileSync(file, JSON.stringify({ ...existing, ...payload }, null, 2) + "\n", { mode: 0o600 });
-  try {
-    chmodSync(file, 0o600);
-  } catch {
-    /* Windows ignores POSIX modes; Electron encryption is the real control there */
+    existing = JSON.parse(readFileSync(file, "utf8"));
+    if (!existing || typeof existing !== "object" || Array.isArray(existing)) throw new Error("Search settings could not be read.");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error; // never discard a BYOK record we cannot read
   }
+  writeCredentialRecord(file, { ...existing, ...payload, managedConnectionId });
   return payload;
 }
 
@@ -114,6 +115,8 @@ export function loadManagedSearch(dataDir, cipher = {}) {
     return null;
   }
   if (!raw?.managedTokenCipher || !raw?.gateway) return null;
+  const current = managedSearchConnection(dataDir);
+  if (current === null || raw.managedConnectionId !== current) return null;
   let token;
   try {
     token = raw.managedEncrypted

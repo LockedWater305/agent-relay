@@ -668,43 +668,35 @@ async function performConnect() {
     return outcome;
   }
 
-  // Who signed in — saved before the credential so the restart that follows picks
-  // the name up in the same pass.
-  if (outcome.account) saveIdentity(outcome.account);
-
   const saved = await settingsHandlers.saveInference({
     provider: "beezilla",
     key: outcome.token,
     baseUrl: outcome.baseUrl,
     model: outcome.model,
     expiresAt: outcome.expiresAt,
+  }, {
+    onCommitted: () => saveIdentity(outcome.account),
+    search: outcome.search?.ok ? {
+      token: outcome.search.token, gateway: outcome.search.endpoint, expiresAt: outcome.search.expiresAt,
+    } : null,
   });
   console.log(`[desktop] connect: BeeZilla inference connected (expires ${outcome.expiresAt ?? "unknown"}), runtime ${saved.reason ? `restart failed: ${saved.reason}` : saved.started ? "started" : "restarted"}`);
 
   // Search is a second capability and is allowed to be missing. Saying so once, at
   // connect time, is better than a user discovering it later in a chat turn.
-  let searchSaved = null;
-  let restartFailure = saved.reason || null;
-  if (outcome.search?.ok) {
-    try {
-      const res = await settingsHandlers.saveManagedSearch({
-        token: outcome.search.token,
-        gateway: outcome.search.endpoint,
-        expiresAt: outcome.search.expiresAt,
-      });
-      searchSaved = res.saved;
-      restartFailure = res.reason || null;
-      console.log(`[desktop] connect: BeeZilla search connected (expires ${outcome.search.expiresAt ?? "unknown"})`);
-    } catch (err) {
-      console.warn(`[desktop] connect: search token not stored — ${err instanceof Error ? err.message : err}`);
-    }
+  const searchSaved = saved.searchSaved ?? null;
+  const restartFailure = saved.reason || null;
+  if (searchSaved) {
+    console.log(`[desktop] connect: BeeZilla search connected (expires ${outcome.search.expiresAt ?? "unknown"})`);
+  } else if (saved.searchError) {
+    console.warn(`[desktop] connect: ${saved.searchError}`);
   } else if (outcome.search?.notDeployed) {
     console.log("[desktop] connect: BeeZilla search is not enabled on this deployment — BYOK search only");
   } else if (outcome.search?.error) {
     console.warn(`[desktop] connect: search token unavailable — ${outcome.search.error}`);
   }
 
-  return { ...outcome, ...(restartFailure ? { ok: false, error: `Account credentials were saved, but BeeZilla did not restart. ${restartFailure} Retry from Settings without force-quitting.` } : {}), token: undefined, search: { ...outcome.search, token: undefined, saved: searchSaved }, savedTo: saved.saved?.key };
+  return { ...outcome, ...(restartFailure ? { ok: false, error: `Account credentials were saved, but BeeZilla did not restart. ${restartFailure} Retry from Settings without force-quitting.` } : {}), token: undefined, search: { ...outcome.search, ...(saved.searchError ? { ok: false, error: saved.searchError } : {}), token: undefined, saved: searchSaved }, savedTo: saved.saved?.key };
 }
 
 async function openSettings() {

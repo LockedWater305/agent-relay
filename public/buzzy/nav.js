@@ -846,7 +846,7 @@
     page: document.title,
     listening: function () {
       var eng = window.BeeZillaVoice && window.BeeZillaVoice.state ? window.BeeZillaVoice.state() : null;
-      return !!(eng && (eng.mic || eng.armed));
+      return !!(eng && eng.mic);
     },
     apply: function () {
       var t = this.listening() ? "\ud83c\udf99 BeeZilla \u2014 Listening" : this.page;
@@ -1256,6 +1256,12 @@
       // A cancelled bootstrap is not a live Talk session. Do not restore an
       // unfinished page later without rerunning its skipped scripts.
       if (cache[key] && cache[key].el === page) delete cache[key];
+      // Discarding a page is not the (cancellable) before-leave negotiation.
+      // Revoke its opt-in resources synchronously while its nodes still belong
+      // to this page, before the next page can reuse their IDs.
+      Array.prototype.forEach.call(page.querySelectorAll("[data-bz-before-remove]"), function (owner) {
+        owner.dispatchEvent(new Event("bz:before-remove"));
+      });
       page.parentNode && page.parentNode.removeChild(page);
     }
   }

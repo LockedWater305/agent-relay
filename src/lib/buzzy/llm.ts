@@ -149,6 +149,8 @@ export async function chatCompletionFull(
     toolChoice?: string | object;
     /** Enforce the endpoint boundary even when a caller bypasses model policy. */
     localOnly?: boolean;
+    /** Optional caller-owned admission, immediately before each HTTP attempt. */
+    beforeDispatch?: () => Promise<void>;
   },
 ): Promise<FullCompletion> {
   assertLocalInference(opts?.localOnly);
@@ -176,6 +178,8 @@ export async function chatCompletionFull(
     if (attempt > 0) {
       body.temperature = Math.min((opts?.temperature ?? 0.7) + 0.2, 1);
     }
+    // A refusal is not a transport error. Do not catch it or retry past it.
+    if (opts?.beforeDispatch) await opts.beforeDispatch();
     try {
       return await postCompletionFull(body);
     } catch (err) {

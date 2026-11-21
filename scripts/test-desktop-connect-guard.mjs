@@ -53,7 +53,7 @@ async function mainFixture(flag, connect = async () => ({ ok: false, error: "fix
   const libraries = {
     "scripts/lib/inference.mjs": {
       loadInference: () => inference, resolveInference: () => inference, isExpired: () => false,
-      storePath: (dir) => join(dir, "inference.json"),
+      hasRemovableInference: () => Boolean(inference),
       redactKey: () => "redacted", clearInference: () => { inference = null; },
       saveInference: (_dir, cfg) => inference = store("inference", cfg),
     },

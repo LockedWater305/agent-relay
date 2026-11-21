@@ -12,7 +12,6 @@
  * and a wrapper around a CLI.
  */
 import { runtimeLib } from "./paths.mjs";
-import { existsSync } from "node:fs";
 import { managedAccountConnectCapability } from "./connect.mjs";
 
 // Loaded from the runtime tree, not by a relative path: inside app.asar a
@@ -26,7 +25,7 @@ const {
   resolveInference,
   isExpired,
   redactKey,
-  storePath: inferenceStorePath,
+  hasRemovableInference,
 } = await runtimeLib("scripts/lib/inference.mjs");
 const {
   resolveSearch,
@@ -63,7 +62,7 @@ export function createSettingsHandlers({ dataDir, supervisor, cipher = {}, befor
       capabilities: { managedAccountConnect: managedAccountConnectCapability() },
       // Removal must not depend on successful decryption or provenance. A broken
       // store (or an owned injection whose file vanished) still needs an exit.
-      inferenceRemovable: existsSync(inferenceStorePath(dir)) || hasInjectedInferenceKey(),
+      inferenceRemovable: hasRemovableInference(dir) || hasInjectedInferenceKey(),
       inference: inf
         ? {
             provider: inf.provider,
@@ -119,19 +118,38 @@ export function createSettingsHandlers({ dataDir, supervisor, cipher = {}, befor
     status: () => describe(),
 
     /** @param {{provider?: "beezilla"|"byok", key: string, baseUrl?: string, model?: string, expiresAt?: string}} cfg */
-    async saveInference(cfg) {
+    async saveInference(cfg, adoption) {
       const key = (cfg?.key ?? "").trim();
       if (!key) throw new Error("a key is required");
       const provider = cfg.provider === "beezilla" ? "beezilla" : "byok";
-      const saved = saveInference(dataDir(), {
+      const dir = dataDir();
+      const saved = saveInference(dir, {
         provider,
         key,
         baseUrl: cfg.baseUrl ?? "",
         model: cfg.model ?? "",
         expiresAt: cfg.expiresAt ?? "",
       }, cipher);
+      // The inference record above is the commit point. An older search token
+      // no longer matches it, even if this optional mint could not be saved.
+      let searchSaved = null;
+      let searchError = null;
+      if (provider === "beezilla" && adoption) {
+        adoption.onCommitted?.();
+        if (adoption.search) {
+          try {
+            const search = saveManagedSearchStore(dir, {
+              ...adoption.search, managedConnectionId: saved.managedConnectionId,
+            }, cipher);
+            searchSaved = { gateway: search.gateway, expiresAt: search.expiresAt };
+          } catch {
+            searchError = "Managed search was not saved. Your own search key is unchanged.";
+          }
+        }
+      }
       const restartInfo = await restart();
-      return { saved: { provider: saved.provider, encrypted: saved.encrypted, key: redactKey(key) }, ...restartInfo, status: describe() };
+      return { saved: { provider: saved.provider, encrypted: saved.encrypted, key: redactKey(key) },
+        ...(adoption ? { searchSaved, searchError } : {}), ...restartInfo, status: describe() };
     },
 
     /** @param {{key: string}} cfg  ElevenLabs key for the Music button */
