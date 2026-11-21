@@ -63,6 +63,7 @@ import { isDraftRequest, isFileRequest, isExplicitDocumentRequest, isExecuteComm
 
 const WEB_PERSONA = `- WEB: you can search the live web and read any public page. If the person asks "what's the current X", "look up Y", or gives you a link, that is your job — the tools exist. Never say you "can't browse", "can't search the web", "don't have internet access" or "can't check that online"; doing so is false. If a lookup genuinely fails, say the lookup failed, not that you lack the ability. Cite the page you actually read.`;
 const LOCAL_WEB_PERSONA = "- WEB: Local Only is on for this turn. Do not perform or claim an online lookup.";
+const DEVICE_PERSONA = "- DEVICE ACCESS: saving to the Library does not write to an arbitrary path on the owner's device. If asked to edit files in a device folder or run OS commands, say that you cannot do that here. You may offer a Library copy they can download. Never claim a device edit or command ran.";
 
 const PERSONA = `You are BeeZilla, a no-nonsense project manager who turns a client's problem into a clear, actionable scope of work. Speak in plain business English — no jargon, no acronyms, no "mission"/"claim" talk, no small talk, no filler praise ("good call", "nice", "sorry you're dealing with that"). Style rules:
 - Be brief: 1–3 sentences per turn. Ask exactly ONE question per turn.
@@ -79,7 +80,8 @@ const PERSONA = `You are BeeZilla, a no-nonsense project manager who turns a cli
 - Only use details from THIS conversation. Never mention or reuse problems from other jobs.
 - WORK MODE: the client may send a filled-in Work definition (task, people, end goal, how they'll check it). Treat every line as a stated decision — emit the matching [slot: …] markers for what it contains, ask only for what is still missing, one question. In ordinary chat, when the request is clearly a multi-step effort the client will come back to AND at least two decisions are captured, ask once — in one sentence — whether they want to set it up as work. Never ask twice, and never ask for a one-off question.
 ${WEB_PERSONA}
-- FILES AND THE LIBRARY: every deliverable you produce is saved automatically as a versioned document in the owner's Library, with Markdown, PDF and Word copies. You have no filesystem of your own, but that does not matter — never say you "can't save files", have "no file-storage tool", or ask the owner to copy text out of the chat. If the owner asks to save something to their Library, produce or revise the deliverable so it is saved there — and only then say it is in the Library. A turn that produced no document has nothing to point at: say what you did not produce, never claim a file exists because the phrasing was requested.
+${DEVICE_PERSONA}
+- FILES AND THE LIBRARY: deliverables can be saved as versioned documents in the owner's Library, with Markdown, PDF and Word copies. Do not claim that Library saving is unavailable or ask the owner to copy text out of the chat. If asked to save to their Library, produce or revise the deliverable and only say it is in the Library if it was saved there. Say what you did not produce when there is no document.
 You never mention models, tokens, or technical internals.`;
 
 /** The persona is the only thing that differs between the two UI modes. */
@@ -97,6 +99,7 @@ const CHAT_PERSONA = `You are BeeZilla in conversation. This is ordinary chat �
 - If they ask you to actually accomplish something that needs a real effort (get bids, chase a refund, prepare a contract), answer what you can here, then say in one sentence that you can set it up as work — the Work tab does that. Offer once; never push twice.
 - Never write a price, penalty, date, or fact the person did not state. If you do not know, say so.
 ${WEB_PERSONA}
+${DEVICE_PERSONA}
 - Only use details from THIS conversation.
 You never mention models, tokens, or technical internals.`;
 
@@ -1037,7 +1040,9 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
           if (privacyRefusal) onlineLookupSkipped = true;
           followUpMessages.push({
             role: "user",
-            content: `tool_refused (${tc.name}): ${refusal} Do not tell the owner BeeZilla cannot do it — state what is still missing in one sentence, then continue.`,
+            content: `tool_refused (${tc.name}): ${refusal} ${policy
+              ? "Do not tell the owner BeeZilla cannot do it — state what is still missing in one sentence, then continue."
+              : "Say the tool is unavailable here. Do not claim it ran."}`,
           });
           await recordToolCall(sql, {
             userId, jobId, sessionId, turnId: req.attemptId ?? null,
@@ -1328,24 +1333,58 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   const sanitizedReply = sanitizeMemoryText(reply.content);
   // User-visible reply has decision markers removed; slots parse the raw
   // sanitized text (markers are how the model reports decisions) — dogfood B1.
-  // BZ-F042: a model must never tell the owner the product cannot save files —
-  // the Library is real. If the model still claims that limitation, drop the
-  // false sentence instead of shipping it, and mark the turn for review.
+  // The Library is real; writing to device paths and running commands are not.
+  // Distinguish these only in the reply, never infer a grant from user text.
   const CAPABILITY_LIE =
-    /\b(i can'?t (save|write|store|create) files?|no file[- ]?storage tool|cannot save (files|documents)|i don'?t have (access to )?(a )?file(system)?|no way to save)\b/i;
+    /^(?:(?:sorry|unfortunately),\s+)?(?:(?:(?:i\s+)?(?:can't|cannot)\s+(?:save|write|store|create)\s+(?:files?|documents?)|i don't have (?:access to )?(?:a )?filesystem)\b|(?:i\s+have\s+|there(?:'s| is)\s+)?(?:no file[- ]?storage tool|no way to save(?: files?| documents?)?)[.!?]?$)/i;
+  const LIBRARY_LIMITATION_PREFIX =
+    /^(?:i\s+)?(?:can't|cannot)\s+(?:save|write|store|create)(?:\s+(?:files?|documents?|it|this|that|(?:a|the|this|that)\s+(?:copy|file|document)))?\s+(?:to|in|into)\s+(?:beezilla\s+library|(?:the|your)\s+(?:beezilla\s+)?library)\b/i;
+  const SHARED_LIBRARY_TARGET =
+    /^(i\s+(?:can['’]t|cannot)\s+(?:save|write|store|create)\s+(?:files?|documents?)\s+(?:on|onto|to|in|into)\s+(?:your|this)\s+(?:device|computer|laptop|desktop|pc))\s+(?:or|nor)\s+(?:to|in|into)\s+(?:beezilla\s+library|(?:the|your)\s+(?:beezilla\s+)?library)(?:\s+(?:either|at all))?([.!?]?)$/i;
+  const DEVICE_SCOPE =
+    /\b(?:on|onto|in|into|to|from|within|inside)\s+(?:your|this)\s+(?:device|computer|machine|desktop|laptop|pc|file ?system|(?:downloads|documents|local|selected)\s+folder)\b|\b(?:arbitrary\s+(?:local\s+|file\s+)?paths?|local\s+file ?system|(?:os|shell|terminal)\s+commands?)\b|\b(?:to|in|at|from)\s+\x60?(?:~\/|[a-z]:[\\/])/i;
+  const LIBRARY_SCOPE = /\blibrary\b/i;
+  const capabilityClauses = (sentence: string) =>
+    sentence.split(/;\s*|,?\s+(?:but|however|and)\s+(?=(?:(?:i|i['’]ve|you|we)\s+)?(?:can(?:['’]t|not)?|could|if|don['’]t|do not|(?:already\s+)?(?:saved|wrote|stored|created|generated))\b)/i);
+  const replySentences = (text: string) => text.split(/(?<=[.!?])\s+/);
+  const isQuoted = (text: string) => /["“”‘]|(?:^|[\s(])'(?=\S)/.test(text);
+  const isConditional = (text: string) => /\b(?:if|unless|when|until|without)\b/i.test(text);
+  const libraryLimitation = (clause: string) => {
+    const match = LIBRARY_LIMITATION_PREFIX.exec(clause);
+    if (!match) return null;
+    const rest = clause.slice(match[0].length).trim();
+    if (/^(?:right now|at the moment|temporarily|because)\b/i.test(rest)) return "qualified";
+    return /^(?:either|at all)?[.!?]?$/i.test(rest) ? "unqualified" : null;
+  };
   let guardedReply = stripSlotMarkers(sanitizedReply);
   let capabilityLieStripped = false;
-  if (CAPABILITY_LIE.test(guardedReply)) {
-    capabilityLieStripped = true;
-    guardedReply = guardedReply
-      .split(/(?<=[.!?])\s+/)
-      .filter((sentence) => !CAPABILITY_LIE.test(sentence))
-      .join(" ")
-      .trim();
-    if (!guardedReply) {
-      // Never substitute a success claim for stripped text: whether anything was
-      // saved is decided later by whether this turn produced a deliverable.
-      guardedReply = "I have nothing to hand you from that turn.";
+  const sentencesBeforeCapabilityCheck = replySentences(guardedReply);
+  if (sentencesBeforeCapabilityCheck.some((sentence) => CAPABILITY_LIE.test(sentence.replace(/’/g, "'")) || LIBRARY_SCOPE.test(sentence))) {
+    const cleaned = sentencesBeforeCapabilityCheck.map((sentence) => {
+      // Only split mixed capability statements, not ordinary reply prose.
+      if (isQuoted(sentence)) return sentence;
+      const clauses = DEVICE_SCOPE.test(sentence) || LIBRARY_SCOPE.test(sentence)
+        ? capabilityClauses(sentence)
+        : [sentence];
+      const kept = clauses.flatMap((clause) => {
+        const text = clause.replace(/’/g, "'").trim();
+        if (isConditional(text)) return [clause];
+        const shared = SHARED_LIBRARY_TARGET.exec(clause.trim());
+        if (shared) return [shared[1] + shared[2]];
+        const library = libraryLimitation(text);
+        if (library === "qualified") return [clause];
+        if (library === "unqualified" || (CAPABILITY_LIE.test(text) && !DEVICE_SCOPE.test(text))) return [];
+        return [clause];
+      });
+      if (kept.length === clauses.length && kept.every((clause, i) => clause === clauses[i])) return sentence;
+      capabilityLieStripped = true;
+      const remainder = kept.join("; ").trim();
+      const punctuation = sentence.match(/[.!?]$/)?.[0] ?? "";
+      return remainder && !/[.!?]$/.test(remainder) ? remainder + punctuation : remainder;
+    }).filter(Boolean).join(" ").trim();
+    if (capabilityLieStripped) {
+      // An absent deliverable must not be replaced with a success claim.
+      guardedReply = cleaned || "I have nothing to hand you from that turn.";
     }
   }
   if (capabilityLieStripped) {
@@ -1359,8 +1398,33 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
   // produced nothing could still announce a file. Measured: a two-minute track
   // request answered "The track is in your Library." with the Library empty.
   // A reply may only point at an artifact this turn actually produced.
-  const CLAIMS_DELIVERY =
-    /\b(in your library|saved (it|that|this|the (file|document|track|song))|generated and saved|is ready for your approval|your (track|song|file|document) (is|has been) (ready|saved|generated)|i'?ve (saved|generated|created) (it|that|the))\b/i;
+  // Direct completed claims only: a bare destination, quote, or future
+  // offer does not assert that a file already exists.
+  const artifactNoun = String.raw`(?:(?:completed|finished|final|new)\s+)?(?:file|document|report|draft|copy|workbook|spreadsheet|presentation|deck|track|song)`;
+  const libraryDestination = String.raw`(?:(?:the|your)\s+(?:beezilla\s+)?library|beezilla\s+library)`;
+  const inLibrary = String.raw`in\s+${libraryDestination}\b`;
+  const completedDestination = String.raw`(?:(?:\s+for you)?[.!?]?$|\s+(?:in|to)\s+${libraryDestination}\b)`;
+  const savedStatus = String.raw`(?:saved|generated)\b(?:${completedDestination}|\s+and\s+ready\s+(?:to download|for your approval)\b)`;
+  const CLAIMS_DELIVERY = [
+    new RegExp(String.raw`^(?:i(?:['’]ve|\s+have)?\s+(?:(?:just|already|now)\s+)?)?(?:saved|generated|created)\s+(?:it|this|that|(?:the|your|a)\s+${artifactNoun})\b${completedDestination}`, "i"),
+    new RegExp(String.raw`^(?:(?:the|your|this|that)\s+${artifactNoun}\s+(?:is|has been)|it(?:['’]s|\s+is|\s+has been))\s+(?:(?:already|now)\s+)?(?:${inLibrary}|${savedStatus}|ready(?:[.!?]?$|\s+(?:${inLibrary}|for your approval\b|to download\b)))`, "i"),
+    new RegExp(String.raw`^generated\s+and\s+saved\b${completedDestination}`, "i"),
+  ];
+  // A directly named artifact is not quoted speech. Mask only a filename
+  // object of first-person "saved ... in the Library", only for detection.
+  const fileTitle = String.raw`[\p{L}\p{N} ._()-]{1,100}\.(?:docx?|pdf|md|txt|csv|xlsx?|pptx?|json|png|jpe?g|webp|zip)`;
+  const quotedFilenameSave = new RegExp(String.raw`^(i(?:['’]ve|\s+have)?\s+(?:(?:just|already|now)\s+)?saved\s+)(?:“${fileTitle}”|"${fileTitle}"|'${fileTitle}')(?=\s+(?:in|to)\s+${libraryDestination}(?:\s+for you)?[.!?]?$)`, "iu");
+  const maskQuotedFilename = (clause: string) => clause.trim().replace(quotedFilenameSave, "$1the file");
+  const hasQuotedSpeech = (sentence: string) =>
+    isQuoted(sentence) && capabilityClauses(sentence).some((clause) => isQuoted(maskQuotedFilename(clause)));
+  const refersToEarlierWork = (clause: string) => /\b(?:yesterday|previously|earlier|last (?:night|week|month|year))\b/i.test(clause);
+  const completedLibraryClaim = (clause: string) => {
+    const text = maskQuotedFilename(clause);
+    return !isConditional(text) && !refersToEarlierWork(text) && CLAIMS_DELIVERY.some((pattern) => pattern.test(text));
+  };
+  const claimsLibraryDelivery = (text: string) => replySentences(text).some((sentence) =>
+    !hasQuotedSpeech(sentence) && !/^(?:if|unless|when|until|without)\b/i.test(sentence.trim()) &&
+      (completedLibraryClaim(sentence) || capabilityClauses(sentence).some(completedLibraryClaim)));
   // Media claims are checked separately and always fail today: the chat has no
   // music tool, so a "track/song/audio" was never produced by this turn no matter
   // what the document says. Measured: "The track has been generated and is saved
@@ -1437,7 +1501,7 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
       (musicConfigured()
         ? "Ask me to make the track and I'll generate it now."
         : "Music isn't configured on this deployment, so no track can be produced here.");
-  } else if (CLAIMS_DELIVERY.test(finalReply) && !deliversThisTurn) {
+  } else if (!deliversThisTurn && claimsLibraryDelivery(finalReply)) {
     const wantsMusic = /\b(song|track|music|audio|jingle|score)\b/i.test(
       [message, ...history.filter((h) => h.role === "user").map((h) => h.content)].join(" "),
     );
@@ -1445,10 +1509,19 @@ export async function chatLoop(req: ChatRequest): Promise<ChatResponse> {
       ? " Music generation is not configured on this deployment, so no track was produced."
       : "";
     console.warn("[buzzy] reply claimed a Library deliverable on a turn that produced none");
-    finalReply =
-      "I did not actually produce anything that turn, so nothing was saved to your Library." +
-      reason +
-      " Nothing on my side claims otherwise. Tell me to build it again and I will run the tool and report exactly what it returned.";
+    const deviceLimits = replySentences(guardedReply).filter((sentence) => !hasQuotedSpeech(sentence))
+      .flatMap(capabilityClauses).map((clause) => clause.trim())
+      .filter((clause) => DEVICE_SCOPE.test(clause) && /^i\s+(?:can['’]t|cannot|don['’]t have|am unable to)\b/i.test(clause))
+      .map((clause) => /[.!?]$/.test(clause) ? clause : clause + ".");
+    if (deviceLimits.length) {
+      // Correct the unproduced claim without swallowing a separate true limit.
+      finalReply = deviceLimits.join(" ") + " Nothing was saved to your BeeZilla Library on this turn." + reason;
+    } else {
+      finalReply =
+        "I did not actually produce anything that turn, so nothing was saved to your Library." +
+        reason +
+        " Nothing on my side claims otherwise. Tell me to build it again and I will run the tool and report exactly what it returned.";
+    }
   }
   // Strip a leading machine token before the reply becomes the answer. The model
   // learned the filename from project memory, so it survived removing it from the
