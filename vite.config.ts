@@ -436,6 +436,14 @@ export default defineConfig(({ command }) => ({
                 handler: "./src/lib/auth-api.nitro.ts",
               },
               {
+                route: "/internal/brand-kit",
+                handler: "./src/lib/internal-brand-kit.nitro.ts",
+              },
+              {
+                route: "/internal/brand-kit/**",
+                handler: "./src/lib/internal-brand-kit.nitro.ts",
+              },
+              {
                 // What this deployment can actually do, answered from the same
                 // registry the chat loop uses.
                 route: "/api/buzzy/capabilities",
