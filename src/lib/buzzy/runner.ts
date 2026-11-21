@@ -1,8 +1,9 @@
-import { getSql } from "@/lib/db";
+import { getSql, type Sql } from "@/lib/db";
 import { chatCompletionFull, getModels } from "./llm";
 import { resolvePinLive, resolveReviewLive, providerOf, type ModelPin } from "./frontier";
 import { loadGraph } from "./graphs";
 import { costOf } from "./pricing";
+import { readLocalOnlyPreference } from "./modelPrefs";
 
 /**
  * The resolver (6e).
@@ -21,6 +22,37 @@ import { costOf } from "./pricing";
 
 const MAX_ATTEMPTS = 2;
 const MAX_INPUT_CHARS = 4000;
+
+type VerifyGraphOwner = () => Promise<string | null>;
+type GraphDispatchCheck = () => Promise<void>;
+
+export class GraphRunAdmissionError extends Error {
+  readonly code: "graph_session_changed" | "graph_policy_unavailable" | "graph_local_only";
+  readonly status: 401 | 403 | 503;
+
+  constructor(code: GraphRunAdmissionError["code"], status: GraphRunAdmissionError["status"], message: string) {
+    super(message);
+    this.code = code;
+    this.status = status;
+  }
+}
+
+function graphDispatchCheck(sql: Sql, userId: string, verifyOwner: VerifyGraphOwner): GraphDispatchCheck {
+  return async () => {
+    let verified: string | null = null;
+    try { verified = await verifyOwner(); } catch { /* cannot verify the original session */ }
+    if (verified !== userId) {
+      throw new GraphRunAdmissionError("graph_session_changed", 401, "Could not verify the original workflow session. Sign in again.");
+    }
+    let localOnly: boolean;
+    try { localOnly = await readLocalOnlyPreference(sql, userId); } catch {
+      throw new GraphRunAdmissionError("graph_policy_unavailable", 503, "Could not verify the Local Only setting. The workflow cannot continue.");
+    }
+    if (localOnly) {
+      throw new GraphRunAdmissionError("graph_local_only", 403, "This workflow can use a provider, so it cannot run in Local Only. You can still read and save it.");
+    }
+  };
+}
 
 interface SpecNode {
   key: string;
@@ -108,7 +140,7 @@ function instructionFor(node: SpecNode, context: string): { system: string; user
   };
 }
 
-export async function startRun(userId: string, graphId: string): Promise<{ runId: string; status: string; order: string[] }> {
+export async function startRun(userId: string, graphId: string, verifyOwner: VerifyGraphOwner): Promise<{ runId: string; status: string; order: string[] }> {
   const graph = await loadGraph(userId, graphId);
   if (!graph) throw new Error("No such graph on this account.");
   const nodes = graph.nodes as SpecNode[];
@@ -116,17 +148,19 @@ export async function startRun(userId: string, graphId: string): Promise<{ runId
   const spec: RunSpec = { title: graph.title, nodes, edges: graph.edges, order };
 
   const sql = await getSql();
+  const admit = graphDispatchCheck(sql, userId, verifyOwner);
+  await admit();
   const runId = `run_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
   await sql`
     INSERT INTO buzzy_graph_runs (id, graph_id, user_id, status, spec)
     VALUES (${runId}, ${graphId}, ${userId}, 'running', ${JSON.stringify(spec)}::jsonb)
   `;
-  const outcome = await executeFrom(userId, runId, spec, 0);
+  const outcome = await executeFrom(userId, runId, spec, 0, admit);
   return { runId, status: outcome.status, order };
 }
 
 /** Continue a run that stopped at a gate (or after a crash), from `startIdx`. */
-export async function resumeRun(userId: string, runId: string): Promise<{ status: string; resumedAt: number }> {
+export async function resumeRun(userId: string, runId: string, verifyOwner: VerifyGraphOwner): Promise<{ status: string; resumedAt: number }> {
   const sql = await getSql();
   const rows = await sql<{ status: string; spec: RunSpec }>`
     SELECT status, spec FROM buzzy_graph_runs WHERE id = ${runId} AND user_id = ${userId} LIMIT 1
@@ -143,6 +177,9 @@ export async function resumeRun(userId: string, runId: string): Promise<{ status
   `;
   const finished = new Set(done.map((r) => r.node_key));
   let nextIdx = run.spec.order.findIndex((k) => !finished.has(k));
+  const admit = graphDispatchCheck(sql, userId, verifyOwner);
+  // No approval or status mutation if the request can no longer proceed.
+  await admit();
   if (nextIdx >= 0) {
     const gateKey = run.spec.order[nextIdx]!;
     const node = run.spec.nodes.find((n) => n.key === gateKey);
@@ -158,7 +195,7 @@ export async function resumeRun(userId: string, runId: string): Promise<{ status
   }
 
   await sql`UPDATE buzzy_graph_runs SET status = 'running' WHERE id = ${runId}`;
-  const outcome = await executeFrom(userId, runId, run.spec, nextIdx < 0 ? run.spec.order.length : nextIdx);
+  const outcome = await executeFrom(userId, runId, run.spec, nextIdx < 0 ? run.spec.order.length : nextIdx, admit);
   return { status: outcome.status, resumedAt: nextIdx };
 }
 
@@ -167,6 +204,7 @@ async function executeFrom(
   runId: string,
   spec: RunSpec,
   startIdx: number,
+  admit: GraphDispatchCheck,
 ): Promise<{ status: string }> {
   const sql = await getSql();
   const byKey = new Map(spec.nodes.map((n) => [n.key, n]));
@@ -185,6 +223,25 @@ async function executeFrom(
   }
   const spentRow = await sql<{ cost: string }>`SELECT cost_usd::text AS cost FROM buzzy_graph_runs WHERE id = ${runId}`;
   spent = Number(spentRow[0]?.cost || 0);
+
+  const stopForPolicy = async (error: GraphRunAdmissionError) => {
+    await sql`
+      UPDATE buzzy_graph_runs SET status = 'failed', error = ${error.message}, cost_usd = ${spent}, finished_at = now()
+      WHERE id = ${runId} AND user_id = ${userId}
+    `;
+    // Do not return the run readback on the request whose session was revoked.
+    if (error.code === "graph_session_changed") throw error;
+    return { status: "failed" };
+  };
+  const currentDenial = async () => {
+    try {
+      await admit();
+      return null;
+    } catch (error) {
+      if (!(error instanceof GraphRunAdmissionError)) throw error;
+      return error;
+    }
+  };
 
   const upstream = (key: string): string => {
     const parts: string[] = [];
@@ -217,6 +274,8 @@ async function executeFrom(
     if (!node) continue;
 
     if (node.kind === "gate") {
+      const denial = await currentDenial();
+      if (denial) return stopForPolicy(denial);
       await sql`
         INSERT INTO buzzy_graph_node_results (run_id, node_key, attempt, status, output)
         VALUES (${runId}, ${node.key}, 1, 'awaiting_approval', ${JSON.stringify({ needs: "owner approval", title: node.title || node.key })}::jsonb)
@@ -231,6 +290,7 @@ async function executeFrom(
     let attempt = 1;
     let done = false;
     let lastError = "";
+    let resultDenial: GraphRunAdmissionError | null = null;
 
     while (attempt <= MAX_ATTEMPTS && !done) {
       const startedAt = new Date();
@@ -267,15 +327,24 @@ async function executeFrom(
             { role: "system", content: ask.system },
             { role: "user", content: ask.user },
           ],
-          { model, maxTokens: 900 },
+          { model, maxTokens: 900, beforeDispatch: admit },
         );
+        // Even a successful response without usage awaited the provider. Stop
+        // stale accounts before keeping new output or preparing the next step.
+        resultDenial = await currentDenial();
+        if (resultDenial?.code === "graph_session_changed") throw resultDenial;
+        if ((!out.content || !out.content.trim()) && resultDenial) throw resultDenial;
         if (!out.content || !out.content.trim()) throw new Error("the model returned nothing");
 
         // Real money: the gateway publishes per-token prices, so a cost is a
         // number or it is null ("unknown"), never a silent zero.
-        const priced = out.usage
-          ? await costOf(model, out.usage.promptTokens || 0, out.usage.completionTokens || 0)
-          : null;
+        let priced: number | null = null;
+        if (out.usage && !resultDenial) {
+          // The check after completion also gates this separate gateway lookup.
+          priced = await costOf(model, out.usage.promptTokens || 0, out.usage.completionTokens || 0);
+          resultDenial = await currentDenial();
+          if (resultDenial?.code === "graph_session_changed") throw resultDenial;
+        }
         const cost = priced ?? 0;
         spent += cost;
 
@@ -293,6 +362,7 @@ async function executeFrom(
         if (node.kind !== "review") lastProducerModel = model;
         done = true;
       } catch (e) {
+        if (e instanceof GraphRunAdmissionError) return stopForPolicy(e);
         lastError = (e as Error).message.slice(0, 300);
         const latency = Date.now() - started;
         await sql`
@@ -305,12 +375,17 @@ async function executeFrom(
       }
     }
 
+    // Keep the already admitted result for the verified owner, but do not
+    // enter another gate/step or mark the run done on a policy denial.
+    if (resultDenial) return stopForPolicy(resultDenial);
     if (!done) {
       await sql`UPDATE buzzy_graph_runs SET status = 'failed', error = ${lastError}, cost_usd = ${spent}, finished_at = now() WHERE id = ${runId}`;
       return { status: "failed" };
     }
   }
 
+  const denial = await currentDenial();
+  if (denial) return stopForPolicy(denial);
   await sql`UPDATE buzzy_graph_runs SET status = 'done', cost_usd = ${spent}, finished_at = now() WHERE id = ${runId}`;
   return { status: "done" };
 }

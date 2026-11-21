@@ -39,7 +39,7 @@ import { validateGraph, saveGraph, listGraphs, loadGraph } from "./graphs";
 import { gatedMusic, generateMusic, storeAudio, musicConfigured } from "./music";
 import { createModelTask, readModelTask, storeModel, threeDConfigured } from "./models3d";
 import { resolvePinLive, resolveReviewLive, frontierAsOfLive, frontierAsOf, getSnapshot, saveSnapshot, validateSnapshot, providerOf, type ModelPin } from "./frontier";
-import { startRun, resumeRun, readRun } from "./runner";
+import { GraphRunAdmissionError, startRun, resumeRun, readRun } from "./runner";
 import { priceTable, frontierModels } from "./pricing";
 import { buildRanking } from "./ranking";
 import { getProfile, saveProfile, reuseDefaults, PROFILE_FIELDS } from "./profile";
@@ -311,6 +311,25 @@ function headersFromEvent(event: any): Headers {
     (rawHeaders ?? {}) as Record<string, string | string[] | undefined>,
   ).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : (v ?? "")]);
   return new Headers(init);
+}
+
+function verifyGraphOwner(original: Headers): Promise<string | null> {
+  return getSessionUserFromHeaders(new Headers(original), { authoritative: true })
+    .then((user) => user?.id ?? null);
+}
+
+async function readGraphMutationResponse(original: Headers, userId: string, runId: string) {
+  const requireOwner = async () => {
+    const current = await verifyGraphOwner(original).catch(() => null);
+    if (current !== userId) {
+      throw new GraphRunAdmissionError("graph_session_changed", 401, "Could not verify the original workflow session. Sign in again.");
+    }
+  };
+  await requireOwner();
+  const run = await readRun(userId, runId);
+  // The snapshot read can await storage. Do not expose it to a stale owner.
+  await requireOwner();
+  return run;
 }
 
 /**
@@ -1054,7 +1073,8 @@ export default defineEventHandler(async (event) => {
   // Running is synchronous: a four-node workflow is a handful of model calls,
   // and a run that returns only after it finished cannot lie about its status.
   if (path.startsWith("/api/buzzy/runs")) {
-    const user = await getSessionUserFromHeaders(headersFromEvent(event));
+    const originalHeaders = new Headers(headersFromEvent(event));
+    const user = await getSessionUserFromHeaders(new Headers(originalHeaders));
     if (!user) {
       setResponseStatus(event, 401);
       return { ok: false, error: "Sign in required", code: "signed_out" };
@@ -1074,10 +1094,14 @@ export default defineEventHandler(async (event) => {
 
     if (method === "POST" && runId && action === "approve") {
       try {
-        const r = await resumeRun(user.id, runId);
-        const run = await readRun(user.id, runId);
+        const r = await resumeRun(user.id, runId, () => verifyGraphOwner(originalHeaders));
+        const run = await readGraphMutationResponse(originalHeaders, user.id, runId);
         return { ok: true, resumed: r, run };
       } catch (e) {
+        if (e instanceof GraphRunAdmissionError) {
+          setResponseStatus(event, e.status);
+          return { ok: false, error: e.message, code: e.code };
+        }
         setResponseStatus(event, 400);
         return { ok: false, error: (e as Error).message, code: "cannot_resume" };
       }
@@ -1088,17 +1112,22 @@ export default defineEventHandler(async (event) => {
 
   // ── POST /api/buzzy/graphs/:id/run — start it ────────────────────────
   if (method === "POST" && /^\/api\/buzzy\/graphs\/[A-Za-z0-9_-]+\/run$/.test(path)) {
-    const user = await getSessionUserFromHeaders(headersFromEvent(event));
+    const originalHeaders = new Headers(headersFromEvent(event));
+    const user = await getSessionUserFromHeaders(new Headers(originalHeaders));
     if (!user) {
       setResponseStatus(event, 401);
       return { ok: false, error: "Sign in required", code: "signed_out" };
     }
     const graphId = path.split("/")[4]!;
     try {
-      const r = await startRun(user.id, graphId);
-      const run = await readRun(user.id, r.runId);
+      const r = await startRun(user.id, graphId, () => verifyGraphOwner(originalHeaders));
+      const run = await readGraphMutationResponse(originalHeaders, user.id, r.runId);
       return { ok: true, ...r, run };
     } catch (e) {
+      if (e instanceof GraphRunAdmissionError) {
+        setResponseStatus(event, e.status);
+        return { ok: false, error: e.message, code: e.code };
+      }
       setResponseStatus(event, 400);
       return { ok: false, error: (e as Error).message, code: "cannot_run" };
     }
