@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { getRequest } from "@tanstack/react-start/server";
 import { auth, authConfigured } from "./server";
 import { isLocalRuntime } from "../runtime";
-import { localToken, resolveLocalRequester } from "../local-owner";
+import { LOCAL_OWNER_ID, localToken, resolveLocalRequester } from "../local-owner";
 import {
   gateCapability,
   resolveOperatorRoleFromEnv,
@@ -78,12 +78,16 @@ export class ForbiddenError extends Error {
   }
 }
 
-export type VerifiedUser = { id: string; email: string | null; name?: string | null; attachmentBinding?: string };
+/**
+ * An opt-in, server-only key for short context stamps. It is derived from the
+ * already verified session/launch, not a second credential or a stored key.
+ * Attachment uses its existing domain; microphone input cannot reuse it.
+ */
+type BindingPurpose = "audio-input" | "talk-attachment";
+export type VerifiedUser = { id: string; email: string | null; name?: string | null; requestBinding?: string };
 
-// Derive a server-side, purpose-specific binding from the already verified
-// session. Normal auth callers receive exactly their prior payload.
-function attachmentBinding(secret: string, scope: "device" | "hosted"): string {
-  return createHmac("sha256", secret).update("beezilla/talk-attachment-session/v1:" + scope).digest("hex");
+function bindVerifiedRequest(token: string, purpose: BindingPurpose, scope: "device" | "hosted"): string {
+  return createHmac("sha256", token).update(`beezilla/${purpose}-session/v1:${scope}`).digest("hex");
 }
 
 /**
@@ -92,16 +96,21 @@ function attachmentBinding(secret: string, scope: "device" | "hosted"): string {
  */
 export async function getSessionUserFromHeaders(
   headers: Headers,
-  { authoritative = false, bindAttachment = false }: { authoritative?: boolean; bindAttachment?: boolean } = {},
+  { authoritative = false, bindRequest }: { authoritative?: boolean; bindRequest?: BindingPurpose } = {},
 ): Promise<VerifiedUser | null> {
   // Local (desktop / CLI) installs: Host allowlist + per-launch bearer token,
   // NOT a cookie session. This is the single chokepoint every Nitro handler
   // already goes through, so local auth needs no per-route changes.
   if (isLocalRuntime()) {
-    const requester = await resolveLocalRequester(headers);
-    if (!bindAttachment || !requester) return requester;
+    if (!bindRequest) return resolveLocalRequester(headers);
+    // Unbound legacy/dev helpers may accept Host-only. Never mint a bound
+    // capability without the launch credential enforced by packaged desktop.
     const token = localToken();
-    return token ? { ...requester, attachmentBinding: attachmentBinding(token, "device") } : null;
+    if (!token || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) return null;
+    const user = await resolveLocalRequester(headers);
+    return user?.id === LOCAL_OWNER_ID && token === localToken()
+      ? { ...user, requestBinding: bindVerifiedRequest(token, bindRequest, "device") }
+      : null;
   }
   if (!authConfigured) return null;
   try {
@@ -109,7 +118,7 @@ export async function getSessionUserFromHeaders(
     // without extending the lifetime of the original session on a recheck.
     const session = await auth.api.getSession({
       headers,
-      ...(authoritative || bindAttachment ? { query: { disableCookieCache: true, disableRefresh: true } } : {}),
+      ...(authoritative || bindRequest ? { query: { disableCookieCache: true, disableRefresh: true } } : {}),
     });
     if (!session?.user) return null;
     // Platform-disabled accounts must not resolve as signed-in (any path).
@@ -117,13 +126,15 @@ export async function getSessionUserFromHeaders(
       const { boardOps } = await import("../board-server");
       if (await boardOps.isUserDisabled(session.user.id)) return null;
     } catch {
-      if (authoritative || bindAttachment) return null;
+      if (authoritative || bindRequest) return null;
       /* board store unavailable — fail open only if import fails mid-boot */
     }
     const user = { id: session.user.id, email: session.user.email ?? null };
-    if (!bindAttachment) return user;
+    if (!bindRequest) return user;
     const token = session.session?.token;
-    return session.session?.userId === user.id && typeof token === "string" && token ? { ...user, attachmentBinding: attachmentBinding(token, "hosted") } : null;
+    return user.id && session.session?.userId === user.id && typeof token === "string" && token
+      ? { ...user, requestBinding: bindVerifiedRequest(token, bindRequest, "hosted") }
+      : null;
   } catch {
     return null;
   }

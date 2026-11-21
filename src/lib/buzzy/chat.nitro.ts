@@ -9,6 +9,7 @@
  *   GET  /api/buzzy/models          — list available models (labels + ids)
  *   GET  /api/buzzy/memory          — aggregate memory for the Memory page
  *   GET  /api/buzzy/transcript      — restore chat (jobId or sessionId)
+ *   GET  /api/buzzy/audio-input-capability — current pre-capture policy, no audio
  *   GET  /api/buzzy/profile         — account-scoped business profile + defaults
  *   PUT  /api/buzzy/profile         — save profile fields (closed key set)
  *   POST /api/buzzy/profile/reuse   — copy chosen defaults into a job
@@ -32,6 +33,7 @@ import { chatLoop } from "./server";
 import type { VoiceHandlers } from "./voice";
 import { summarizeSessionNow } from "./sessions";
 import { getSessionUserFromHeaders } from "@/lib/auth/verify.server";
+import { acceptsRequestContext, issueRequestContext } from "@/lib/auth/request-context.server";
 import { getModels, chatCompletion } from "./llm";
 import { dbSource, getSql, type Sql } from "@/lib/db";
 import { honchoAvailable } from "./honcho";
@@ -77,12 +79,14 @@ import { recordTelemetry, successSummary, TELEMETRY_DISCLOSURE } from "./telemet
 import { RECIPES, UNIVERSAL_STATEMENTS, getRecipe, validateRecipe, boundaryViolations } from "./recipes";
 import { resolveActingAccount, guard, canPerform, denialReason, TEAM_ACTIONS, DELEGATABLE, authorize, type MemberRole } from "./team";
 import { STATEMENT_IDS, DEEPENING_IDS } from "./questions";
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash } from "node:crypto";
 import { transcribeAudio, formatFromContentType, ASR_MAX_BYTES, normalizeVocab } from "./asr";
 import { readLocalOnlyPreference } from "./modelPrefs";
 import { isLocalRuntime } from "../runtime";
 import { LOCAL_OWNER_ID, localToken } from "../local-owner";
 import { LibraryVaultError, readVaultBody, validateVaultBatch, storeVaultBatch, listVaultPage, vaultPageOptions, getVaultMetadata } from "./libraryVault";
+
+const AUDIO_INPUT_CONTEXT = { purpose: "audio-input-v1", scope: "guarded_server", ttlMs: 15_000, clockSkewMs: 1_000 } as const;
 
 /**
  * Largest single file the bulk asset path will store. A skills corpus is
@@ -338,7 +342,10 @@ const ATTACHMENT_CONTEXT_HEADER = "x-bz-attachment-context";
 const ATTACHMENT_CONTEXT_TTL = 2 * 60 * 1000;
 const ATTACHMENT_CONTEXT_CLOCK_SKEW_MS = 5000;
 async function attachmentAdmission(event: Parameters<typeof getMethod>[0], bindAttachment = false) {
-  const user = await getSessionUserFromHeaders(headersFromEvent(event), { authoritative: true, bindAttachment }).catch(() => null);
+  const user = await getSessionUserFromHeaders(headersFromEvent(event), {
+    authoritative: true,
+    bindRequest: bindAttachment ? "talk-attachment" : undefined,
+  }).catch(() => null);
   const refuse = (status: number, code: string, error: string) => {
     setResponseStatus(event, status);
     return { ok: false as const, code, error };
@@ -361,25 +368,19 @@ async function attachmentAdmission(event: Parameters<typeof getMethod>[0], bindA
 }
 
 type AttachmentAdmission = Extract<Awaited<ReturnType<typeof attachmentAdmission>>, { ok: true }>;
-function attachmentSignature(admission: AttachmentAdmission, prefix: string): string | null {
-  const key = admission.user.attachmentBinding;
-  if (!key) return null;
-  return createHmac("sha256", key)
-    .update(JSON.stringify(["talk-attachment-v1", admission.user.id, admission.destination, prefix]))
-    .digest("base64url");
+function attachmentContextSpec(admission: AttachmentAdmission) {
+  return {
+    purpose: "talk-attachment-v1" as const,
+    scope: admission.destination,
+    ttlMs: ATTACHMENT_CONTEXT_TTL,
+    clockSkewMs: ATTACHMENT_CONTEXT_CLOCK_SKEW_MS,
+  };
 }
 function issueAttachmentContext(admission: AttachmentAdmission): string | null {
-  const prefix = String(Date.now() + ATTACHMENT_CONTEXT_TTL) + "." + randomBytes(12).toString("base64url");
-  const signature = attachmentSignature(admission, prefix);
-  return signature ? prefix + "." + signature : null;
+  return issueRequestContext(admission.user, attachmentContextSpec(admission));
 }
 function acceptsAttachmentContext(admission: AttachmentAdmission, value: unknown): boolean {
-  const match = typeof value === "string" && /^([0-9]{13}\.[A-Za-z0-9_-]{16})\.([A-Za-z0-9_-]{43})$/.exec(value);
-  if (!match) return false;
-  const now = Date.now(), expires = Number(match[1].slice(0, 13));
-  if (expires <= now || expires - now > ATTACHMENT_CONTEXT_TTL + ATTACHMENT_CONTEXT_CLOCK_SKEW_MS) return false;
-  const expected = attachmentSignature(admission, match[1]);
-  return !!expected && timingSafeEqual(Buffer.from(expected), Buffer.from(match[2]));
+  return acceptsRequestContext(admission.user, attachmentContextSpec(admission), value);
 }
 function attachmentContextChanged(event: Parameters<typeof getMethod>[0]) {
   setResponseStatus(event, 409);
@@ -602,6 +603,49 @@ export default defineEventHandler(async (event) => {
     };
   }
 
+  // Read-only preflight. It authorizes no capture, sends no audio, and deliberately
+  // does not inspect transcriber credentials or contact a provider.
+  if (path === "/api/buzzy/audio-input-capability") {
+    setResponseHeader(event, "Cache-Control", "private, no-store");
+    const refuse = (status: number, code: string, error: string) => {
+      setResponseStatus(event, status);
+      return { ok: false, version: 1, input: "disabled", code, error };
+    };
+    if (method !== "GET") {
+      setResponseHeader(event, "Allow", "GET");
+      return refuse(405, "audio_input_method", "Read microphone policy with GET.");
+    }
+    const original = new Headers(headersFromEvent(event));
+    const site = original.get("sec-fetch-site");
+    if (site && site !== "same-origin" && site !== "none") {
+      return refuse(403, "audio_input_origin", "Check microphone settings from this BeeZilla page.");
+    }
+    const startedAt = Date.now();
+    const previous = original.get("x-bz-audio-context");
+    const verify = () => getSessionUserFromHeaders(new Headers(original), { bindRequest: "audio-input" }).catch(() => null);
+    const unavailable = () => refuse(503, "audio_input_policy_unavailable", "Microphone settings could not be verified. Use typed chat or try again.");
+    const expired = () => refuse(409, "audio_context_changed", "Microphone authorization expired or changed. Choose Listen or Record again.");
+    const blocked = () => refuse(409, "audio_input_local_only", "Local Only is on. This build has no verified on-device transcription. Use typed chat.");
+    const user = await verify();
+    if (!user?.requestBinding) return refuse(401, "audio_input_auth_unverified", "Could not verify the microphone session.");
+    if (previous !== null && !acceptsRequestContext(user, AUDIO_INPUT_CONTEXT, previous)) return expired();
+    try {
+      const sql = await getSql();
+      if (await readLocalOnlyPreference(sql, user.id)) return blocked();
+      // The original session may have been revoked or rotated during the read.
+      const current = await verify();
+      if (!current || current.id !== user.id || current.requestBinding !== user.requestBinding) return expired();
+      if (await readLocalOnlyPreference(sql, current.id)) return blocked();
+      if (previous !== null && !acceptsRequestContext(current, AUDIO_INPUT_CONTEXT, previous)) return expired();
+      const context = issueRequestContext(current, AUDIO_INPUT_CONTEXT, startedAt);
+      const maxAgeMs = startedAt + AUDIO_INPUT_CONTEXT.ttlMs - Date.now();
+      if (!context || maxAgeMs <= 0 || maxAgeMs > AUDIO_INPUT_CONTEXT.ttlMs || event.req.signal?.aborted) return unavailable();
+      return { ok: true, version: 1, input: "guarded_server", context, maxAgeMs };
+    } catch {
+      return unavailable();
+    }
+  }
+
   // ── POST /api/buzzy/transcribe — session-gated ───────────────────────
   // Server-side ASR so Firefox and Brave can talk at all: Firefox ships no
   // SpeechRecognition and Brave only returns service-not-allowed from it.
@@ -609,13 +653,40 @@ export default defineEventHandler(async (event) => {
   // listening, on the same gateway and key as the voice lane.
   if (method === "POST" && path === "/api/buzzy/transcribe") {
     const originalHeaders = new Headers(headersFromEvent(event));
+    // Legacy renderers do not send a context; preserve their existing guard.
+    // New renderers can opt into a matching, unexpired preflight without
+    // weakening either authoritative identity or Local Only check.
+    const boundContext = originalHeaders.get("x-bz-audio-context");
+    if (boundContext !== null) {
+      setResponseHeader(event, "Cache-Control", "private, no-store");
+      const site = originalHeaders.get("sec-fetch-site");
+      if (site && site !== "same-origin" && site !== "none") {
+        setResponseStatus(event, 403);
+        return { ok: false, code: "audio_input_origin", error: "Use the microphone from this BeeZilla page." };
+      }
+    }
     const verifyAudioRequester = () =>
-      getSessionUserFromHeaders(new Headers(originalHeaders), { authoritative: true }).catch(() => null);
+      getSessionUserFromHeaders(new Headers(originalHeaders), boundContext === null
+        ? { authoritative: true } : { bindRequest: "audio-input" }).catch(() => null);
+    const contextChanged = () => {
+      setResponseStatus(event, 409);
+      return { ok: false, code: "audio_context_changed", error: "Microphone authorization expired or changed. Choose Listen or Record again." };
+    };
+    const sessionChanged = () => {
+      setResponseStatus(event, 401);
+      return { ok: false, code: "transcription_session_changed",
+        error: "The original session could not be verified. Sign in again before transcribing." };
+    };
+    const cancelled = () => {
+      setResponseStatus(event, 499);
+      return { ok: false, code: "transcription_cancelled", error: "Transcription was cancelled." };
+    };
     const user = await verifyAudioRequester();
     if (!user) {
       setResponseStatus(event, 401);
       return { ok: false, error: "Sign in required", code: "signed_out" };
     }
+    if (boundContext !== null && !acceptsRequestContext(user, AUDIO_INPUT_CONTEXT, boundContext)) return contextChanged();
     // This route runs before chatLoop, including for the desktop mic test.
     // A loopback runtime/endpoint does not prove that ASR runs on-device.
     let privacySql: Sql | undefined;
@@ -634,6 +705,14 @@ export default defineEventHandler(async (event) => {
     };
     const beforeRead = await checkTranscriptionPrivacy();
     if (beforeRead) return beforeRead;
+    if (boundContext !== null) {
+      // The authorization observed before the awaited privacy read may no
+      // longer match. Check the same request's current binding and deadline
+      // without opening its body. Unstamped renderers retain their old path.
+      const current = await verifyAudioRequester();
+      if (!current || current.id !== user.id) return sessionChanged();
+      if (!acceptsRequestContext(current, AUDIO_INPUT_CONTEXT, boundContext)) return contextChanged();
+    }
     const format = formatFromContentType(getHeader(event, "content-type"));
     if (!format) {
       setResponseStatus(event, 415);
@@ -644,6 +723,7 @@ export default defineEventHandler(async (event) => {
       };
     }
     let audio: Uint8Array;
+    if (boundContext !== null && event.req.signal?.aborted) return cancelled();
     try {
       audio = new Uint8Array(await event.req.arrayBuffer());
     } catch {
@@ -710,17 +790,11 @@ export default defineEventHandler(async (event) => {
     // session. Recheck original credentials without using the hosted cookie
     // cache, then make a fresh owner-scoped privacy read before forwarding.
     const requester = await verifyAudioRequester();
-    if (!requester || requester.id !== user.id) {
-      setResponseStatus(event, 401);
-      return { ok: false, code: "transcription_session_changed",
-        error: "The original session could not be verified. Sign in again before transcribing." };
-    }
+    if (!requester || requester.id !== user.id) return sessionChanged();
     const beforeForward = await checkTranscriptionPrivacy();
     if (beforeForward) return beforeForward;
-    if (event.req.signal?.aborted) {
-      setResponseStatus(event, 499);
-      return { ok: false, code: "transcription_cancelled", error: "Transcription was cancelled." };
-    }
+    if (boundContext !== null && !acceptsRequestContext(requester, AUDIO_INPUT_CONTEXT, boundContext)) return contextChanged();
+    if (event.req.signal?.aborted) return cancelled();
     try {
       const r = await transcribeAudio(audio, format, vocab);
       // Time to transcript is a product number, not a log line. Recorded with
