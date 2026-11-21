@@ -9,6 +9,7 @@ import { createDocumentTransition } from "../desktop/document-transition.mjs";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
+import * as crypto from "node:crypto";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
@@ -24,6 +25,11 @@ const ROOT = process.env.BZ_SETTINGS_PROVENANCE_BASELINE_DIR
   : url.fileURLToPath(new URL("../", import.meta.url));
 const read = (name) => fs.readFileSync(path.join(ROOT, name), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
+function assertRetirementMarkerOnly(file) {
+  const record = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(Object.keys(record), ["managedConnectionId"]);
+  assert.match(record.managedConnectionId, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
+}
 const quiet = { log() {}, warn() {}, error() {} };
 const keys = ["BZ_CHAT_KEY", "BZ_CHAT_BASE_URL", "BZ_CHAT_MODEL"];
 const byok = { provider: "byok", key: "synthetic-key-byok-1234567890", baseUrl: "https://byok.example/v1", model: "fixture-model" };
@@ -77,7 +83,7 @@ async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDi
       safeStorage: { encryptString: cipher.encrypt, decryptString: cipher.decrypt },
       ipcMain: { handle: (name, fn) => ipc.set(name, fn) }, systemPreferences: {},
     },
-    "node:fs": fs, "node:path": path, "node:url": url,
+    "node:fs": fs, "node:path": path, "node:url": url, "node:crypto": crypto,
     "./supervisor.mjs": { RuntimeSupervisor: FakeSupervisor },
     "./logger.mjs": { installLogging() {}, logLine() {}, logPaths: () => ({}) },
     "./connect.mjs": { ...connect, managedAccountConnectCapability: () => connect.managedAccountConnectCapability?.(env), connectAccount: unexpected("Connect"), cloudBaseUrl: unexpected("cloud URL") },
@@ -89,6 +95,7 @@ async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDi
   };
   const modules = new Map();
   async function load(name) {
+    if (name === "./inference.mjs") name = "scripts/lib/inference.mjs";
     if (modules.has(name)) return modules.get(name);
     let mod;
     if (mocks[name]) {
@@ -460,7 +467,8 @@ for (const failure of ["decrypt", "malformed", "missing"]) {
     assert.equal(ui.nodes.get("clear-inference").disabled, false);
     await ui.click("clear-inference");
     assert.equal(fx.env.BZ_CHAT_KEY, undefined);
-    assert.equal(fs.existsSync(file), false);
+    if (failure === "malformed") assertRetirementMarkerOnly(file);
+    else assert.equal(fs.existsSync(file), false);
     assert.equal(ui.nodes.get("clear-inference").disabled, true);
     fx.flush();
     const refreshed = renderer(fx.bridge);
@@ -483,7 +491,7 @@ test("a damaged file remains removable with no active key, while environment-onl
   assert.match(ui.nodes.get("inference-current").innerHTML, /Saved credential unavailable/);
   assert.equal(ui.nodes.get("clear-inference").disabled, false);
   await ui.click("clear-inference");
-  assert.equal(fs.existsSync(file), false);
+  assertRetirementMarkerOnly(file);
   assert.equal(ui.nodes.get("clear-inference").disabled, true);
   const envOnly = await fixture(t, { env: { BZ_CHAT_KEY: "synthetic-key-environment-only-1234567890" } });
   assert.equal((await envOnly.status()).inferenceRemovable, false);

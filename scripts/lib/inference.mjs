@@ -19,7 +19,8 @@
  * Precedence: explicit environment always wins. A desktop user who exported
  * BZ_CHAT_KEY for a test must not be silently overridden by a stale store file.
  */
-import { chmodSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 export const STORE_FILE = "inference.json";
@@ -33,6 +34,42 @@ export const MANAGED_DEFAULTS = {
 
 export function storePath(dataDir) {
   return join(dataDir, STORE_FILE);
+}
+
+const validConnection = (id) => typeof id === "string" &&
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id);
+
+// undefined means a legacy/no record; null means a connection cannot safely
+// be identified. Read the pairing marker without decrypting either key.
+export function managedSearchConnection(dataDir) {
+  try {
+    const raw = JSON.parse(readFileSync(storePath(dataDir), "utf8"));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    if (!Object.hasOwn(raw, "managedConnectionId")) return undefined;
+    return validConnection(raw.managedConnectionId) ? raw.managedConnectionId : null;
+  } catch (error) {
+    return error?.code === "ENOENT" ? undefined : null;
+  }
+}
+
+export function hasRemovableInference(dataDir) {
+  try {
+    const raw = JSON.parse(readFileSync(storePath(dataDir), "utf8"));
+    return !(raw && validConnection(raw.managedConnectionId) && Object.keys(raw).length === 1);
+  } catch (error) {
+    return error?.code !== "ENOENT";
+  }
+}
+
+export function writeCredentialRecord(file, value) {
+  // A failed encryption/write/rename must not half-adopt a connection.
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+    renameSync(tmp, file);
+  } finally {
+    try { rmSync(tmp, { force: true }); } catch { /* private staging file */ }
+  }
 }
 
 /**
@@ -101,6 +138,10 @@ export function saveInference(dataDir, cfg, cipher = {}) {
     : key;
 
   const baseUrl = (cfg.baseUrl ?? "").trim();
+  const priorConnection = managedSearchConnection(dataDir);
+  const managedConnectionId = cfg.provider === "beezilla" || priorConnection === null
+    ? randomUUID()
+    : priorConnection;
   const payload = {
     provider: cfg.provider,
     baseUrl: baseUrl || (cfg.provider === "beezilla" ? MANAGED_DEFAULTS.baseUrl : ""),
@@ -109,19 +150,17 @@ export function saveInference(dataDir, cfg, cipher = {}) {
     encrypted,
     keyCipher,
     updatedAt: new Date().toISOString(),
+    ...(managedConnectionId ? { managedConnectionId } : {}),
   };
-  const file = storePath(dataDir);
-  writeFileSync(file, JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
-  try {
-    chmodSync(file, 0o600);
-  } catch {
-    /* Windows ignores POSIX modes; Electron encryption is the real control there */
-  }
+  writeCredentialRecord(storePath(dataDir), payload);
   return { ...payload, keyCipher: undefined };
 }
 
 export function clearInference(dataDir) {
-  rmSync(storePath(dataDir), { force: true });
+  const id = managedSearchConnection(dataDir);
+  // Removing inference must not reactivate an unpaired legacy search token.
+  if (id !== undefined) writeCredentialRecord(storePath(dataDir), { managedConnectionId: id ?? randomUUID() });
+  else rmSync(storePath(dataDir), { force: true });
 }
 
 /** Never let a key reach a log line, an error message or a `--show` output. */
