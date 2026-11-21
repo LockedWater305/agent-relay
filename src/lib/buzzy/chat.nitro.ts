@@ -32,7 +32,7 @@ import { chatLoop } from "./server";
 import type { VoiceHandlers } from "./voice";
 import { summarizeSessionNow } from "./sessions";
 import { getSessionUserFromHeaders } from "@/lib/auth/verify.server";
-import { getModels, chatCompletion } from "./llm";
+import { getModels, chatCompletion, localChatTransportIssue } from "./llm";
 import { getSql, type Sql } from "@/lib/db";
 import { honchoAvailable } from "./honcho";
 import { validateGraph, saveGraph, listGraphs, loadGraph } from "./graphs";
@@ -1270,28 +1270,33 @@ export default defineEventHandler(async (event) => {
     // never implicitly selected a company here; admission does not migrate them.
     const companyId = requestedCompany || ownedSession?.company_id || null;
 
-    // ── Plan + quota, before any provider call ───────────────────────────────
-    // The web app calls the provider from OUR server, not through /api/inference,
-    // so a session turn is metered and refused here. Without this a free account
-    // could spend our quota from the web while the gateway refused the same account.
-    // A display label is not a model id, so the allowlist applies to ids only.
-    const modelId = model && model.includes("/") ? model : undefined;
-    const quota = await checkQuota({ userId, scope: "inference", units: 1, model: modelId });
-    if (!quota.ok) {
-      await recordUsage({
-        userId,
-        scope: "inference",
-        units: 0,
-        ms: 0,
-        status: "refused",
-        code: quota.code ?? "quota",
-        model: modelId ?? null,
-      });
-      setResponseStatus(event, quota.code === "model_not_allowed" ? 403 : quota.code === "plan_required" ? 402 : 429);
-      return { ok: false, error: quota.error, code: quota.code, plan: quota.plan, limit: quota.limit, used: quota.used };
+    // A cold desktop still admits local reads (including replay below), not a
+    // metered turn. Refuse before telemetry, streams, extraction or web lookup.
+    const transportIssue = localChatTransportIssue();
+    if (!transportIssue) {
+      // ── Plan + quota, before any provider call ─────────────────────────────
+      // The web app calls the provider from OUR server, not through /api/inference,
+      // so a session turn is metered and refused here. Without this a free account
+      // could spend our quota from the web while the gateway refused the same account.
+      // A display label is not a model id, so the allowlist applies to ids only.
+      const modelId = model && model.includes("/") ? model : undefined;
+      const quota = await checkQuota({ userId, scope: "inference", units: 1, model: modelId });
+      if (!quota.ok) {
+        await recordUsage({
+          userId,
+          scope: "inference",
+          units: 0,
+          ms: 0,
+          status: "refused",
+          code: quota.code ?? "quota",
+          model: modelId ?? null,
+        });
+        setResponseStatus(event, quota.code === "model_not_allowed" ? 403 : quota.code === "plan_required" ? 402 : 429);
+        return { ok: false, error: quota.error, code: quota.code, plan: quota.plan, limit: quota.limit, used: quota.used };
+      }
+      // A turn is charged when it runs: the provider cost is incurred by starting it.
+      await recordUsage({ userId, scope: "inference", units: 1, ms: 0, status: "ok", model: modelId ?? null });
     }
-    // A turn is charged when it runs: the provider cost is incurred by starting it.
-    await recordUsage({ userId, scope: "inference", units: 1, ms: 0, status: "ok", model: modelId ?? null });
 
     // ── BZ-F024: pause/cancel stops future work (QA-15) ───────────────
     // A cancelled or paused job takes no new turns — no further model calls
@@ -1346,6 +1351,16 @@ export default defineEventHandler(async (event) => {
         }
         return { ok: true, reply: prior[0].content, reconciled: true, slots };
       }
+    }
+
+    if (transportIssue) {
+      setResponseStatus(event, 503);
+      return {
+        ok: false,
+        notSent: true,
+        code: transportIssue.code,
+        error: `${transportIssue.error} This chat request was not sent to an inference provider.`,
+      };
     }
 
     const company = companyId ? await confirmedCompanyContext(sql, userId, companyId) : null;

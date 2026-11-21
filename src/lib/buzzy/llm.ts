@@ -19,6 +19,8 @@ const env = (key: string): string => {
 const BASE_URL = env("BZ_CHAT_BASE_URL") || "https://inference-api.nousresearch.com/v1";
 const API_KEY = env("BZ_CHAT_KEY");
 const DEFAULT_MODEL = env("BZ_CHAT_MODEL") || "z-ai/glm-5.3-flash";
+// Match runtimeMode(): this standalone transport also has direct callers.
+const IS_LOCAL_RUNTIME = env("BZ_RUNTIME").toLowerCase() === "local";
 
 /**
  * A catalog entry. Only `label` and `model` are required; the rest are optional
@@ -47,21 +49,47 @@ export interface CatalogModel {
  * Wildcard bind addresses, private LAN hosts and container aliases are not
  * loopback destinations and cannot satisfy a local-only inference request.
  */
-export function isLoopbackModelEndpoint(baseUrl: string): boolean {
+function parseModelEndpoint(baseUrl: string): URL | null {
   try {
     const url = new URL(baseUrl);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-    if (url.username || url.password) return false;
-    const host = url.hostname;
-    // The URL parser canonicalises IPv4/IPv6 literals and validates octets.
-    return host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(host);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.username || url.password ? null : url;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function isLoopbackModelEndpoint(baseUrl: string): boolean {
+  // The URL parser canonicalises IPv4/IPv6 literals and validates octets.
+  const host = parseModelEndpoint(baseUrl)?.hostname ?? "";
+  return host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(host);
 }
 
 /** True only when the configured inference endpoint is loopback. */
 export const CATALOG_IS_LOCAL = isLoopbackModelEndpoint(BASE_URL);
+
+/** Desktop/default remote inference is not configured by a catalog entry alone. */
+export function localChatTransportIssue(): { code: "no_inference_config" | "managed_expired"; error: string } | null {
+  if (!IS_LOCAL_RUNTIME || CATALOG_IS_LOCAL) return null;
+  // A provided key may intentionally use the documented default provider URL.
+  if (API_KEY && parseModelEndpoint(BASE_URL)) return null;
+  if (env("BZ_MANAGED_EXPIRED") === "1") {
+    return { code: "managed_expired", error: "Your BeeZilla sign-in has expired. Reconnect from Settings to send this message." };
+  }
+  return {
+    code: "no_inference_config",
+    error: "No inference provider is configured for this desktop app. Connect BeeZilla or set up a provider in Settings to send this message.",
+  };
+}
+
+function configuredChatHeaders(): Record<string, string> {
+  const issue = localChatTransportIssue();
+  if (issue) throw new Error(issue.error);
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // An explicitly configured loopback model can run without a credential.
+  if (!IS_LOCAL_RUNTIME || !CATALOG_IS_LOCAL || API_KEY) headers.Authorization = `Bearer ${API_KEY}`;
+  return headers;
+}
 
 /** Provider inferred from BASE_URL when an entry does not declare one. */
 export const CATALOG_DEFAULT_PROVIDER = CATALOG_IS_LOCAL
@@ -96,7 +124,7 @@ function getModels(): CatalogModel[] {
   return _models!;
 }
 
-if (!API_KEY) {
+if (!API_KEY && !(IS_LOCAL_RUNTIME && CATALOG_IS_LOCAL)) {
   console.warn("[buzzy/llm] BZ_CHAT_KEY is not set — chat will fail at runtime");
 }
 
@@ -206,6 +234,7 @@ export async function chatCompletionStream(
   onText: (delta: string) => void,
 ): Promise<FullCompletion> {
   assertLocalInference(opts?.localOnly);
+  const headers = configuredChatHeaders();
   const model = opts?.model || DEFAULT_MODEL;
   const url = BASE_URL.replace(/\/+$/, "") + "/chat/completions";
   const started = Date.now();
@@ -214,7 +243,7 @@ export async function chatCompletionStream(
     // A local endpoint must not redirect prompts (including 307/308 bodies)
     // to a remote service. Remote/Advocate endpoints retain normal redirects.
     redirect: CATALOG_IS_LOCAL ? "error" : "follow",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
+    headers,
     body: JSON.stringify({
       model,
       messages,
@@ -269,6 +298,7 @@ export async function chatCompletionStream(
 }
 
 async function postCompletionFull(body: Record<string, unknown>): Promise<FullCompletion> {
+  const headers = configuredChatHeaders();
   // Join rather than resolve an absolute path, which would drop a base /v1.
   const url = new URL(
     BASE_URL.replace(/\/+$/, "") + "/chat/completions",
@@ -278,10 +308,7 @@ async function postCompletionFull(body: Record<string, unknown>): Promise<FullCo
   const res = await fetch(url.toString(), {
     method: "POST",
     redirect: CATALOG_IS_LOCAL ? "error" : "follow",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
-    },
+    headers,
     body: JSON.stringify(body),
   });
 
