@@ -47,6 +47,52 @@
     return seg;
   }
 
+  // Only the packaged main-frame bridge on its loopback UI gets these controls.
+  // Inspect the bridge shape; never call settings or change an inference mode.
+  function nativePlaces() {
+    return location.protocol === "http:" && location.hostname === "127.0.0.1" &&
+      !!(window.beezilla && window.beezilla.settings && typeof window.beezilla.settings.get === "function");
+  }
+
+  function activePlace(native) {
+    var key = native && window.BeeZillaShell && window.BeeZillaShell.currentKey;
+    // History changes before a soft navigation finishes. Follow what is shown.
+    return section(key ? key.replace(/[?#].*$/, "") : location.pathname);
+  }
+
+  function focusWorkSearch() {
+    var shell = window.BeeZillaShell;
+    if (!nativePlaces() || activePlace(true) !== "talk" || (shell && shell.busy)) return;
+    // The cache may contain Talk with duplicate control IDs. The hard-entry
+    // document is the owner only before the shell creates its page cache.
+    var page = document.getElementById("bzPage");
+    var owner = page || (!document.getElementById("bzPageCache") ? document : null);
+    var recent = owner && owner.querySelector("#recentBelow");
+    if (!recent || !recent.isConnected || !recent.getClientRects().length) return;
+    var search = recent.querySelector("input#rwSearch");
+    if (search && search.isConnected && !search.disabled && search.getClientRects().length) {
+      search.focus(); // Focus only. The existing box still waits for user input.
+    } else {
+      // During the existing loading state, bring the named Recent work region
+      // into reach without polling, starting a search, or leaving this chat.
+      recent.setAttribute("tabindex", "-1");
+      recent.focus();
+    }
+  }
+
+  function paintWorkShortcut(nav, active, nextLink) {
+    var find = nav.querySelector("#bzFindWork");
+    if (active !== "talk") { if (find) find.remove(); return; }
+    if (!find) {
+      find = document.createElement("button");
+      find.id = "bzFindWork";
+      find.type = "button";
+      find.textContent = "Search all work";
+      find.addEventListener("click", focusWorkSearch);
+    }
+    nav.insertBefore(find, nextLink || null);
+  }
+
   // The header cancels whatever horizontal padding its containing page puts on
   // <body> so the bar can span the viewport. That number is a SNAPSHOT of the
   // current page's CSS, so it must be re-derived whenever the active page (and
@@ -121,6 +167,9 @@
       "#bzNav a:hover{color:#f2f2f2}",
       "#bzNav a:focus-visible{outline:2px solid #ffd40d;outline-offset:3px;border-radius:4px}",
       "#bzNav a.active{color:#ffd40d;font-weight:700}",
+      "#bzFindWork{background:transparent;color:#dedede;border:1px solid #464646;border-radius:6px;padding:.16rem .45rem;font:inherit;white-space:nowrap;cursor:pointer}",
+      "#bzFindWork:hover{color:#fff;border-color:#888}",
+      "#bzFindWork:focus-visible{outline:2px solid #ffd40d;outline-offset:2px}",
       ".bz-chrome-scroll{overflow-x:auto;scrollbar-width:none}",
       "#bzChrome .bz-account{color:#8d8d8d;font-size:.82rem;text-decoration:none;white-space:nowrap}",
       "#bzChrome .bz-account:hover{color:#ffd40d}",
@@ -225,14 +274,19 @@
       a.style.lineHeight = "1.55";
     });
 
-    // Active state from the path — the single implementation.
-    var active = section();
+    // Desktop follows its mounted Place; web keeps the existing path rule.
+    var desktop = nativePlaces();
+    var active = activePlace(desktop);
     Array.prototype.forEach.call(nav.querySelectorAll("a[data-nav]"), function (a) {
       var on = a.getAttribute("data-nav") === active;
       a.classList.toggle("active", on);
       if (on) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
     });
+    if (desktop) {
+      nav.setAttribute("aria-label", "Places");
+      paintWorkShortcut(nav, active, ordered[1]);
+    }
     return nav;
   }
 
