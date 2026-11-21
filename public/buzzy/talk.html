@@ -2583,6 +2583,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         const escaped = String(m.content).replace(/</g, "&lt;").replace(/\n/g, "<br>");
         var notice = m.onlineLookupSkipped === true
           ? '<div class="bz-what" role="status">Online lookup skipped because Local Only is on.</div>' : "";
+        if (m.notSent === true) notice += '<div class="bz-what" role="status">Not sent for a chat reply.</div>';
         var bubble = notice + '<div class="' + cls + '">' + escaped + "</div>";
         if (m.document && m.document.downloadUrl) {
           bubble += renderFileCard(m.document);
@@ -5368,9 +5369,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
         body: JSON.stringify(Object.assign({}, sendBody, { voice: true })),
       }).then(function (res) {
-        if (!res.ok || !res.body) {
+        var isJson = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase() === "application/json";
+        if (!res.ok || !res.body || isJson) {
           return res.json().catch(function () { return { error: "Voice turn failed." }; })
-            .then(function (j) { throw new Error((j && j.error) || "Voice turn failed."); });
+            .then(function (j) {
+              if (isJson && res.status === 503 && j && j.ok === false && j.notSent === true &&
+                  (j.code === "no_inference_config" || j.code === "managed_expired")) return j;
+              // A same-attempt stored reply is text JSON, not a new speech turn.
+              if (isJson && res.status === 200 && j && j.ok === true && j.reconciled === true && typeof j.reply === "string") {
+                return { ok: true, reconciled: true, reply: j.reply, slots: j.slots };
+              }
+              throw new Error((j && j.error) || "Voice turn failed.");
+            });
         }
         var reader = res.body.getReader();
         var dec = new TextDecoder();
@@ -5478,10 +5488,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       }).then(function (res) {
         var ctype = (res.headers.get("content-type") || "");
         if (!res.ok || !res.body || ctype.indexOf("text/event-stream") === -1) {
+          var isJson = ctype.split(";")[0].trim().toLowerCase() === "application/json";
           return res.json().catch(function () { return { error: "The turn failed." }; })
             .then(function (j) {
-              if (j && j.error) throw new Error(j.error);
-              return j;
+              if (isJson && res.status === 503 && j && j.ok === false && j.notSent === true &&
+                  (j.code === "no_inference_config" || j.code === "managed_expired")) return j;
+              if (isJson && res.status === 200 && j && j.ok === true && j.reconciled === true && typeof j.reply === "string") {
+                return { ok: true, reconciled: true, reply: j.reply, slots: j.slots };
+              }
+              throw new Error((j && j.error) || "The turn failed.");
             });
         }
         var reader = res.body.getReader();
@@ -6672,7 +6687,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var selectionGeneration = chatNavigation.generation;
       const input = document.getElementById("chatInput");
       if (!speechRequest && (input.disabled || chatNavigation.sendClaim || chatNavigation.turn)) return;
-      const text = input.value.trim();
+      const originalDraft = input.value;
+      const originalRevision = chatNavigation.composerRevision;
+      const text = originalDraft.trim();
       if (!text) return;
       var pastedPaper = readThisBody(text);
       if (pastedPaper !== null) {
@@ -6715,13 +6732,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var turn = {};
       chatNavigation.turn = turn;
 
-      input.value = "";
+      // Session verification can await while the owner edits the composer.
+      if (input.value === originalDraft && chatNavigation.composerRevision === originalRevision) input.value = "";
       const sentExecute = pendingExecute === true;
       pendingExecute = false;
       setChatMascot("08-thinking");
 
       // Add user message
-      chatState.messages.push({ role: "user", content: text });
+      const sentMessage = { role: "user", content: text };
+      chatState.messages.push(sentMessage);
       renderChatMessages();
 
       // Show thinking indicator in the chat stream
@@ -6782,6 +6801,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // block is not visible in the finally that reads it, and the whole turn
       // then dies on `myTurn is not defined` (a page error, not a compile one).
       const myTurn = ++voice.turnSeq;
+      let noTurnRan = false;
 
       try {
         // BZ-F024: one attempt id per send. On a timeout/connection failure we
@@ -6858,7 +6878,31 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           metrics.turnMs = Math.round(performance.now() - sendStarted);
         }
 
-        if (!chatContextCurrent(conversation)) return;
+        const knownUnsent = data && data.ok === false && data.notSent === true &&
+          (data.code === "no_inference_config" || data.code === "managed_expired");
+        const replayed = data && data.ok === true && data.reconciled === true;
+        noTurnRan = knownUnsent || replayed;
+        if (!chatContextCurrent(conversation) ||
+            (noTurnRan && (chatNavigation.turn !== turn || myTurn !== voice.turnSeq))) return;
+        if (knownUnsent) {
+          // The app received the request but started no turn. Only put the draft
+          // back if this exact turn still owns an untouched typed composer.
+          const restore = !speechRequest && input.value === "" && chatNavigation.composerRevision === originalRevision;
+          if (restore) {
+            input.value = originalDraft;
+            const index = chatState.messages.indexOf(sentMessage);
+            if (index >= 0) chatState.messages.splice(index, 1);
+          } else {
+            sentMessage.notSent = true;
+          }
+          setChatMascot("18-unimpressed");
+          const notice = document.getElementById("chatError");
+          notice.textContent = (data.error || "Set up inference in Settings before sending again.") +
+            (restore ? " Your draft is back in the composer." : "");
+          notice.classList.remove("hidden");
+          renderChatMessages();
+          return;
+        }
         if (!data.ok) {
           setChatMascot("18-unimpressed");
           // FIX #5: show error and disable input if signed out
@@ -6871,8 +6915,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             renderSlotChecklist();
           }
           paintContext(data.context);
-          var policyReply = (data.code === "model_policy_error" || data.onlineLookupSkipped === true) &&
-            typeof data.reply === "string" && data.reply.trim() !== "" ? data.reply : "";
+          var setupIssue = data.code === "no_inference_config" || data.code === "managed_expired";
+          var policyReply = (setupIssue || data.code === "model_policy_error" || data.onlineLookupSkipped === true) &&
+            typeof data.reply === "string" && data.reply.trim() !== "" ? data.reply
+            : setupIssue && typeof data.error === "string" ? data.error : "";
           var errorNode = document.getElementById("chatError");
           errorNode.textContent = policyReply ? "" : (data.error || "Something went wrong.");
           errorNode.classList.toggle("hidden", Boolean(policyReply));
@@ -6935,6 +6981,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         renderSlotChecklist();
         // The turn's own numbers are authoritative — don't re-fetch over them.
         paintContext(data.context);
+        // A stored reply has no fresh voice, speech, or inference metrics.
+        if (replayed) return;
         // One latency sample per turn: what the owner actually experienced.
         metrics.turnMs = metrics.turnMs || Math.round(performance.now() - sendStarted);
         // `turnMs` stops when the audio STREAM ends, not when the last word is
@@ -6980,10 +7028,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         // A rejected request/JSON body never re-renders the transcript. The
         // captured node belongs to this turn even after a newer turn starts.
         if (thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
-        if (chatNavigation.turn === turn) chatNavigation.turn = null;
-        if (myTurn === voice.turnSeq && chatContextCurrent(conversation)) {
+        const ownsTurn = chatNavigation.turn === turn;
+        if (ownsTurn) chatNavigation.turn = null;
+        if ((!noTurnRan || ownsTurn) && myTurn === voice.turnSeq && chatContextCurrent(conversation)) {
           voice.sending = false;
-          // A spoken turn ended without a reply: go back to listening.
+          // An already explicitly active Listen session may resume. A stored
+          // reply or refused chat never enables the mic or plays new audio.
           if (voice.mic && !voice.speaking) setTimeout(function () {
             if (voice.mic && !voice.speaking && !voice.sending && !voice.rec) startListening();
           }, 600);
@@ -7224,6 +7274,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         toggle.setAttribute("aria-expanded", "false");
       }
     };
+    document.getElementById("chatInput").addEventListener("input", function () {
+      chatNavigation.composerRevision = (chatNavigation.composerRevision || 0) + 1;
+    });
     document.getElementById("chatInput").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
