@@ -1,7 +1,8 @@
+import { createHmac } from "node:crypto";
 import { getRequest } from "@tanstack/react-start/server";
 import { auth, authConfigured } from "./server";
 import { isLocalRuntime } from "../runtime";
-import { resolveLocalRequester } from "../local-owner";
+import { localToken, resolveLocalRequester } from "../local-owner";
 import {
   gateCapability,
   resolveOperatorRoleFromEnv,
@@ -77,7 +78,13 @@ export class ForbiddenError extends Error {
   }
 }
 
-export type VerifiedUser = { id: string; email: string | null; name?: string | null };
+export type VerifiedUser = { id: string; email: string | null; name?: string | null; attachmentBinding?: string };
+
+// Derive a server-side, purpose-specific binding from the already verified
+// session. Normal auth callers receive exactly their prior payload.
+function attachmentBinding(secret: string, scope: "device" | "hosted"): string {
+  return createHmac("sha256", secret).update("beezilla/talk-attachment-session/v1:" + scope).digest("hex");
+}
 
 /**
  * Resolve session user from arbitrary request headers (agent API / Nitro path).
@@ -85,13 +92,16 @@ export type VerifiedUser = { id: string; email: string | null; name?: string | n
  */
 export async function getSessionUserFromHeaders(
   headers: Headers,
-  { authoritative = false }: { authoritative?: boolean } = {},
+  { authoritative = false, bindAttachment = false }: { authoritative?: boolean; bindAttachment?: boolean } = {},
 ): Promise<VerifiedUser | null> {
   // Local (desktop / CLI) installs: Host allowlist + per-launch bearer token,
   // NOT a cookie session. This is the single chokepoint every Nitro handler
   // already goes through, so local auth needs no per-route changes.
   if (isLocalRuntime()) {
-    return resolveLocalRequester(headers);
+    const requester = await resolveLocalRequester(headers);
+    if (!bindAttachment || !requester) return requester;
+    const token = localToken();
+    return token ? { ...requester, attachmentBinding: attachmentBinding(token, "device") } : null;
   }
   if (!authConfigured) return null;
   try {
@@ -99,7 +109,7 @@ export async function getSessionUserFromHeaders(
     // without extending the lifetime of the original session on a recheck.
     const session = await auth.api.getSession({
       headers,
-      ...(authoritative ? { query: { disableCookieCache: true, disableRefresh: true } } : {}),
+      ...(authoritative || bindAttachment ? { query: { disableCookieCache: true, disableRefresh: true } } : {}),
     });
     if (!session?.user) return null;
     // Platform-disabled accounts must not resolve as signed-in (any path).
@@ -107,10 +117,13 @@ export async function getSessionUserFromHeaders(
       const { boardOps } = await import("../board-server");
       if (await boardOps.isUserDisabled(session.user.id)) return null;
     } catch {
-      if (authoritative) return null;
+      if (authoritative || bindAttachment) return null;
       /* board store unavailable — fail open only if import fails mid-boot */
     }
-    return { id: session.user.id, email: session.user.email ?? null };
+    const user = { id: session.user.id, email: session.user.email ?? null };
+    if (!bindAttachment) return user;
+    const token = session.session?.token;
+    return session.session?.userId === user.id && typeof token === "string" && token ? { ...user, attachmentBinding: attachmentBinding(token, "hosted") } : null;
   } catch {
     return null;
   }

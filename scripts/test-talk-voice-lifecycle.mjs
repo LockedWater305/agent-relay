@@ -27,34 +27,50 @@ async function settle() { for (let i = 0; i < 30; i++) await Promise.resolve(); 
 function response(data = { ok: true, text: "spoken words" }, ok = true) {
   return { ok, status: ok ? 200 : 500, json: async () => data };
 }
+const ATTACHMENT_PREFLIGHT = "/api/buzzy/attachment-destination";
+const ATTACHMENT_STAMP = "1780000000000." + "A".repeat(16) + "." + "A".repeat(43);
+const ROTATED_STAMP = ATTACHMENT_STAMP.replaceAll("A", "B");
+
+async function approveAttachment(request, destination, expected, returned = ATTACHMENT_STAMP) {
+  assert.equal(request?.url, ATTACHMENT_PREFLIGHT);
+  assert.equal(request.init.method ?? "GET", "GET");
+  assert.equal(request.init.body, undefined, "no file or name sent to preflight");
+  assert.deepEqual(Object.entries(request.init.headers), expected ? [["x-bz-attachment-context", expected]] : []);
+  request.resolve(response({ ok: true, destination, context: returned }));
+  await settle();
+}
 function element() {
-  return { value: "", textContent: "", disabled: false, title: "", style: {}, listeners: {},
+  return { value: "", textContent: "", disabled: false, title: "", style: {}, listeners: {}, isConnected: true,
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
     setAttribute() {}, focus() {}, appendChild() {}, closest() { return null; },
-    addEventListener(type, callback) { this.listeners[type] = callback; },
+    addEventListener(type, callback) { (this.listeners[type] ??= []).push(callback); },
   };
 }
 const senders = ["sendHeardTurn", "sendForTranscription"];
 function speechHarness({ realSend = false, controller = true, wav = {} } = {}) {
   const requests = [], sent = [], timers = [], notes = [], rendered = [], storage = [];
   const nodes = new Map();
+  const pageEvents = new Map();
   const node = (id) => { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); };
   const c = {
     chatNavigation: { generation: 0, pending: null, ensure: null, restore: 0, history: 0 },
     AbortController: controller ? AbortController : undefined,
-    AbortSignal: { timeout: () => undefined },
+    AbortSignal: { timeout: () => new AbortController().signal, any: signals => AbortSignal.any(signals) },
     voice: { mic: true, rec: null, sending: false, speaking: false, replies: false,
       note: "", speechGeneration: 0, speechRequest: null, turnSeq: 0, cutTurn: -1 },
     chatState: { sessionVerified: true, jobId: "original/job", sessionId: "original-session", boundCompanyId: "original-company",
       jobContext: { title: "Original Job" }, slots: {}, messages: [] },
     document: { getElementById: node, createElement: element, querySelector: () => null, querySelectorAll: () => [],
       addEventListener() {}, removeEventListener() {} },
-    window: { location: { pathname: "/buzzy/talk" } },
+    window: { location: { pathname: "/buzzy/talk" }, addEventListener(type, callback) {
+      const listeners = pageEvents.get(type) || [];
+      listeners.push(callback); pageEvents.set(type, listeners);
+    } },
     sessionStorage: { getItem: () => null },
     localStorage: { setItem: (...args) => storage.push(args), removeItem() {} },
     history: { replaceState() {} },
     fetch(url, init) { const request = deferred(); requests.push({ ...request, url, init }); return request.promise; },
-    TextDecoder,
+    TextDecoder, btoa,
     performance: { now: () => 100 }, crypto: { randomUUID: () => "fake-id" },
     setTimeout(callback) { timers.push(callback); return timers.length; }, setInterval() { return 1; }, clearInterval() {},
     finishCapture: () => wav, jobNameFix: (s) => String(s || ""), brandName: (s) => String(s || ""),
@@ -73,7 +89,7 @@ function speechHarness({ realSend = false, controller = true, wav = {} } = {}) {
     loadCompanyPaper() {}, loadSessions() {},
     activeCompanyId: () => c.chatState.boundCompanyId,
     selectedModel: () => "test-model", getAuthHeaders: () => ({}),
-    pendingExecute: false, CHAT_BASE: "/chat", SESSIONS_BASE: "/sessions", paperBusy: false, paperLoad: 0, paperOperation: 0,
+    pendingExecute: false, CHAT_BASE: "/chat", SESSIONS_BASE: "/sessions", paperBusy: false, paperLoad: 0, paperOperation: 0, cancelPaperOperation: null,
     paintContext() {}, logVoiceMetrics() {}, maybeSpeak() {}, renderPaper() {},
     setBriefEditWidth() {}, SLOT_LABELS: { challenge: "Challenge" },
     sendChatMessage(event, request) {
@@ -85,15 +101,21 @@ function speechHarness({ realSend = false, controller = true, wav = {} } = {}) {
     "validChatSession", "storeChatSession", "selectChatSession", "showChatFailure", "invalidateSpeechRequest", "speechContextChanged", "beginSpeechRequest", "speechRequestCurrent", "finishSpeechRequest",
     "asrQueryString", "submitHeard", "sendHeardTurn", "sendForTranscription", "stopListening", "releaseMic", "toggleMic",
     "initVoice", "goBackToRecent", "newChatNow", "openSession", "startNewChat", "applyChatCompany", "paintVoice"];
-  if (realSend) names.push("sendChatMessage", "ensureChatSession", "readThisBody", "submitPaper", "streamTextTurn", "streamVoiceTurn", "loadCompanyPaper", "loadContext", "postPaperLine", "saveSlotEdit", "submitMedia", "readDroppedFile", "checkAuthAndEnableInput");
+  if (realSend) names.push("sendChatMessage", "ensureChatSession", "readThisBody", "submitPaper", "streamTextTurn", "streamVoiceTurn", "loadCompanyPaper", "loadContext", "postPaperLine", "saveSlotEdit", "submitMedia", "bytesToBase64", "readDroppedFile", "checkAuthAndEnableInput");
   if (realSend && source.includes("    function paintChatInputAvailability()")) names.push("paintChatInputAvailability");
+  if (source.includes("    function invalidatePaperOperation()")) names.push("invalidatePaperOperation");
   runInNewContext(names.map(fn).join("\n"), c, { filename: "talk-speech-lifecycle.js" });
+  const stageStart = source.indexOf("    var stagedPaper = null;");
+  const stageEnd = source.indexOf('    document.getElementById("paperToggle").onclick', stageStart);
+  assert.ok(stageStart >= 0 && stageEnd > stageStart, "shipped attachment picker/drop wiring");
+  runInNewContext(source.slice(stageStart, stageEnd), c, { filename: "talk-file-entry.js" });
   c.initVoice();
   function start(sender = "sendForTranscription", text = "recognizer fallback") {
     c[sender](sender === "sendHeardTurn" ? text : { wav: true });
     return requests.at(-1);
   }
   return { c, requests, sent, timers, notes, node, rendered, storage, start,
+    pageEvent(type) { for (const callback of pageEvents.get(type) || []) callback({ type }); },
     stop() { c.window.BeeZillaVoice.stop(); },
     openJob(id) { c.window.BeeZillaTalk.openJob(id); },
   };
@@ -281,11 +303,26 @@ test("uncanceled speech 'read this' continues to the original paper POST", async
   const h = speechHarness({ realSend: true }); h.c.chatState.sessionId = null;
   h.start().resolve(response({ ok: true, text: "read this: paper words" })); await settle();
   h.requests[1].resolve(response({ session: { id: "created-session", jobId: "original/job", companyId: "original-company" } })); await settle();
-  assert.equal(h.requests[2].url, "/api/buzzy/papers");
-  const body = JSON.parse(h.requests[2].init.body);
+  await approveAttachment(h.requests[2], "server");
+  assert.equal(h.requests[3].url, "/api/buzzy/papers");
+  const body = JSON.parse(h.requests[3].init.body);
   assert.equal(body.jobId, "original/job"); assert.equal(body.sessionId, "created-session");
-  assert.equal(body.text, "paper words"); assert.equal(h.c.voice.speechRequest, null);
-  h.requests[2].resolve(response({ paper: {}, reply: "done" })); await settle();
+  assert.equal(body.text, "paper words");
+  h.requests[3].resolve(response({ paper: {}, reply: "done" })); await settle();
+  assert.equal(h.c.paperBusy, false); assert.equal(h.c.voice.speechRequest, null);
+});
+
+test("Stop before paper preflight resolves cannot POST captured spoken words", async () => {
+  const h = speechHarness({ realSend: true });
+  h.start().resolve(response({ ok: true, text: "read this: synthetic cancelable text" })); await settle();
+  assert.equal(h.requests[1]?.url, ATTACHMENT_PREFLIGHT);
+  h.stop();
+  h.node("chatInput").value = "new unsent draft";
+  await approveAttachment(h.requests[1], "server");
+  assert.equal(h.requests.length, 2, "only the transcription and file-free policy check");
+  assert.equal(h.requests[1].init.signal?.aborted, true, "Stop aborts pending preflight transport");
+  assert.equal(h.c.chatState.messages.length, 0);
+  assert.equal(h.node("chatInput").value, "new unsent draft");
   assert.equal(h.c.paperBusy, false);
 });
 
@@ -493,21 +530,27 @@ for (const outcome of ["response", "json", "error"]) {
   test(`paper POST late ${outcome} cannot change a new chat or clear its active paper operation`, async () => {
     const h = speechHarness({ realSend: true }); const body = deferred();
     const original = h.c.submitPaper({ text: "original paper" }); await settle();
-    if (outcome === "json") { h.requests[0].resolve({ ok: true, status: 200, json: () => body.promise }); await settle(); }
+    await approveAttachment(h.requests[0], "server");
+    const oldPost = h.requests[1];
+    assert.equal(oldPost.url, "/api/buzzy/papers");
+    if (outcome === "json") { oldPost.resolve({ ok: true, status: 200, json: () => body.promise }); await settle(); }
     const selected = h.c.newChatNow();
-    h.requests[1].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await selected;
+    h.requests[2].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await selected;
     const next = h.c.submitPaper({ text: "new paper" }); await settle();
+    await approveAttachment(h.requests[3], "server");
+    const currentPost = h.requests[4];
+    assert.equal(currentPost.url, "/api/buzzy/papers");
     assert.equal(h.c.paperBusy, true);
     const data = { paper: { id: "old-paper", jobId: "old-job", companyId: "original-company" }, reply: "obsolete paper reply" };
     if (outcome === "json") body.resolve(data);
-    else if (outcome === "error") h.requests[0].reject(new Error("offline"));
-    else h.requests[0].resolve(response(data));
+    else if (outcome === "error") oldPost.reject(new Error("offline"));
+    else oldPost.resolve(response(data));
     await original;
     assert.equal(h.c.chatState.jobId, null);
     assert.equal(h.c.chatState.sessionId, "new-session");
     assert.equal(h.c.chatState.messages.some(m => m.content === "obsolete paper reply"), false);
     assert.equal(h.c.paperBusy, true, "old finally cannot release the new operation");
-    h.requests[2].resolve(response({ paper: { id: "new-paper", jobId: "new-job" }, reply: "new paper reply" })); await next;
+    currentPost.resolve(response({ paper: { id: "new-paper", jobId: "new-job" }, reply: "new paper reply" })); await next;
     assert.equal(h.c.chatState.jobId, "new-job"); assert.equal(h.c.paperBusy, false);
   });
 }
@@ -536,10 +579,20 @@ test("late slot edit cannot overwrite new slots or enable a new pending selectio
 for (const failure of [false, true]) {
   test(`late media upload ${failure ? 'failure' : 'success'} cannot append to another conversation`, async () => {
     const h = speechHarness({ realSend: true });
-    const uploading = h.c.submitMedia({ name: "old-file.png", type: "image/png", size: 2 });
+    const file = { name: "old-file.png", type: "image/png", size: 2 };
+    stageFile(h, "Chooser", file);
+    assert.equal(h.requests.length, 0);
+    const uploading = h.node("paperRead").onclick(); await settle();
+    await approveAttachment(h.requests[0], "device");
+    await approveAttachment(h.requests[1], "device", ATTACHMENT_STAMP);
+    const oldPost = h.requests[2];
+    assert.equal(oldPost.url, "/api/buzzy/talk-attachments/assets");
+    assert.equal(oldPost.init.headers["x-bz-attachment-context"], ATTACHMENT_STAMP);
+    assert.equal(oldPost.init.headers["x-bz-path"], file.name);
+    assert.equal(oldPost.init.body, file);
     h.c.goBackToRecent();
-    if (failure) h.requests[0].reject(new Error("offline"));
-    else h.requests[0].resolve(response({ ok: true, id: "old-asset", bytes: 2 }));
+    if (failure) oldPost.reject(new Error("offline"));
+    else oldPost.resolve(response({ ok: true, id: "old-asset", bytes: 2 }));
     await uploading;
     assert.equal(h.c.chatState.messages.length, 0);
   });
@@ -566,50 +619,209 @@ test("failed selection removes only the interrupted turn's visible busy nodes", 
   h.requests[2].resolve(response({ ok: true, reply: "current reply" })); await next;
 });
 
-function wireFileEntry(h, entry) {
-  if (entry === "Read") {
-    const start = source.indexOf('    document.getElementById("paperRead").onclick = function () {');
-    const end = source.indexOf('    (function wirePaperDrop()', start);
-    assert.ok(start >= 0 && end > start);
-    runInNewContext(source.slice(start, end), h.c);
-    return file => { h.node("paperFile").files = [file]; h.node("paperRead").onclick(); };
+function stageFile(h, entry, file) {
+  if (entry === "Chooser") {
+    const input = h.node("paperFile");
+    input.files = [file];
+    for (const callback of input.listeners.change) callback.call(input);
+  } else {
+    let prevented = false;
+    for (const callback of h.node("paperDrop").listeners.drop) {
+      callback({ preventDefault() { prevented = true; }, dataTransfer: { files: [file] } });
+    }
+    assert.equal(prevented, true, "native drop must not open the file on its own");
   }
-  const start = source.indexOf('    (function wirePaperDrop()');
-  const end = source.indexOf('    document.getElementById("paperToggle").onclick', start);
-  assert.ok(start >= 0 && end > start);
-  runInNewContext(source.slice(start, end), h.c);
-  return file => h.node("paperDrop").listeners.drop({ preventDefault() {}, dataTransfer: { files: [file] } });
 }
-for (const entry of ["Read", "Drop"]) {
+function mockTalkShell(h, { wrapped = true } = {}) {
+  const mount = h.node("paperDrop");
+  const current = { active: wrapped, cache: wrapped };
+  const shell = { busy: false, navigationEpoch: 0 };
+  h.c.window.BeeZillaShell = shell;
+  h.c.document.body = { contains: node => node === mount };
+  h.c.document.getElementById = id => {
+    if (id === "bzPage") return current.active ? { contains: node => node === mount } : null;
+    if (id === "bzPageCache") return current.cache ? h.node(id) : null;
+    return h.node(id);
+  };
+  return { mount, current, shell };
+}
+for (const entry of ["Chooser", "Drop"]) {
   for (const outcome of ["load", "error"]) {
     test(`${entry}: FileReader ${outcome} after New chat cannot submit old text or paint an old error`, async () => {
       const h = speechHarness({ realSend: true }); const readers = [];
       h.c.FileReader = class { constructor() { readers.push(this); } readAsText() {} };
-      wireFileEntry(h, entry)({ name: "old-conversation.txt", type: "text/plain", size: 12 });
-      assert.equal(readers.length, 1); assert.equal(h.requests.length, 0);
+      stageFile(h, entry, { name: "old-conversation.txt", type: "text/plain", size: 12 });
+      assert.equal(readers.length, 0); assert.equal(h.requests.length, 0);
+      assert.match(h.node("paperNote").textContent, /Not sent/);
+      const reading = h.node("paperRead").onclick(); await settle();
+      await approveAttachment(h.requests[0], "device");
+      assert.equal(readers.length, 1);
       const selecting = h.c.newChatNow();
-      h.requests[0].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await selecting;
+      assert.equal(h.requests[1].url, "/sessions");
+      h.requests[1].resolve(response({ session: { id: "new-session", jobId: null, companyId: "original-company" } })); await selecting;
       h.node("paperNote").textContent = "new conversation note";
       if (outcome === "load") { readers[0].result = "old-only text"; readers[0].onload(); }
       else readers[0].onerror();
-      await settle();
-      assert.equal(h.requests.length, 1, "only the New chat request; no old paper/media POST");
+      await reading; await settle();
+      assert.equal(h.requests.length, 2, "only the initial preflight and New chat; no old attachment POST");
       assert.equal(h.node("paperNote").textContent, "new conversation note");
       assert.equal(h.c.chatState.messages.length, 0);
     });
   }
 }
 
-test("Read: unchanged FileReader handoff still submits the selected paper", async () => {
+test("Read: hosted confirmation reads the selected file only on the second click", async () => {
   const h = speechHarness({ realSend: true }); const readers = [];
   h.c.FileReader = class { constructor() { readers.push(this); } readAsText() {} };
-  wireFileEntry(h, "Read")({ name: "current.txt", type: "text/plain", size: 12 });
-  readers[0].result = "current-only text"; readers[0].onload(); await settle();
+  const file = { name: "current.txt", type: "text/plain", size: 12 };
+  stageFile(h, "Chooser", file);
+  assert.equal(h.requests.length, 0);
+  const preparing = h.node("paperRead").onclick(); await settle();
+  await approveAttachment(h.requests[0], "server");
+  await preparing;
+  assert.equal(readers.length, 0);
   assert.equal(h.requests.length, 1);
-  assert.equal(h.requests[0].url, "/api/buzzy/papers");
-  assert.equal(JSON.parse(h.requests[0].init.body).text, "current-only text");
-  h.requests[0].resolve(response({ paper: {}, reply: "read" })); await settle();
+  assert.match(h.node("paperRead").textContent, /Send file to BeeZilla/);
+  const reading = h.node("paperRead").onclick(); await settle();
+  await approveAttachment(h.requests[1], "server", ATTACHMENT_STAMP);
+  assert.equal(readers.length, 1);
+  readers[0].result = "current-only text"; readers[0].onload(); await settle();
+  await approveAttachment(h.requests[2], "server", ATTACHMENT_STAMP);
+  assert.equal(h.requests.length, 4);
+  const post = h.requests[3];
+  assert.equal(post.url, "/api/buzzy/talk-attachments/papers");
+  assert.equal(post.init.headers["x-bz-attachment-context"], ATTACHMENT_STAMP);
+  assert.equal(JSON.parse(post.init.body).filename, file.name);
+  assert.equal(JSON.parse(post.init.body).text, "current-only text");
+  post.resolve(response({ paper: {}, reply: "read" })); await reading;
   assert.equal(h.c.paperBusy, false);
+});
+
+test("account/session rotation at confirm or final recheck cannot send PDF/text or its name", async () => {
+  for (const cutoff of ["confirm", "final"]) {
+    const h = speechHarness({ realSend: true }); const readers = [];
+    h.c.FileReader = class {
+      constructor() { readers.push(this); }
+      readAsText() { this.kind = "text"; }
+      readAsArrayBuffer() { this.kind = "binary"; }
+    };
+    const file = cutoff === "confirm"
+      ? { name: "held.txt", type: "text/plain", size: 10 }
+      : { name: "held.pdf", type: "application/pdf", size: 3 };
+    stageFile(h, "Drop", file);
+    const preparing = h.node("paperRead").onclick(); await settle();
+    await approveAttachment(h.requests[0], "server"); await preparing;
+    const reading = h.node("paperRead").onclick(); await settle();
+    if (cutoff === "confirm") {
+      await approveAttachment(h.requests[1], "server", ATTACHMENT_STAMP, ROTATED_STAMP);
+      assert.equal(readers.length, 0);
+    } else {
+      await approveAttachment(h.requests[1], "server", ATTACHMENT_STAMP);
+      assert.equal(readers.length, 1);
+      assert.equal(readers[0].kind, "binary");
+      readers[0].result = new Uint8Array([65, 66, 67]).buffer; readers[0].onload(); await settle();
+      await approveAttachment(h.requests[2], "server", ATTACHMENT_STAMP, ROTATED_STAMP);
+    }
+    await reading;
+    assert(h.requests.every(request => request.url === ATTACHMENT_PREFLIGHT && !request.init.body));
+    assert.equal(h.c.stagedPaper, null, "the file must be selected again under the new session");
+    assert.equal(h.c.chatState.messages.length, 0);
+  }
+});
+
+test("first hosted refusal never starts FileReader or falls back to the legacy paper route", async () => {
+  for (const denial of ["Local Only", "invalid response", "unreachable"]) {
+    const h = speechHarness({ realSend: true }); let readAttempts = 0;
+    h.c.FileReader = class { constructor() { readAttempts++; } readAsText() {} };
+    stageFile(h, "Drop", { name: "private.txt", type: "text/plain", size: 10 });
+    assert.equal(h.requests.length, 0);
+    const reading = h.node("paperRead").onclick(); await settle();
+    const preflight = h.requests[0];
+    assert.equal(preflight.url, ATTACHMENT_PREFLIGHT);
+    assert.equal(preflight.init.body, undefined);
+    assert.deepEqual(Object.keys(preflight.init.headers), []);
+    if (denial === "unreachable") preflight.reject(new Error("offline"));
+    else if (denial === "invalid response") preflight.resolve({ ok: true, json: async () => null });
+    else preflight.resolve({ ok: false, status: 403, json: async () => ({ ok: false, error: "Local Only is on." }) });
+    await reading;
+    assert.equal(h.requests.length, 1);
+    assert.equal(readAttempts, 0);
+    assert.equal(h.c.chatState.messages.length, 0);
+    assert.doesNotMatch(h.node("paperRead").textContent, /Send file to BeeZilla/);
+  }
+});
+
+test("hard-loaded Talk with installed shell stages and uploads without a pre-existing wrapper", async () => {
+  const h = speechHarness({ realSend: true });
+  mockTalkShell(h, { wrapped: false });
+  const file = { name: "cold-native.png", type: "image/png", size: 2 };
+  stageFile(h, "Drop", file);
+  assert.match(h.node("paperNote").textContent, /Not sent/);
+  assert.equal(h.requests.length, 0);
+  const reading = h.node("paperRead").onclick(); await settle();
+  await approveAttachment(h.requests[0], "device");
+  await approveAttachment(h.requests[1], "device", ATTACHMENT_STAMP);
+  const post = h.requests[2];
+  assert.equal(post.url, "/api/buzzy/talk-attachments/assets");
+  assert.equal(post.init.body, file);
+  post.resolve(response({ ok: true, id: "native-asset" })); await reading;
+  assert.equal(h.c.stagedPaper, null);
+});
+
+test("cached Talk, superseded navigation and pagehide retire staged paper before final transfer", async () => {
+  for (const departure of ["cached", "superseded", "pagehide"]) {
+    const h = speechHarness({ realSend: true }); const readers = [];
+    const { mount, current, shell } = mockTalkShell(h);
+    h.c.FileReader = class { constructor() { readers.push(this); } readAsText() {} };
+    stageFile(h, "Drop", { name: "held.txt", type: "text/plain", size: 10 });
+    const preparing = h.node("paperRead").onclick(); await settle();
+    await approveAttachment(h.requests[0], "server"); await preparing;
+    const reading = h.node("paperRead").onclick(); await settle();
+    await approveAttachment(h.requests[1], "server", ATTACHMENT_STAMP);
+    readers[0].result = "do not send after leave"; readers[0].onload(); await settle();
+    assert.equal(h.requests.length, 3);
+    if (departure === "cached") {
+      assert.equal(mount.bzBeforeLeave(), true, "attachment does not block shell navigation");
+      current.active = false; h.c.window.location.pathname = "/buzzy/library"; shell.navigationEpoch++;
+    } else if (departure === "superseded") {
+      shell.navigationEpoch += 2;
+    } else {
+      h.pageEvent("pagehide");
+    }
+    await approveAttachment(h.requests[2], "server", ATTACHMENT_STAMP);
+    await reading;
+    assert.equal(h.requests.length, 3);
+    assert(h.requests.every(request => request.url === ATTACHMENT_PREFLIGHT && !request.init.body));
+    assert.equal(h.c.chatState.messages.length, 0);
+    assert.equal(h.c.stagedPaper, null);
+    assert.equal(h.c.voice.mic, true, "leaving attachment flow does not stop Listen");
+  }
+});
+
+test("an admitted paper reply whose body resolves after soft leave cannot paint hidden Talk", async () => {
+  const h = speechHarness({ realSend: true }); const readers = [], painted = [];
+  const { mount, current, shell } = mockTalkShell(h);
+  h.c.FileReader = class { constructor() { readers.push(this); } readAsText() {} };
+  h.c.renderPaper = paper => painted.push(paper);
+  stageFile(h, "Drop", { name: "held.txt", type: "text/plain", size: 10 });
+  const reading = h.node("paperRead").onclick(); await settle();
+  await approveAttachment(h.requests[0], "device");
+  readers[0].result = "synthetic data"; readers[0].onload(); await settle();
+  await approveAttachment(h.requests[1], "device", ATTACHMENT_STAMP);
+  const post = h.requests[2], body = deferred();
+  assert.equal(post.url, "/api/buzzy/talk-attachments/papers");
+  post.resolve({ ok: true, status: 200, json: () => body.promise }); await settle();
+  const before = h.c.chatState.messages.length;
+  assert.equal(mount.bzBeforeLeave(), true);
+  current.active = false; h.c.window.location.pathname = "/buzzy/library"; shell.navigationEpoch++;
+  body.resolve({ paper: { id: "placeholder", jobId: "obsolete-job" }, reply: "obsolete document reply" });
+  await reading;
+  assert.deepEqual(painted, []);
+  assert.equal(h.c.chatState.messages.length, before);
+  assert.equal(h.c.chatState.jobId, "original/job");
+  assert.equal(h.c.stagedPaper, null);
+  assert.equal(h.c.paperBusy, false);
+  assert.equal(post.init.signal?.aborted, true, "departure cancels transport but cannot recall an admitted body");
 });
 
 for (const action of ["read this", "media"]) {

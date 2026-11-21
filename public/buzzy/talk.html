@@ -1436,12 +1436,12 @@
 
           <div class="chat-messages" id="chatMessages"></div>
           <div id="paperPanel" class="paper-panel hidden" aria-live="polite"></div>
-          <div id="paperDrop" class="paper-drop hidden">
-            <p>Drop an invoice, quote, letter, or photo. Or paste it here.</p>
+          <div id="paperDrop" class="paper-drop hidden" data-bz-before-leave>
+            <p>Choose or drop an invoice, quote, letter, or photo. Files wait here until you read or upload them.</p>
             <input id="paperFile" type="file" accept=".pdf,.txt,.md,.csv,image/*,audio/*,.glb,.gltf,.obj,.usdz" />
             <textarea id="paperPaste" rows="2" placeholder="Paste the letter or invoice"></textarea>
             <div class="row">
-              <button type="button" id="paperRead">Read it</button>
+              <button type="button" id="paperRead">Read / upload</button>
             </div>
             <p id="paperNote" class="muted" role="status"></p>
           </div>
@@ -2092,8 +2092,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       chatNavigation.ensure = null;
       chatNavigation.sendClaim = null;
       chatNavigation.turn = null;
-      paperOperation = (paperOperation || 0) + 1;
-      paperBusy = false;
+      invalidatePaperOperation();
+      clearStagedPaper();
       // Selecting a conversation relinquishes the old turn's UI/audio, not
       // the microphone. The network may already have accepted that turn; late
       // chunks/replies are ignored below and its saved reply remains in History.
@@ -2335,7 +2335,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
      * conversation, with the same delivery promise as a document: it is here,
      * it plays or shows, and it can be downloaded.
      */
-    function submitMedia(file) {
+    function submitMedia(file, authorization, isStagedCurrent) {
       if (chatNavigation.pending) return Promise.resolve();
       if (chatState.sessionId && !chatState.sessionVerified) {
         showChatFailure("Wait for this conversation to restore before adding a file. Your file has not been uploaded.");
@@ -2343,25 +2343,32 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       }
       var context = chatContextSnapshot();
       var label = file.name || "file";
-      chatState.messages.push({ role: "user", content: "Added " + label });
-      renderChatMessages();
-      return fetch("/api/buzzy/assets", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: {
-          "content-type": file.type || "application/octet-stream",
-          "x-bz-path": label
-        },
-        body: file
+      return attachmentDestination(authorization.context).then(function (confirmed) {
+        if (!chatContextCurrent(context) || !isStagedCurrent()) return;
+        if (confirmed.destination !== authorization.destination) throw new Error("The file destination changed. Confirm it again before sending.");
+        chatState.messages.push({ role: "user", content: "Added " + label });
+        renderChatMessages();
+        return fetch("/api/buzzy/talk-attachments/assets", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "content-type": file.type || "application/octet-stream",
+            "x-bz-path": label,
+            "x-bz-attachment-context": authorization.context
+          },
+          body: file
+        });
       })
-        .then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j || {} }; }); })
+        .then(function (r) { return r && r.json().then(function (j) { return { s: r.status, j: j || {} }; }); })
         .then(function (res) {
-          if (!chatContextCurrent(context)) return;
+          if (!res || !chatContextCurrent(context) || !isStagedCurrent()) return;
           if (!res.j.ok) {
+            if (res.j.code === "attachment_context_changed") clearStagedPaper();
             chatState.messages.push({ role: "assistant", content: "That file did not upload: " + (res.j.error || ("HTTP " + res.s)) });
             renderChatMessages();
             return;
           }
+          clearStagedPaper();
           chatState.messages.push({
             role: "assistant",
             content: res.j.duplicate ? "Already here — same file." : "Saved.",
@@ -2369,9 +2376,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           });
           renderChatMessages();
         })
-        .catch(function () {
-          if (!chatContextCurrent(context)) return;
-          chatState.messages.push({ role: "assistant", content: "Couldn't upload that file — check the connection." });
+        .catch(function (error) {
+          if (!chatContextCurrent(context) || !isStagedCurrent()) return;
+          if (error && error.attachmentContextChanged) clearStagedPaper();
+          chatState.messages.push({ role: "assistant", content: "Could not complete file transfer: " + ((error && error.message) || "check the connection.") });
           renderChatMessages();
         });
     }
@@ -2678,6 +2686,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     var paperLoad = 0;
     var paperBusy = false;
     var paperOperation = 0;
+    var cancelPaperOperation = null;
+
+    function invalidatePaperOperation() {
+      paperOperation = (paperOperation || 0) + 1;
+      paperBusy = false;
+      var cancel = cancelPaperOperation;
+      cancelPaperOperation = null;
+      if (cancel) cancel();
+    }
 
     function renderPaper(paper) {
       chatState.paper = paper || null;
@@ -2871,8 +2888,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
-    function submitPaper(payload, speechRequest) {
+    function submitPaper(payload, speechRequest, authorization, isStagedCurrent) {
       if (speechRequest && !speechRequestCurrent(speechRequest)) return Promise.resolve();
+      if (!attachmentPageCurrent()) {
+        if (speechRequest) finishSpeechRequest(speechRequest, "Open Talk before asking me to read a paper.");
+        return Promise.resolve();
+      }
       if (chatNavigation.pending) {
         if (speechRequest) finishSpeechRequest(speechRequest, "Choose a conversation before asking me to read a paper.");
         return Promise.resolve();
@@ -2891,37 +2912,54 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var generation = chatNavigation.generation;
       var state = chatState;
       var operation = ++paperOperation;
+      var epoch = attachmentNavEpoch();
       var context = null;
-      function current() { return operation === paperOperation && context && chatContextCurrent(context); }
+      var controller = new AbortController();
+      var speechSignal = speechRequest?.controller?.signal;
+      var stopPaper = function () {
+        if (operation === paperOperation) invalidatePaperOperation();
+      };
+      function surfaceCurrent() {
+        return operation === paperOperation && attachmentPageCurrent() && epoch === attachmentNavEpoch() &&
+          (!isStagedCurrent || isStagedCurrent());
+      }
+      function speechCurrent() { return !speechRequest || speechRequestCurrent(speechRequest); }
+      function current() { return surfaceCurrent() && context && chatContextCurrent(context) && speechCurrent(); }
       paperBusy = true;
+      cancelPaperOperation = function () {
+        controller.abort();
+        if (speechRequest) finishSpeechRequest(speechRequest);
+      };
+      if (speechSignal) speechSignal.addEventListener("abort", stopPaper, { once: true });
       if (note) note.textContent = "Reading…";
       var userLine = payload.filename ? "Read this — " + payload.filename : "Read this.";
       return ensureChatSession(speechRequest).then(function (sessionId) {
-        if (!sessionId || generation !== chatNavigation.generation || state !== chatState || operation !== paperOperation) {
-          if (speechRequest && speechRequestCurrent(speechRequest)) finishSpeechRequest(speechRequest);
-          if (operation === paperOperation && note) note.textContent = "Paper not sent. Choose a conversation and try again.";
+        if (!surfaceCurrent() || !speechCurrent()) return null;
+        if (!sessionId || generation !== chatNavigation.generation || state !== chatState) {
+          if (note) note.textContent = "Paper not sent. Choose a conversation and try again.";
           return null;
         }
         context = chatContextSnapshot();
-        if (speechRequest) {
-          if (!speechRequestCurrent(speechRequest)) return null;
-          voice.speechRequest = null;
-        }
-        chatState.messages.push({ role: "user", content: userLine });
-        renderChatMessages();
-        return fetch("/api/buzzy/papers", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            companyId: co,
-            jobId: chatState.jobId || undefined,
-            sessionId: chatState.sessionId || undefined,
-            filename: payload.filename || "",
-            text: payload.text || "",
-            fileKind: payload.fileKind || "paste",
-            dataBase64: payload.dataBase64 || undefined,
-          }),
+        return attachmentDestination(authorization && authorization.context, controller.signal).then(function (confirmed) {
+          if (!current()) return null;
+          if (authorization && confirmed.destination !== authorization.destination) throw new Error("The file destination changed. Confirm it again before sending.");
+          chatState.messages.push({ role: "user", content: userLine });
+          renderChatMessages();
+          return fetch(authorization ? "/api/buzzy/talk-attachments/papers" : "/api/buzzy/papers", {
+            method: "POST",
+            credentials: "same-origin",
+            signal: controller.signal,
+            headers: authorization ? { "Content-Type": "application/json", "x-bz-attachment-context": authorization.context } : { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              companyId: co,
+              jobId: chatState.jobId || undefined,
+              sessionId: chatState.sessionId || undefined,
+              filename: payload.filename || "",
+              text: payload.text || "",
+              fileKind: payload.fileKind || "paste",
+              dataBase64: payload.dataBase64 || undefined,
+            }),
+          });
         });
       }).then(function (r) {
         if (!r || !current()) return null;
@@ -2930,9 +2968,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       }).then(function (res) {
         if (!res || !current()) return;
         if (!res.ok || !res.d.paper) {
+          if (res.d && res.d.code === "attachment_context_changed" && isStagedCurrent && isStagedCurrent()) clearStagedPaper();
           if (note) note.textContent = (res.d && res.d.error) || "Couldn't read that.";
           return;
         }
+        // Settle this captured speech before the reply can update its job context.
+        if (speechRequest) finishSpeechRequest(speechRequest);
         if (res.d.paper.jobId) chatState.jobId = res.d.paper.jobId;
         chatState.boundCompanyId = co;
         paperLoad++;
@@ -2941,14 +2982,21 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         renderChatMessages();
         var paste = document.getElementById("paperPaste");
         if (paste) paste.value = "";
-        var file = document.getElementById("paperFile");
-        if (file) file.value = "";
+        if (!isStagedCurrent || isStagedCurrent()) clearStagedPaper();
         if (note) note.textContent = "These lines are proposed. Nothing is confirmed until you accept one.";
       }).catch(function (e) {
         if (!current()) return;
         if (e && e.message === "signed_out") return;
+        if (e && e.attachmentContextChanged && isStagedCurrent && isStagedCurrent()) clearStagedPaper();
         if (note) note.textContent = (e && e.message) || "Couldn't read that.";
-      }).finally(function () { if (operation === paperOperation) paperBusy = false; });
+      }).finally(function () {
+        if (speechSignal) speechSignal.removeEventListener("abort", stopPaper);
+        if (operation === paperOperation) {
+          cancelPaperOperation = null;
+          paperBusy = false;
+        }
+        if (speechRequest) finishSpeechRequest(speechRequest);
+      });
     }
 
     function readThisBody(text) {
@@ -7039,26 +7087,108 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (m === "work") setMode("work", { noFocus: true });
     })();
 
-    document.getElementById("paperRead").onclick = function () {
+    // Selection/drop owns no request and does not even read the bytes. The
+    // hosted confirmation is tied to this file and current conversation.
+    var stagedPaper = null;
+    var paperMount = document.getElementById("paperDrop");
+    function attachmentPageCurrent() {
+      if (!/^\/buzzy\/talk(?:\.html)?\/?$/.test(window.location.pathname)) return false;
+      var shell = window.BeeZillaShell;
+      if (!shell) return !!paperMount?.isConnected;
+      if (shell.busy) return false;
+      var page = document.getElementById("bzPage");
+      // The initial hard load legitimately has no wrapper until its first shell hop.
+      // A cached Talk mount can never satisfy this cold-document fallback.
+      return page ? page.contains(paperMount) :
+        !document.getElementById("bzPageCache") && !!paperMount?.isConnected && document.body.contains(paperMount);
+    }
+    function attachmentNavEpoch() { return window.BeeZillaShell?.navigationEpoch || 0; }
+    function leaveAttachmentPage() {
+      invalidatePaperOperation();
+      clearStagedPaper();
+    }
+    paperMount.bzBeforeLeave = function () { leaveAttachmentPage(); return true; };
+    window.addEventListener("pagehide", leaveAttachmentPage);
+    function clearStagedPaper() {
+      stagedPaper = null;
+      var input = document.getElementById("paperFile");
+      var button = document.getElementById("paperRead");
       var note = document.getElementById("paperNote");
-      var fileInput = document.getElementById("paperFile");
-      var file = fileInput && fileInput.files && fileInput.files[0];
-      var pasted = (document.getElementById("paperPaste").value || "").trim();
-      if (file) {
-        var context = chatContextSnapshot();
-        readDroppedFile(file).then(function (payload) {
-          if (!chatContextCurrent(context)) return;
-          return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload);
-        }).catch(function (e) {
-          if (chatContextCurrent(context) && note) note.textContent = e.message || "Couldn't read that file.";
-        });
+      if (input) input.value = "";
+      if (button) button.textContent = "Read / upload";
+      if (note) note.textContent = "";
+    }
+    function stagePaperFile(file) {
+      stagedPaper = file && attachmentPageCurrent() ? { file: file, context: chatContextSnapshot(), navEpoch: attachmentNavEpoch(), authorization: null, busy: false } : null;
+      document.getElementById("paperRead").textContent = "Read / upload";
+      document.getElementById("paperNote").textContent = stagedPaper ? "Selected on this device: " + (file.name || "file") + ". Not sent." : "";
+    }
+    async function attachmentDestination(context, operationSignal) {
+      var deadline = AbortSignal.timeout(10000);
+      var res = await fetch("/api/buzzy/attachment-destination", {
+        credentials: "same-origin", cache: "no-store", redirect: "error",
+        signal: operationSignal ? AbortSignal.any([deadline, operationSignal]) : deadline,
+        headers: context ? { "x-bz-attachment-context": context } : {}
+      });
+      var data = await res.json();
+      if (!res.ok || data?.ok !== true || typeof data.context !== "string" || !/^[0-9]{13}\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{43}$/.test(data.context) ||
+          (context && data.context !== context) || (data.destination !== "device" && data.destination !== "server")) {
+        var error = new Error(data?.error || "The file destination could not be verified. Nothing sent.");
+        error.attachmentContextChanged = Boolean(context);
+        throw error;
+      }
+      return { destination: data.destination, context: data.context };
+    }
+    document.getElementById("paperFile").addEventListener("change", function () {
+      stagePaperFile(this.files && this.files[0]);
+    });
+    document.getElementById("paperRead").onclick = async function () {
+      var note = document.getElementById("paperNote");
+      var staged = stagedPaper;
+      if (!staged) {
+        var pasted = (document.getElementById("paperPaste").value || "").trim();
+        if (!pasted) { note.textContent = "Choose a file or paste the letter first."; return; }
+        return submitPaper({ filename: "", fileKind: "paste", text: pasted });
+      }
+      if (staged.busy || chatNavigation.pending) return;
+      if (!attachmentPageCurrent() || staged.navEpoch !== attachmentNavEpoch() || !chatContextCurrent(staged.context)) {
+        clearStagedPaper();
         return;
       }
-      if (!pasted) {
-        if (note) note.textContent = "Drop a file or paste the letter first.";
-        return;
+      var generation = staged.context.generation;
+      function current() {
+        return stagedPaper === staged && attachmentPageCurrent() && staged.navEpoch === attachmentNavEpoch() && chatNavigation.generation === generation &&
+          staged.context.state === chatState && staged.context.companyId === (activeCompanyId() || null);
       }
-      submitPaper({ filename: "", fileKind: "paste", text: pasted });
+      staged.busy = true;
+      try {
+        var confirmed = staged.authorization;
+        var authorization = await attachmentDestination(confirmed && confirmed.context);
+        if (!current()) return;
+        if (authorization.destination === "server" && !confirmed) {
+          staged.authorization = authorization;
+          note.textContent = "This will send the selected file and its name to the BeeZilla server. Nothing sent yet.";
+          document.getElementById("paperRead").textContent = "Send file to BeeZilla";
+          return;
+        }
+        staged.authorization = null;
+        document.getElementById("paperRead").textContent = "Read / upload";
+        var payload = await readDroppedFile(staged.file);
+        if (!current()) return;
+        if (payload.mediaFile) await submitMedia(payload.mediaFile, authorization, current);
+        else await submitPaper(payload, null, authorization, current);
+      } catch (error) {
+        if (current()) {
+          staged.authorization = null;
+          if (error && error.attachmentContextChanged) clearStagedPaper();
+          document.getElementById("paperRead").textContent = "Read / upload";
+          note.textContent = (error && error.message) || "The file could not be sent.";
+        }
+      } finally {
+        staged.busy = false;
+        if (current()) staged.context = chatContextSnapshot();
+        else if (stagedPaper === staged) clearStagedPaper();
+      }
     };
     (function wirePaperDrop() {
       var zone = document.getElementById("paperDrop");
@@ -7077,15 +7207,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
       zone.addEventListener("drop", function (e) {
         var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-        var note = document.getElementById("paperNote");
-        if (!file) return;
-        var context = chatContextSnapshot();
-        readDroppedFile(file).then(function (payload) {
-          if (!chatContextCurrent(context)) return;
-          return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload);
-        }).catch(function (err) {
-          if (chatContextCurrent(context) && note) note.textContent = err.message || "Couldn't read that file.";
-        });
+        if (file) {
+          document.getElementById("paperFile").value = "";
+          stagePaperFile(file);
+        }
       });
     })();
     document.getElementById("paperToggle").onclick = function () {

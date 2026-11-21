@@ -38,7 +38,7 @@ function ui(fetcher, options = {}) {
   sessionStorage: { getItem: () => null }, document: { getElementById: node, querySelectorAll: () => [] },
   activeCompanyId: () => company, BZCompanies: { activeId: () => company },
   fetch: async (url, init = {}) => { calls.push({ url, body: init.body ? JSON.parse(init.body) : null }); return fetcher(url, init); },
-  paperOperation: 0, paperBusy: false, renderPaper() {},
+  paperOperation: 0, paperBusy: false, cancelPaperOperation: null, stagedPaper: null, renderPaper() {},
   welcomeMessage: () => 'Welcome', speechRequestCurrent: () => true, bzJobCtx: j => j,
  };
  globals.window.BZCompanies = globals.BZCompanies;
@@ -47,7 +47,7 @@ function ui(fetcher, options = {}) {
  const start = html.indexOf('    let chatState ='), end = html.indexOf('    // ── Form tab', start);
  assert.ok(start >= 0 && end > start); vm.runInContext(html.slice(start,end),ctx);
  // New helpers are extracted from shipped source, never reproduced here.
- const names = ['chatContextSnapshot','chatContextCurrent','beginChatNavigation','chatNavigationCurrent','finishChatNavigation','validChatSession','storeChatSession','selectChatSession','showChatFailure','restoreTranscript','newChatNow','ensureChatSession','openSession','startNewChat'];
+ const names = ['chatContextSnapshot','chatContextCurrent','beginChatNavigation','chatNavigationCurrent','finishChatNavigation','validChatSession','storeChatSession','selectChatSession','showChatFailure','restoreTranscript','newChatNow','ensureChatSession','openSession','startNewChat','clearStagedPaper','invalidatePaperOperation'];
  const nav = html.match(/^    (?:var|let|const) chatNavigation = .*;$/m);
  if (nav && !html.slice(start,end).includes(nav[0])) vm.runInContext(nav[0],ctx);
  vm.runInContext(names.map(fn).join('\n'),ctx);

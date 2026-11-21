@@ -1403,5 +1403,5 @@
     go(location.href, { push: false });
   });
 
-  window.BeeZillaShell = { go: go, cache: cache, get busy() { return busy; }, get currentKey() { return currentKey; } };
+  window.BeeZillaShell = { go: go, cache: cache, get busy() { return busy; }, get currentKey() { return currentKey; }, get navigationEpoch() { return navigationId; } };
 })();

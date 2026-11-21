@@ -33,7 +33,7 @@ import type { VoiceHandlers } from "./voice";
 import { summarizeSessionNow } from "./sessions";
 import { getSessionUserFromHeaders } from "@/lib/auth/verify.server";
 import { getModels, chatCompletion } from "./llm";
-import { getSql, type Sql } from "@/lib/db";
+import { dbSource, getSql, type Sql } from "@/lib/db";
 import { honchoAvailable } from "./honcho";
 import { validateGraph, saveGraph, listGraphs, loadGraph } from "./graphs";
 import { gatedMusic, generateMusic, storeAudio, musicConfigured } from "./music";
@@ -77,7 +77,7 @@ import { recordTelemetry, successSummary, TELEMETRY_DISCLOSURE } from "./telemet
 import { RECIPES, UNIVERSAL_STATEMENTS, getRecipe, validateRecipe, boundaryViolations } from "./recipes";
 import { resolveActingAccount, guard, canPerform, denialReason, TEAM_ACTIONS, DELEGATABLE, authorize, type MemberRole } from "./team";
 import { STATEMENT_IDS, DEEPENING_IDS } from "./questions";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { transcribeAudio, formatFromContentType, ASR_MAX_BYTES, normalizeVocab } from "./asr";
 import { readLocalOnlyPreference } from "./modelPrefs";
 import { isLocalRuntime } from "../runtime";
@@ -330,6 +330,60 @@ async function readGraphMutationResponse(original: Headers, userId: string, runI
   // The snapshot read can await storage. Do not expose it to a stale owner.
   await requireOwner();
   return run;
+}
+
+// The origin may be hosted even when the user selected Local Only. A verified
+// local owner + runtime token + forced local PGLite is a separate device path.
+const ATTACHMENT_CONTEXT_HEADER = "x-bz-attachment-context";
+const ATTACHMENT_CONTEXT_TTL = 2 * 60 * 1000;
+const ATTACHMENT_CONTEXT_CLOCK_SKEW_MS = 5000;
+async function attachmentAdmission(event: Parameters<typeof getMethod>[0], bindAttachment = false) {
+  const user = await getSessionUserFromHeaders(headersFromEvent(event), { authoritative: true, bindAttachment }).catch(() => null);
+  const refuse = (status: number, code: string, error: string) => {
+    setResponseStatus(event, status);
+    return { ok: false as const, code, error };
+  };
+  if (!user) return refuse(401, "signed_out", "Sign in before sending a file.");
+  if (isLocalRuntime()) {
+    if (user.id === LOCAL_OWNER_ID && localToken() && dbSource === "pglite") {
+      return { ok: true as const, user, destination: "device" as const };
+    }
+    return refuse(503, "attachment_policy_unavailable", "Local storage could not be verified; no file can be sent.");
+  }
+  try {
+    if (await readLocalOnlyPreference(await getSql(), user.id)) {
+      return refuse(403, "attachment_local_only", "Local Only is on. Use the desktop app to read or save this file on your device.");
+    }
+  } catch {
+    return refuse(503, "attachment_policy_unavailable", "File privacy could not be checked. No file can be sent.");
+  }
+  return { ok: true as const, user, destination: "server" as const };
+}
+
+type AttachmentAdmission = Extract<Awaited<ReturnType<typeof attachmentAdmission>>, { ok: true }>;
+function attachmentSignature(admission: AttachmentAdmission, prefix: string): string | null {
+  const key = admission.user.attachmentBinding;
+  if (!key) return null;
+  return createHmac("sha256", key)
+    .update(JSON.stringify(["talk-attachment-v1", admission.user.id, admission.destination, prefix]))
+    .digest("base64url");
+}
+function issueAttachmentContext(admission: AttachmentAdmission): string | null {
+  const prefix = String(Date.now() + ATTACHMENT_CONTEXT_TTL) + "." + randomBytes(12).toString("base64url");
+  const signature = attachmentSignature(admission, prefix);
+  return signature ? prefix + "." + signature : null;
+}
+function acceptsAttachmentContext(admission: AttachmentAdmission, value: unknown): boolean {
+  const match = typeof value === "string" && /^([0-9]{13}\.[A-Za-z0-9_-]{16})\.([A-Za-z0-9_-]{43})$/.exec(value);
+  if (!match) return false;
+  const now = Date.now(), expires = Number(match[1].slice(0, 13));
+  if (expires <= now || expires - now > ATTACHMENT_CONTEXT_TTL + ATTACHMENT_CONTEXT_CLOCK_SKEW_MS) return false;
+  const expected = attachmentSignature(admission, match[1]);
+  return !!expected && timingSafeEqual(Buffer.from(expected), Buffer.from(match[2]));
+}
+function attachmentContextChanged(event: Parameters<typeof getMethod>[0]) {
+  setResponseStatus(event, 409);
+  return { ok: false, code: "attachment_context_changed", error: "The upload authorization expired or changed. Re-select the file before sending." };
 }
 
 /**
@@ -802,18 +856,31 @@ export default defineEventHandler(async (event) => {
     };
   }
 
+  // File-free preflight; the write endpoints enforce fresh policy independently.
+  if (method === "GET" && path === "/api/buzzy/attachment-destination") {
+    setResponseHeader(event, "cache-control", "no-store");
+    const admission = await attachmentAdmission(event, true);
+    if (!admission.ok) return admission;
+    const supplied = getHeader(event, ATTACHMENT_CONTEXT_HEADER);
+    if (supplied !== undefined && !acceptsAttachmentContext(admission, supplied)) return attachmentContextChanged(event);
+    const context = supplied ?? issueAttachmentContext(admission);
+    if (!context) return attachmentContextChanged(event);
+    return { ok: true, destination: admission.destination, context };
+  }
+
   // ── POST /api/buzzy/assets — one file of a bulk upload ───────────────
   // The unit a person actually has is a folder: a skills corpus is markdown
   // plus thousands of images. The page walks the folder and posts files one at
   // a time, so an interrupted run resumes instead of re-sending everything.
   // Content-addressed server-side: the body is hashed here, never trusted from
   // the client, and a repeat upload of the same bytes returns the existing row.
-  if (method === "POST" && path === "/api/buzzy/assets") {
-    const user = await getSessionUserFromHeaders(headersFromEvent(event));
-    if (!user) {
-      setResponseStatus(event, 401);
-      return { ok: false, error: "Sign in required", code: "signed_out" };
-    }
+  if (method === "POST" && (path === "/api/buzzy/assets" || path === "/api/buzzy/talk-attachments/assets")) {
+    const talkAttachment = path === "/api/buzzy/talk-attachments/assets";
+    const admitted = await attachmentAdmission(event, talkAttachment);
+    if (!admitted.ok) return admitted;
+    const context = talkAttachment ? getHeader(event, ATTACHMENT_CONTEXT_HEADER) : undefined;
+    if (talkAttachment && !acceptsAttachmentContext(admitted, context)) return attachmentContextChanged(event);
+    const user = admitted.user;
     // x-bz-path carries the folder-relative name; it is display metadata only,
     // so sanitise hard and never use it to touch the filesystem.
     const rawPath = (getHeader(event, "x-bz-path") || getHeader(event, "x-bz-filename") || "")
@@ -847,6 +914,13 @@ export default defineEventHandler(async (event) => {
         error: `That file is ${(body.byteLength / 1048576).toFixed(1)} MB — the limit is ${ASSET_MAX_BYTES / 1048576} MB.`,
         code: "file_too_large",
       };
+    }
+    const recheck = await attachmentAdmission(event, talkAttachment);
+    if (!recheck.ok) return recheck;
+    if (talkAttachment && !acceptsAttachmentContext(recheck, context)) return attachmentContextChanged(event);
+    if (recheck.user.id !== user.id || admitted.destination !== recheck.destination) {
+      setResponseStatus(event, 401);
+      return { ok: false, code: "attachment_context_changed", error: "The file destination changed; it was not saved." };
     }
     const sha256 = createHash("sha256").update(body).digest("hex");
     const filename = relPath.split("/").pop() || relPath;
@@ -4925,12 +4999,13 @@ export default defineEventHandler(async (event) => {
   }
 
   // ── POST /api/buzzy/papers — read a paper; lines stay proposed ──────
-  if (method === "POST" && path === "/api/buzzy/papers") {
-    const user = await getSessionUserFromHeaders(headersFromEvent(event));
-    if (!user) {
-      setResponseStatus(event, 401);
-      return { error: "Sign in required", code: "signed_out" };
-    }
+  if (method === "POST" && (path === "/api/buzzy/papers" || path === "/api/buzzy/talk-attachments/papers")) {
+    const talkAttachment = path === "/api/buzzy/talk-attachments/papers";
+    const admitted = await attachmentAdmission(event, talkAttachment);
+    if (!admitted.ok) return admitted;
+    const context = talkAttachment ? getHeader(event, ATTACHMENT_CONTEXT_HEADER) : undefined;
+    if (talkAttachment && !acceptsAttachmentContext(admitted, context)) return attachmentContextChanged(event);
+    const user = admitted.user;
     let body: Record<string, unknown> = {};
     try {
       const parsed = await event.req.json();
@@ -4977,6 +5052,13 @@ export default defineEventHandler(async (event) => {
     } else if (fileKind !== "photo" && !text.trim()) {
       setResponseStatus(event, 400);
       return { error: "Paste the letter or drop the file first.", code: "bad_request" };
+    }
+    const recheck = await attachmentAdmission(event, talkAttachment);
+    if (!recheck.ok) return recheck;
+    if (talkAttachment && !acceptsAttachmentContext(recheck, context)) return attachmentContextChanged(event);
+    if (recheck.user.id !== user.id || admitted.destination !== recheck.destination) {
+      setResponseStatus(event, 401);
+      return { ok: false, code: "attachment_context_changed", error: "The file destination changed; it was not saved." };
     }
     const sql = await getSql();
     const saved = await savePaper(sql, user.id, {
