@@ -15,6 +15,7 @@ import { getSessionUserFromHeaders } from "@/lib/auth/verify.server";
 import { getSql } from "@/lib/db";
 import { checkQuota, recordUsage } from "./entitlements";
 import { artConfigured, generateImage, storeImage, imageModel } from "./art";
+import { readLocalOnlyPreference } from "./modelPrefs";
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -31,17 +32,18 @@ function headersFromEvent(event: any): Headers {
 
 export default defineEventHandler(async (event) => {
   const method = getMethod(event);
-  const user = await getSessionUserFromHeaders(headersFromEvent(event));
+  const originalHeaders = new Headers(headersFromEvent(event));
+  const user = await getSessionUserFromHeaders(new Headers(originalHeaders));
   if (!user) return json(401, { error: "Sign in required", code: "signed_out" });
+  const ownerId = user.id;
 
   const fullPath = event.path ?? "";
   const qs = fullPath.includes("?") ? fullPath.slice(fullPath.indexOf("?") + 1) : "";
   const params = new URLSearchParams(qs);
-  const sql = await getSql();
-
   if (method === "GET") {
     const jobId = params.get("job");
     if (!jobId) return json(400, { error: "job is required", code: "bad_request" });
+    const sql = await getSql();
     const rows = await sql`
       SELECT id, title, status, data FROM buzzy_jobs
       WHERE id = ${jobId} AND user_id = ${user.id} LIMIT 1`;
@@ -81,6 +83,7 @@ export default defineEventHandler(async (event) => {
     if (!jobId) return json(400, { error: "jobId is required to save a board", code: "bad_request" });
     const board = body.board && typeof body.board === "object" ? body.board : null;
     if (!board) return json(400, { error: "board is required", code: "bad_request" });
+    const sql = await getSql();
     const owned = await sql`SELECT id FROM buzzy_jobs WHERE id = ${jobId} AND user_id = ${user.id} LIMIT 1`;
     if (!owned.length) return json(404, { error: "No such project", code: "not_found" });
     // The board is the project's source, so it lives beside its brief and survives
@@ -108,6 +111,33 @@ export default defineEventHandler(async (event) => {
     return json(200, { ok: true, saved: true });
   }
 
+  // Rendering is a separate provider path. The cached session above only
+  // identifies the original account; authoritative checks gate its inputs.
+  const stillOwner = async () => (await getSessionUserFromHeaders(
+    new Headers(originalHeaders), { authoritative: true },
+  ).catch(() => null))?.id === ownerId;
+  const sessionChanged = () =>
+    json(401, { error: "The original session could not be verified. Sign in again before making a picture.", code: "art_session_changed" });
+  const policyUnavailable = () =>
+    json(503, { error: "Could not verify your Local Only setting. No picture was sent to a provider.", code: "model_policy_error" });
+  if (!await stillOwner()) return sessionChanged();
+  let sql: Awaited<ReturnType<typeof getSql>>;
+  try {
+    sql = await getSql();
+  } catch {
+    return policyUnavailable();
+  }
+  const checkArtPrivacy = async () => {
+    try {
+      if (!await readLocalOnlyPreference(sql, ownerId)) return null;
+      return json(403, { error: "This picture maker is off in Local Only. You can still read and save your board.", code: "local_only" });
+    } catch {
+      return policyUnavailable();
+    }
+  };
+  const beforeRead = await checkArtPrivacy();
+  if (beforeRead) return beforeRead;
+
   // Region edit. "Make the coat red" on a finished picture used to mean re-rolling
   // the whole image and hoping the rest survived. A mask turns it into a change to
   // one part of the picture the owner actually chose, and the reference is the
@@ -122,7 +152,7 @@ export default defineEventHandler(async (event) => {
     if (!instruction) return json(400, { error: "Say what to change in that area.", code: "bad_request" });
     const rows = await sql`
       SELECT body, content_type FROM buzzy_assets
-      WHERE id = ${imageId} AND user_id = ${user.id} AND job_id = ${jobId} LIMIT 1`;
+      WHERE id = ${imageId} AND user_id = ${ownerId} AND job_id = ${jobId} LIMIT 1`;
     if (!rows.length) return json(404, { error: "No such picture on this project", code: "not_found" });
     const row = rows[0] as { body: Uint8Array | Buffer; content_type: string | null };
     const base = `data:${row.content_type || "image/png"};base64,${Buffer.from(row.body).toString("base64")}`;
@@ -137,20 +167,34 @@ export default defineEventHandler(async (event) => {
   if (!prompt) return json(400, { error: "Describe what to create.", code: "bad_request" });
   if (!artConfigured()) return json(503, { error: "Art is not configured on this deployment.", code: "not_configured" });
 
-  const verdict = await checkQuota({ userId: user.id, scope: "image", units: 1 });
+  const verdict = await checkQuota({ userId: ownerId, scope: "image", units: 1 });
   if (!verdict.ok) {
     // 402 is "pay for it", 429 is "you've had your share today" — never a 5xx.
     const status = verdict.code === "plan_required" ? 402 : 429;
     await recordUsage({
-      userId: user.id, scope: "image", units: 0, ms: 0,
+      userId: ownerId, scope: "image", units: 0, ms: 0,
       status: "refused", code: verdict.code ?? "refused", model: imageModel(),
     }).catch(() => {});
     return json(status, { error: verdict.error, code: verdict.code, plan: verdict.plan, limit: verdict.limit, used: verdict.used });
   }
 
   const refs = Array.isArray(body.refs) ? (body.refs as unknown[]).filter((r): r is string => typeof r === "string") : [];
+  // Quota checks and edit reads may have outlived the starting policy.
+  if (!await stillOwner()) return sessionChanged();
+  const beforeForward = await checkArtPrivacy();
+  if (beforeForward) return beforeForward;
+  if (event.req.signal?.aborted) {
+    return json(499, { error: "Picture making was cancelled.", code: "art_cancelled" });
+  }
+  const made = await generateImage(prompt, { referenceImages: refs });
+  await recordUsage({
+    userId: ownerId, scope: "image", units: made.ok ? 1 : 0, ms: made.ms ?? 0,
+    status: made.ok ? "ok" : "failed", code: made.ok ? null : made.code ?? "failed", model: imageModel(),
+  }).catch(() => {});
+
   // The reference image the render was conditioned on is an INPUT of this project.
-  // Storing it is what makes "source in, output out" auditable instead of folklore.
+  // Persist it only after the provider attempt, so a pre-dispatch refusal
+  // cannot leave a saved reference behind.
   let referenceSource: { kind: string; label: string; url: string; bytes: number } | null = null;
   if (refs.length) {
     try {
@@ -158,8 +202,8 @@ export default defineEventHandler(async (event) => {
       if (m) {
         const bytes = Buffer.from(m[2]!, "base64");
         const stampRef = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-        const refStored = await storeImage(user.id, bytes, `reference-${stampRef}.png`, m[1]!);
-        if (jobId) await sql`UPDATE buzzy_assets SET job_id = ${jobId} WHERE user_id = ${user.id} AND id = ${refStored.id}`;
+        const refStored = await storeImage(ownerId, bytes, `reference-${stampRef}.png`, m[1]!);
+        if (jobId) await sql`UPDATE buzzy_assets SET job_id = ${jobId} WHERE user_id = ${ownerId} AND id = ${refStored.id}`;
         referenceSource = {
           kind: "reference",
           label: `Reference image used for "${prompt.slice(0, 60)}${prompt.length > 60 ? "…" : ""}"`,
@@ -167,13 +211,8 @@ export default defineEventHandler(async (event) => {
           bytes: refStored.bytes,
         };
       }
-    } catch { /* a reference that cannot be stored must not block the render */ }
+    } catch { /* a reference that cannot be stored must not block the result */ }
   }
-  const made = await generateImage(prompt, { referenceImages: refs });
-  await recordUsage({
-    userId: user.id, scope: "image", units: made.ok ? 1 : 0, ms: made.ms ?? 0,
-    status: made.ok ? "ok" : "failed", code: made.ok ? null : made.code ?? "failed", model: imageModel(),
-  }).catch(() => {});
 
   if (!made.ok || !made.bytes) {
     const status = made.code === "provider_plan_required" ? 402 : 502;
@@ -182,13 +221,13 @@ export default defineEventHandler(async (event) => {
 
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
   const name = `art-${stamp}.png`;
-  const stored = await storeImage(user.id, made.bytes, name, made.contentType || "image/png");
+  const stored = await storeImage(ownerId, made.bytes, name, made.contentType || "image/png");
 
   // Name the project the deliverable belongs to, and record the project if this
   // board was loose — a file that no work item claims is the bug we just fixed.
   if (jobId) {
     try {
-      await sql`UPDATE buzzy_assets SET job_id = ${jobId} WHERE user_id = ${user.id} AND id = ${stored.id}`;
+      await sql`UPDATE buzzy_assets SET job_id = ${jobId} WHERE user_id = ${ownerId} AND id = ${stored.id}`;
       const inputs = [
         { kind: "prompt", label: `Instruction: ${prompt.slice(0, 120)}`, url: `/buzzy/sketch?job=${jobId}`, updatedAt: new Date().toISOString() },
         ...(referenceSource ? [{ ...referenceSource, updatedAt: new Date().toISOString() }] : []),
@@ -204,7 +243,7 @@ export default defineEventHandler(async (event) => {
                       WHERE x->>'kind' NOT IN ('prompt')), '[]'::jsonb) || ${JSON.stringify(inputs)}::jsonb,
             true),
           updated_at = now()
-        WHERE id = ${jobId} AND user_id = ${user.id}`;
+        WHERE id = ${jobId} AND user_id = ${ownerId}`;
     } catch { /* link is an improvement, not a gate */ }
   }
 
