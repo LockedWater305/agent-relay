@@ -44,11 +44,11 @@ function asNumber(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-export async function readModelPrefs(
+async function readStoredPrefs(
   sql: Sql,
   userId: string,
-  { requireStoredObject = false }: { requireStoredObject?: boolean } = {},
-): Promise<ModelPrefs> {
+  requireStoredObject: boolean,
+): Promise<Record<string, unknown>> {
   const rows = (await sql`
     select prefs from ar_operator_prefs where user_id = ${userId} limit 1
   `) as Array<{ prefs: unknown }>;
@@ -58,8 +58,10 @@ export async function readModelPrefs(
   if (requireStoredObject && rows.length && !isObject) {
     throw new Error("Saved model settings are not a JSON object.");
   }
-  const prefs: Record<string, unknown> = isObject ? (raw as Record<string, unknown>) : {};
+  return isObject ? (raw as Record<string, unknown>) : {};
+}
 
+function localOnlyFrom(prefs: Record<string, unknown>): boolean {
   // An absent control keeps the default. A present but malformed privacy
   // control must not become false: stale rows such as localOnly: "true" would
   // otherwise permit cloud inference. chatLoop reports this as a policy error
@@ -67,6 +69,21 @@ export async function readModelPrefs(
   if ("localOnly" in prefs && typeof prefs.localOnly !== "boolean") {
     throw new Error("Saved local-only preference is invalid. Update your model settings before trying again.");
   }
+  return prefs.localOnly === true;
+}
+
+/** Read only the owner's persisted privacy choice. No spend or catalog I/O. */
+export async function readLocalOnlyPreference(sql: Sql, userId: string): Promise<boolean> {
+  return localOnlyFrom(await readStoredPrefs(sql, userId, true));
+}
+
+export async function readModelPrefs(
+  sql: Sql,
+  userId: string,
+  { requireStoredObject = false }: { requireStoredObject?: boolean } = {},
+): Promise<ModelPrefs> {
+  const prefs = await readStoredPrefs(sql, userId, requireStoredObject);
+  const localOnly = localOnlyFrom(prefs);
 
   const stored = asString(prefs.modelPreference);
   let preference: ModelPreference = "value";
@@ -101,7 +118,7 @@ export async function readModelPrefs(
     preferenceSource,
     ...(degradation ? { degradation } : {}),
     provider: asString(prefs.provider),
-    localOnly: prefs.localOnly === true,
+    localOnly,
     ...(cap !== undefined && cap > 0 ? { budgetCapCents: cap } : {}),
     spentCents: Math.max(0, Math.round(usd * 100)),
   };

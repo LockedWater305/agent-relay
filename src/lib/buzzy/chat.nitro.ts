@@ -79,6 +79,7 @@ import { resolveActingAccount, guard, canPerform, denialReason, TEAM_ACTIONS, DE
 import { STATEMENT_IDS, DEEPENING_IDS } from "./questions";
 import { createHash } from "node:crypto";
 import { transcribeAudio, formatFromContentType, ASR_MAX_BYTES, normalizeVocab } from "./asr";
+import { readLocalOnlyPreference } from "./modelPrefs";
 import { isLocalRuntime } from "../runtime";
 import { LOCAL_OWNER_ID, localToken } from "../local-owner";
 import { LibraryVaultError, readVaultBody, validateVaultBatch, storeVaultBatch, listVaultPage, vaultPageOptions, getVaultMetadata } from "./libraryVault";
@@ -534,11 +535,32 @@ export default defineEventHandler(async (event) => {
   // The page posts a raw 16 kHz mono WAV clip; the audio model does the
   // listening, on the same gateway and key as the voice lane.
   if (method === "POST" && path === "/api/buzzy/transcribe") {
-    const user = await getSessionUserFromHeaders(headersFromEvent(event));
+    const originalHeaders = new Headers(headersFromEvent(event));
+    const verifyAudioRequester = () =>
+      getSessionUserFromHeaders(new Headers(originalHeaders), { authoritative: true }).catch(() => null);
+    const user = await verifyAudioRequester();
     if (!user) {
       setResponseStatus(event, 401);
       return { ok: false, error: "Sign in required", code: "signed_out" };
     }
+    // This route runs before chatLoop, including for the desktop mic test.
+    // A loopback runtime/endpoint does not prove that ASR runs on-device.
+    let privacySql: Sql | undefined;
+    const checkTranscriptionPrivacy = async () => {
+      try {
+        privacySql ??= await getSql();
+        if (!await readLocalOnlyPreference(privacySql, user.id)) return null;
+        setResponseStatus(event, 409);
+        return { ok: false, code: "transcription_local_only",
+          error: "Local Only is on and this build has no verified on-device transcription. Use typed chat." };
+      } catch {
+        setResponseStatus(event, 503);
+        return { ok: false, code: "transcription_policy_unavailable",
+          error: "Transcription is unavailable because your privacy settings could not be checked. Use typed chat or try again." };
+      }
+    };
+    const beforeRead = await checkTranscriptionPrivacy();
+    if (beforeRead) return beforeRead;
     const format = formatFromContentType(getHeader(event, "content-type"));
     if (!format) {
       setResponseStatus(event, 415);
@@ -611,6 +633,21 @@ export default defineEventHandler(async (event) => {
     }
     // The product's own coinages, which no owner can be expected to have typed.
     addVocab(["Honey Drops"]);
+    // The clip or vocabulary read may have outlived the originating account's
+    // session. Recheck original credentials without using the hosted cookie
+    // cache, then make a fresh owner-scoped privacy read before forwarding.
+    const requester = await verifyAudioRequester();
+    if (!requester || requester.id !== user.id) {
+      setResponseStatus(event, 401);
+      return { ok: false, code: "transcription_session_changed",
+        error: "The original session could not be verified. Sign in again before transcribing." };
+    }
+    const beforeForward = await checkTranscriptionPrivacy();
+    if (beforeForward) return beforeForward;
+    if (event.req.signal?.aborted) {
+      setResponseStatus(event, 499);
+      return { ok: false, code: "transcription_cancelled", error: "Transcription was cancelled." };
+    }
     try {
       const r = await transcribeAudio(audio, format, vocab);
       // Time to transcript is a product number, not a log line. Recorded with

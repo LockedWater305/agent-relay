@@ -85,6 +85,7 @@ export type VerifiedUser = { id: string; email: string | null; name?: string | n
  */
 export async function getSessionUserFromHeaders(
   headers: Headers,
+  { authoritative = false }: { authoritative?: boolean } = {},
 ): Promise<VerifiedUser | null> {
   // Local (desktop / CLI) installs: Host allowlist + per-launch bearer token,
   // NOT a cookie session. This is the single chokepoint every Nitro handler
@@ -94,13 +95,19 @@ export async function getSessionUserFromHeaders(
   }
   if (!authConfigured) return null;
   try {
-    const session = await auth.api.getSession({ headers });
+    // Sensitive callers can opt out of the hosted signed session-cookie cache
+    // without extending the lifetime of the original session on a recheck.
+    const session = await auth.api.getSession({
+      headers,
+      ...(authoritative ? { query: { disableCookieCache: true, disableRefresh: true } } : {}),
+    });
     if (!session?.user) return null;
     // Platform-disabled accounts must not resolve as signed-in (any path).
     try {
       const { boardOps } = await import("../board-server");
       if (await boardOps.isUserDisabled(session.user.id)) return null;
     } catch {
+      if (authoritative) return null;
       /* board store unavailable — fail open only if import fails mid-boot */
     }
     return { id: session.user.id, email: session.user.email ?? null };
