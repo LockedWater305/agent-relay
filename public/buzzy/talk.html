@@ -2563,7 +2563,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
 
     function renderChatMessages() {
-      const container = document.getElementById("chatMessages");
+      const owner = arguments[0];
+      const container = owner ? owner.messages : document.getElementById("chatMessages");
       // Newest first, but each exchange still reads question-then-answer:
       // [u2, a2, u1, a1]. Your words and the reply stay at the top; older
       // turns and the work history drop below. No scroll games.
@@ -2666,7 +2667,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         container.insertBefore(offer, container.firstChild);
       }
       container.scrollTop = 0;
-      if (typeof updateChrome === "function") updateChrome();
+      if ((!owner || owner.mounted()) && typeof updateChrome === "function") updateChrome();
     }
 
     function activeCompanyId() {
@@ -5358,7 +5359,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
      *   done  → the same ChatResponse the text lane returns
      *   error → surfaces the failure instead of hanging on a dead stream
      */
-    function streamVoiceTurn(sendBody, metrics, sendStarted, myTurn) {
+    function streamVoiceTurn(sendBody, metrics, sendStarted, myTurn, owner, publishStage) {
       var conversation = chatContextSnapshot();
       var liveBubble = null;
       var liveText = "";
@@ -5398,20 +5399,23 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           var payload;
           try { payload = JSON.parse(dataLines.join("\n")); } catch (_) { return; }
           if (ev === "stage") {
-            if (window.__bzStage) window.__bzStage(payload);
+            var stage = publishStage || window.__bzStage;
+            if (stage) stage(payload);
           } else if (ev === "text") {
             if (metrics.ttftMs == null) metrics.ttftMs = Math.round(performance.now() - sendStarted);
             liveText += payload.t || "";
             if (!liveBubble) {
               liveBubble = document.createElement("div");
               liveBubble.className = "bubble streaming";
-              var c = document.getElementById("chatMessages");
+              var c = owner ? owner.messages : document.getElementById("chatMessages");
               if (c) c.insertBefore(liveBubble, c.firstChild);
             }
             liveBubble.textContent = liveText;
           } else if (ev === "stage") {
-            if (window.__bzStage) window.__bzStage(payload);
+            var stage = publishStage || window.__bzStage;
+            if (stage) stage(payload);
           } else if (ev === "tool") {
+            if (owner && !owner.mounted()) return;
             // Name the work instead of leaving a bare clock: "running
             // read_web_page" explains a 30-second silence; dots do not.
             var status = document.getElementById("voiceStatus");
@@ -5429,7 +5433,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             // Stamp "to talk" only for audio that was actually scheduled: an
             // audio frame on a turn the owner cut is not sound they heard, and
             // claiming it was is how a silent turn reported 1.45s.
-            if (playPcm(payload.b64, myTurn)) {
+            if ((!owner || owner.mounted()) && playPcm(payload.b64, myTurn)) {
               if (metrics.ttfaMs == null) {
                 metrics.ttfaMs = Math.round(performance.now() - sendStarted);
                 metrics.spoken = true;
@@ -5475,7 +5479,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     // Typed turns stream for the same reason the voice lane does: a buffered
     // reply paints nothing until the whole answer exists. Same SSE contract,
     // no audio.
-    function streamTextTurn(sendBody, metrics, sendStarted) {
+    function streamTextTurn(sendBody, metrics, sendStarted, owner) {
       var conversation = chatContextSnapshot();
       var liveBubble = null;
       var liveText = "";
@@ -5520,7 +5524,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             if (!liveBubble) {
               liveBubble = document.createElement("div");
               liveBubble.className = "bubble streaming";
-              var c = document.getElementById("chatMessages");
+              var c = owner ? owner.messages : document.getElementById("chatMessages");
               if (c) c.insertBefore(liveBubble, c.firstChild);
             }
             liveBubble.textContent = liveText;
@@ -5593,13 +5597,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       return filledDecisions().length >= 2;
     }
 
-    function draftBodyEl() {
-      return document.getElementById("draftBody");
+    function draftBodyEl(owner) {
+      return (owner || document).getElementById("draftBody");
     }
 
-    function approvalMatches() {
+    function approvalMatches(owner) {
       if (chatState.moneyBlocks) return false;
-      var body = draftBodyEl();
+      var body = draftBodyEl(owner);
       var text = body ? body.value : (chatState.draftText || "");
       return !!(chatState.approvedText != null && text === chatState.approvedText && text.trim());
     }
@@ -5627,8 +5631,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
-    function currentMoneyCheck() {
-      var body = draftBodyEl();
+    function currentMoneyCheck(owner) {
+      var body = draftBodyEl(owner);
       var text = body ? body.value : (chatState.draftText || "");
       if (typeof checkMoney !== "function") return null;
       return checkMoney({
@@ -5639,12 +5643,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
-    function renderMoneyCheck() {
-      var list = document.getElementById("moneyCheck");
-      var approve = document.getElementById("approveDraft");
-      var banner = document.getElementById("draftBanner");
+    function renderMoneyCheck(owner) {
+      var view = owner || document;
+      var list = view.getElementById("moneyCheck");
+      var approve = view.getElementById("approveDraft");
+      var banner = view.getElementById("draftBanner");
       var showing = !!(banner && !banner.classList.contains("hidden"));
-      var note = document.getElementById("draftSendNote");
+      var note = view.getElementById("draftSendNote");
       if (!showing) {
         chatState.moneyBlocks = false;
         if (list) { list.classList.add("hidden"); list.innerHTML = ""; }
@@ -5661,10 +5666,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         }
         if (approve) approve.disabled = true;
         if (note) note.textContent = "Nothing was approved. The amount could not be checked, so this stays a draft.";
-        paintDraftGate();
+        paintDraftGate(owner);
         return null;
       }
-      var check = currentMoneyCheck();
+      var check = currentMoneyCheck(owner);
       chatState.moneyBlocks = !!(check && check.blocksApproval);
       if (chatState.moneyBlocks) {
         chatState.approvedText = null;
@@ -5688,7 +5693,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       } else if (note && note.textContent.indexOf("Nothing was approved") === 0) {
         note.textContent = "";
       }
-      paintDraftGate();
+      paintDraftGate(owner);
       return check;
     }
 
@@ -5708,13 +5713,14 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       renderMoneyCheck();
     };
 
-    function paintDraftGate() {
-      var meta = document.getElementById("draftMeta");
-      var approved = approvalMatches();
+    function paintDraftGate(owner) {
+      var view = owner || document;
+      var meta = view.getElementById("draftMeta");
+      var approved = approvalMatches(owner);
       if (meta) {
         meta.textContent = "Version " + (chatState.draftVersion || 1) + (approved ? " · approved" : " · not approved");
       }
-      var confirmBtn = document.getElementById("confirmOutward");
+      var confirmBtn = view.getElementById("confirmOutward");
       if (confirmBtn) confirmBtn.disabled = !approved;
       if (!approved) chatState.outwardConfirmed = false;
     }
@@ -5743,7 +5749,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       paintDraftGate();
     }
 
-    function openDraftReview(text) {
+    function openDraftReview(text, owner) {
+      var view = owner || document;
       var incoming = typeof text === "string" ? text : "";
       if (!chatState.draftText) {
         chatState.draftText = incoming;
@@ -5752,17 +5759,17 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         chatState.outwardConfirmed = false;
       }
       chatState.draftReady = true;
-      var banner = document.getElementById("draftBanner");
+      var banner = view.getElementById("draftBanner");
       if (banner) banner.classList.remove("hidden");
-      var body = draftBodyEl();
+      var body = draftBodyEl(owner);
       if (body && !body.value) body.value = chatState.draftText;
-      renderMoneyCheck();
-      var csvBtn = document.getElementById("downloadCsvBtn");
+      renderMoneyCheck(owner);
+      var csvBtn = view.getElementById("downloadCsvBtn");
       if (csvBtn) csvBtn.classList.toggle("hidden", !mdTableToCsv(chatState.draftText || ""));
     }
 
-    function setDraftWarning(text) {
-      var el = document.getElementById("draftWarning");
+    function setDraftWarning(text, owner) {
+      var el = (owner || document).getElementById("draftWarning");
       if (!el) return;
       if (text) {
         el.textContent = text;
@@ -6618,7 +6625,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
-    function ensureChatSession(speechRequest) {
+    function ensureChatSession(speechRequest, owner) {
       if (speechRequest && !speechRequestCurrent(speechRequest)) return Promise.resolve(null);
       if (chatNavigation.pending) return Promise.resolve(null);
       if (chatState.sessionId) {
@@ -6632,17 +6639,22 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (current && chatContextCurrent(current.context)) return current.promise;
       var request = { context: chatContextSnapshot(), promise: null };
       chatNavigation.ensure = request;
+      // A typed request can outlive soft Back while its session JSON awaits.
+      // Its late result must not redirect or change the active session pointer.
+      function ownsSessionResult() {
+        return chatContextCurrent(request.context) && (!owner || owner.mounted());
+      }
       request.promise = fetch(SESSIONS_BASE, {
         method: "POST", credentials: "same-origin", signal: AbortSignal.timeout(8000),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ companyId: request.context.companyId || undefined, jobId: request.context.jobId || undefined }),
       }).then(function (r) {
-        if (!chatContextCurrent(request.context)) return null;
+        if (!ownsSessionResult()) return null;
         if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
         if (!r.ok) throw new Error("session_failed");
         return r.json();
       }).then(function (data) {
-        if (!chatContextCurrent(request.context) || (speechRequest && !speechRequestCurrent(speechRequest))) return null;
+        if (!ownsSessionResult() || (speechRequest && !speechRequestCurrent(speechRequest))) return null;
         var session = data && data.session;
         if (!validChatSession(session) ||
             (request.context.companyId && (session.companyId || null) !== request.context.companyId) ||
@@ -6661,7 +6673,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         }
         return session.id;
       }).catch(function (error) {
-        if (chatContextCurrent(request.context) && (!error || error.message !== "signed_out")) {
+        if (ownsSessionResult() && (!error || error.message !== "signed_out")) {
           showChatFailure("Couldn't open a conversation. Your message is still in the composer. Try again in a moment.");
         }
         return null;
@@ -6675,6 +6687,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     var pendingExecute = false;
     async function sendChatMessage(event, speechRequest) {
       if (speechRequest && !speechRequestCurrent(speechRequest)) return;
+      // The clicked/typed path belongs to the composer bound by this Talk visit,
+      // not whichever other cached page's identical IDs are currently visible.
+      const owner = speechRequest ? undefined : sendChatMessage.typedOwner;
+      // null means the page tried to bind, but was not a usable mounted Talk.
+      if (owner === null) return;
+      const canPaint = function () { return !owner || owner.mounted(); };
+      if (!canPaint()) return;
       if (chatNavigation.pending) {
         if (speechRequest) finishSpeechRequest(speechRequest, "Finish choosing a conversation, then speak again.");
         return;
@@ -6685,7 +6704,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         return;
       }
       var selectionGeneration = chatNavigation.generation;
-      const input = document.getElementById("chatInput");
+      const input = owner ? owner.input : document.getElementById("chatInput");
+      const send = owner ? owner.send : document.getElementById("chatSend");
+      const notice = owner ? owner.notice : document.getElementById("chatError");
       if (!speechRequest && (input.disabled || chatNavigation.sendClaim || chatNavigation.turn)) return;
       const originalDraft = input.value;
       const originalRevision = chatNavigation.composerRevision;
@@ -6701,7 +6722,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             role: "assistant",
             content: "Drop the invoice, letter, or photo on this chat, or paste it in the box above.",
           });
-          renderChatMessages();
+          renderChatMessages(owner);
           return;
         }
         submitPaper({ filename: "", fileKind: "paste", text: pastedPaper }, speechRequest);
@@ -6710,14 +6731,14 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var claim = !speechRequest ? {} : null;
       if (claim) chatNavigation.sendClaim = claim;
       var sessionId;
-      try { sessionId = await ensureChatSession(speechRequest); }
+      try { sessionId = await ensureChatSession(speechRequest, owner); }
       finally {
         if (claim && chatNavigation.sendClaim === claim) {
           chatNavigation.sendClaim = null;
-          paintChatInputAvailability();
+          paintChatInputAvailability(owner);
         }
       }
-      if (!sessionId || selectionGeneration !== chatNavigation.generation || chatNavigation.pending) {
+      if (!sessionId || !canPaint() || selectionGeneration !== chatNavigation.generation || chatNavigation.pending) {
         if (speechRequest && speechRequestCurrent(speechRequest)) finishSpeechRequest(speechRequest);
         return;
       }
@@ -6741,10 +6762,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // Add user message
       const sentMessage = { role: "user", content: text };
       chatState.messages.push(sentMessage);
-      renderChatMessages();
+      renderChatMessages(owner);
 
       // Show thinking indicator in the chat stream
-      const messagesContainer = document.getElementById("chatMessages");
+      const messagesContainer = owner ? owner.messages : document.getElementById("chatMessages");
       const thinkingEl = document.createElement("div");
       thinkingEl.className = "thinking-bubble";
       thinkingEl.id = "thinkingIndicator";
@@ -6752,7 +6773,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // call needs the whole assistant message before it can run), so there is no
       // Stage events: name the work, then fill a bar toward the declared ETA.
       // Both lanes call this — voice and typed share one indicator.
-      window.__bzStage = function (payload) {
+      const publishStage = window.__bzStage = function (payload) {
+        if (!canPaint()) return;
         var label = document.getElementById("bzStageLabel");
         var fill = document.querySelector("#bzStageBar > i");
         if (!label || !fill) return;
@@ -6760,13 +6782,19 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         var eta = (payload && payload.etaMs) || 0;
         if (!eta) { fill.style.width = "0%"; return; }
         var startedAt = Date.now();
-        if (window.__bzStageTimer) clearInterval(window.__bzStageTimer);
+        const oldTimer = owner ? turn.stageTimer : window.__bzStageTimer;
+        if (oldTimer) clearInterval(oldTimer);
         fill.style.width = "6%";
-        window.__bzStageTimer = setInterval(function () {
+        const stageTimer = setInterval(function () {
           var pct = Math.min(96, ((Date.now() - startedAt) / eta) * 92 + 6);
-          fill.style.width = pct.toFixed(1) + "%";
-          if (pct >= 96) { clearInterval(window.__bzStageTimer); window.__bzStageTimer = null; }
+          if (canPaint()) fill.style.width = pct.toFixed(1) + "%";
+          if (!canPaint() || pct >= 96) {
+            clearInterval(stageTimer);
+            if (window.__bzStageTimer === stageTimer) window.__bzStageTimer = null;
+          }
         }, 250);
+        if (owner) turn.stageTimer = stageTimer;
+        else window.__bzStageTimer = stageTimer;
       };
 
       // mid-turn stream to show — an honest clock is the next best thing, and it
@@ -6781,6 +6809,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       messagesContainer.appendChild(thinkingEl);
       messagesContainer.scrollTop = messagesContainer.scrollHeight;
       var elapsedTimer = setInterval(function () {
+        if (!canPaint()) return;
         var el = document.getElementById("thinkingElapsed");
         if (!el) return;
         var secs = Math.round((Date.now() - thinkingStart) / 1000);
@@ -6795,7 +6824,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
       // Disable input while waiting
       input.disabled = true;
-      document.getElementById("chatSend").disabled = true;
+      send.disabled = true;
 
       // This turn's own id. Declared OUTSIDE the try: `const` inside the try
       // block is not visible in the finally that reads it, and the whole turn
@@ -6863,15 +6892,16 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
         let data;
         if (useVoiceLane) {
-          data = await streamVoiceTurn(sendBody, metrics, sendStarted, myTurn);
+          data = await streamVoiceTurn(sendBody, metrics, sendStarted, myTurn, owner, owner ? publishStage : null);
         } else if (typeof ReadableStream !== "undefined") {
-          data = await streamTextTurn(sendBody, metrics, sendStarted);
+          data = await streamTextTurn(sendBody, metrics, sendStarted, owner);
           metrics.turnMs = Math.round(performance.now() - sendStarted);
         } else {
           let resp;
           try {
             resp = await postOnce();
           } catch (firstErr) {
+            if (owner && (!canPaint() || chatNavigation.turn !== turn || !chatContextCurrent(conversation))) throw firstErr;
             resp = await postOnce(); // bounded: exactly one retry, same attemptId
           }
           data = await resp.json();
@@ -6883,7 +6913,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         const replayed = data && data.ok === true && data.reconciled === true;
         noTurnRan = knownUnsent || replayed;
         if (!chatContextCurrent(conversation) ||
-            (noTurnRan && (chatNavigation.turn !== turn || myTurn !== voice.turnSeq))) return;
+            ((owner || noTurnRan) && (chatNavigation.turn !== turn || myTurn !== voice.turnSeq))) return;
         if (knownUnsent) {
           // The app received the request but started no turn. Only put the draft
           // back if this exact turn still owns an untouched typed composer.
@@ -6895,31 +6925,30 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           } else {
             sentMessage.notSent = true;
           }
-          setChatMascot("18-unimpressed");
-          const notice = document.getElementById("chatError");
+          if (canPaint()) setChatMascot("18-unimpressed");
           notice.textContent = (data.error || "Set up inference in Settings before sending again.") +
             (restore ? " Your draft is back in the composer." : "");
           notice.classList.remove("hidden");
-          renderChatMessages();
+          renderChatMessages(owner);
           return;
         }
         if (!data.ok) {
-          setChatMascot("18-unimpressed");
+          if (canPaint()) setChatMascot("18-unimpressed");
           // FIX #5: show error and disable input if signed out
           if (data.code === "signed_out") {
             input.disabled = true;
-            document.getElementById("chatSend").disabled = true;
+            send.disabled = true;
           }
           if (data.slots) {
             Object.assign(chatState.slots, data.slots);
-            renderSlotChecklist();
+            if (canPaint()) renderSlotChecklist();
           }
-          paintContext(data.context);
+          if (canPaint()) paintContext(data.context);
           var setupIssue = data.code === "no_inference_config" || data.code === "managed_expired";
           var policyReply = (setupIssue || data.code === "model_policy_error" || data.onlineLookupSkipped === true) &&
             typeof data.reply === "string" && data.reply.trim() !== "" ? data.reply
             : setupIssue && typeof data.error === "string" ? data.error : "";
-          var errorNode = document.getElementById("chatError");
+          var errorNode = notice;
           errorNode.textContent = policyReply ? "" : (data.error || "Something went wrong.");
           errorNode.classList.toggle("hidden", Boolean(policyReply));
           chatState.messages.push({
@@ -6927,12 +6956,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             content: policyReply || "Sorry about that — I couldn't process your message. Please try again.",
             onlineLookupSkipped: data.onlineLookupSkipped === true,
           });
-          renderChatMessages();
+          renderChatMessages(owner);
           return;
         }
 
         // Hide error if present
-        document.getElementById("chatError").classList.add("hidden");
+        notice.classList.add("hidden");
 
         // Add assistant reply. A turn that produced a file carries the file
         // descriptor with it so the chat renders the link inline.
@@ -6961,23 +6990,28 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         // Check for draft readiness. The reply is the draft the owner reviews.
         // Send on that step does not deliver it.
         if (data.draft) {
-          setChatMascot("12-content");
-          openDraftReview(data.reply || "");
-          setDraftWarning(data.warning);
+          if (canPaint()) setChatMascot("12-content");
+          // Cache the editable draft and its gates with the same Talk as the
+          // transcript. Forward must not lose the review, or open it in another Talk.
+          openDraftReview(data.reply || "", owner);
+          setDraftWarning(data.warning, owner);
           if (data.jobId) {
             chatState.jobId = data.jobId;
             conversation = chatContextSnapshot();
           }
           if (data.previousDraft) {
             chatState.previousDraft = data.previousDraft;
-            var rpBtn = document.getElementById("restorePrevious");
+            var rpBtn = (owner || document).getElementById("restorePrevious");
             if (rpBtn) rpBtn.classList.remove("hidden");
           }
-        } else {
+        } else if (canPaint()) {
           setChatMascot("17-attentive");
         }
 
-        renderChatMessages();
+        renderChatMessages(owner);
+        // Detached/cached turns can finish in their own transcript, not the
+        // visible page's brief, draft review, timings, or playback.
+        if (!canPaint()) return;
         renderSlotChecklist();
         // The turn's own numbers are authoritative — don't re-fetch over them.
         paintContext(data.context);
@@ -7012,33 +7046,35 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (!metrics.spoken && voice.cutTurn !== myTurn && (voice.mic || voice.replies)) maybeSpeak(data);
 
       } catch (err) {
-        if (!chatContextCurrent(conversation)) return;
-        setChatMascot("18-unimpressed");
-        document.getElementById("chatError").textContent =
+        if (!chatContextCurrent(conversation) ||
+            (owner && (chatNavigation.turn !== turn || myTurn !== voice.turnSeq))) return;
+        if (canPaint()) setChatMascot("18-unimpressed");
+        notice.textContent =
           err && err.name === "TimeoutError"
             ? "BeeZilla took too long on that one. Try again — or pick a faster agent."
             : "Couldn't reach the server. Check your connection and try again.";
-        document.getElementById("chatError").classList.remove("hidden");
+        notice.classList.remove("hidden");
       } finally {
         // A turn that was interrupted keeps draining its SSE stream, so it can
         // land here AFTER the next turn has already started. Only the newest
         // turn owns the shared state; a stale finally that cleared it re-armed
         // the mic over its own follow-up and re-enabled the composer mid-turn.
         clearInterval(elapsedTimer);
+        if (turn.stageTimer) clearInterval(turn.stageTimer);
         // A rejected request/JSON body never re-renders the transcript. The
         // captured node belongs to this turn even after a newer turn starts.
         if (thinkingEl.parentNode) thinkingEl.parentNode.removeChild(thinkingEl);
         const ownsTurn = chatNavigation.turn === turn;
         if (ownsTurn) chatNavigation.turn = null;
-        if ((!noTurnRan || ownsTurn) && myTurn === voice.turnSeq && chatContextCurrent(conversation)) {
+        if (((!owner && !noTurnRan) || ownsTurn) && myTurn === voice.turnSeq && chatContextCurrent(conversation)) {
           voice.sending = false;
           // An already explicitly active Listen session may resume. A stored
           // reply or refused chat never enables the mic or plays new audio.
-          if (voice.mic && !voice.speaking) setTimeout(function () {
-            if (voice.mic && !voice.speaking && !voice.sending && !voice.rec) startListening();
+          if (canPaint() && voice.mic && !voice.speaking) setTimeout(function () {
+            if (canPaint() && voice.mic && !voice.speaking && !voice.sending && !voice.rec) startListening();
           }, 600);
-          paintChatInputAvailability();
-          if (!input.disabled) input.focus();
+          paintChatInputAvailability(owner);
+          if (canPaint() && !input.disabled) input.focus();
         }
       }
     }
@@ -7046,8 +7082,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     function paintChatInputAvailability() {
       var busy = !!chatNavigation.turn || !!chatNavigation.sendClaim;
       var disabled = !!chatState._signedOut || !!busy;
-      document.getElementById("chatInput").disabled = disabled;
-      document.getElementById("chatSend").disabled = disabled || !!chatNavigation.pending;
+      const owner = arguments[0];
+      (owner ? owner.input : document.getElementById("chatInput")).disabled = disabled;
+      (owner ? owner.send : document.getElementById("chatSend")).disabled = disabled || !!chatNavigation.pending;
     }
 
     function checkAuthAndEnableInput() {
@@ -7086,22 +7123,43 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         });
     }
 
+    function bindTypedChatComposer() {
+      sendChatMessage.typedOwner = null;
+      const wrapper = document.getElementById("bzPage");
+      // First hard load has no wrapper or cache. A cache gap is not a cold load.
+      if (!wrapper && document.getElementById("bzPageCache")) return;
+      const find = id => wrapper ? wrapper.querySelector("#" + id) : document.getElementById(id);
+      const input = find("chatInput"), send = find("chatSend");
+      const messages = find("chatMessages"), notice = find("chatError");
+      const doIt = find("chatDoIt"), screen = find("chatScreen");
+      if (!input || !send || !messages || !notice) return;
+      const owner = sendChatMessage.typedOwner = {
+        input, send, messages, notice,
+        getElementById(id) { return screen && screen.querySelector("#" + id); },
+        mounted() {
+          const current = document.getElementById("bzPage");
+          return current ? current.contains(input) :
+            !document.getElementById("bzPageCache") && document.getElementById("chatInput") === input;
+        },
+      };
+      send.onclick = sendChatMessage;
+      if (doIt) {
+        doIt.onclick = function () {
+          if (!owner.mounted() || doIt.disabled || send.disabled) return;
+          if (!input.value.trim()) { input.focus(); return; }
+          pendingExecute = true;
+          return sendChatMessage();
+        };
+        // The cached controls may settle while another Talk is visible. Mirror
+        // this exact Send, never re-resolve the current pane's matching IDs.
+        doIt.disabled = send.disabled;
+        var sendObserver = new MutationObserver(function () { doIt.disabled = send.disabled; });
+        sendObserver.observe(send, { attributes: true, attributeFilter: ["disabled"] });
+      }
+    }
+
     // Wire up chat events
-    document.getElementById("chatSend").onclick = sendChatMessage;
-    var doItBtn = document.getElementById("chatDoIt");
-    doItBtn.onclick = function () {
-      var el = document.getElementById("chatInput");
-      if (!el.value.trim()) { el.focus(); return; }
-      pendingExecute = true;
-      sendChatMessage();
-    };
-    // The button lives and dies with Send: same disabled state, no dead control.
-    var sendObserver = new MutationObserver(function () {
-      var send = document.getElementById("chatSend");
-      var it = document.getElementById("chatDoIt");
-      if (send && it) it.disabled = send.disabled;
-    });
-    sendObserver.observe(document.getElementById("chatSend"), { attributes: true, attributeFilter: ["disabled"] });
+    bindTypedChatComposer();
 
     // ── Chat / Work mode wiring ─────────────────────────────────────
     (function initModes() {

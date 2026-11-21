@@ -384,6 +384,9 @@ test("Talk renders model-policy no-send copy and local lookup failure instead of
     const state = { messages: [] };
     const render = vm.runInNewContext("(function (data) {" + html.slice(start, stop) + "})", {
       document: { getElementById: () => display }, chatState: state, setChatMascot() {}, paintContext() {}, renderChatMessages() {},
+      // This fixture evaluates only the failure branch, not the full sender.
+      // Provide its same-mounted-owner bindings; the full shell race runs separately.
+      owner: undefined, canPaint: () => true, notice: display, send: display,
     });
     render(result);
     assert.equal(state.messages[0].content, result.reply);
