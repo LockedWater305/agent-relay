@@ -34,19 +34,24 @@
   #bzPage { display:flex; flex-direction:column; flex:1 1 auto; min-height:0; }
   #board { position:absolute; inset:0; width:100%; height:100%; z-index:1; touch-action:none; }
   /* Marks sit above reference images, but only capture pointers in drawing tools. */
-  #stage[data-tool="select"] #board { pointer-events:none; }
+  #stage[data-sketch-tool="select"] #board { pointer-events:none; }
   #layers { position:absolute; inset:0; pointer-events:none; }
   .img-wrap { position:absolute; pointer-events:auto; cursor:move; border:1px solid transparent; }
   .img-wrap.selected { border-color: var(--bz-yellow); }
   .img-wrap img { width:100%; height:100%; object-fit:fill; display:block; user-select:none; -webkit-user-drag:none; }
   .img-wrap .handle { position:absolute; right:-6px; bottom:-6px; width:12px; height:12px; background:var(--bz-yellow);
                       border-radius:2px; cursor:nwse-resize; pointer-events:auto; }
-  footer { border-top:1px solid var(--bz-line); padding:0.6rem 1rem; display:flex; gap:0.6rem; align-items:center; }
+  footer { border-top:1px solid var(--bz-line); padding:0.6rem 1rem; display:flex; flex-wrap:wrap; gap:0.6rem; align-items:center; }
+  #prompt { flex:1 1 13rem; min-width:0; }
+  @media (max-width:40rem) {
+    #prompt, #status { flex:1 1 100%; }
+  }
   #status { color:var(--bz-muted); font-size:0.8rem; }
   /* The closing brace used to sit at the end of the first declaration, so every rule
      after it (`position:absolute; … display:none`) was dropped: the panel rendered on
      every visit, over the canvas, with no render behind it. */
-  #result { position:absolute; z-index:2; right:12px; top:12px; width:210px; background:var(--bz-card); border:1px solid var(--bz-line);
+  #result { position:absolute; z-index:2; right:12px; top:12px; width:210px; max-width:calc(100% - 24px); max-height:calc(100% - 24px);
+            overflow:auto; overscroll-behavior:contain; background:var(--bz-card); border:1px solid var(--bz-line);
             border-radius:12px; padding:0.6rem; display:none; }
   #result img { width:100%; border-radius:8px; display:block; }
   #result a { color:var(--bz-yellow); font-size:0.8rem; text-decoration:none; display:inline-block; margin-top:0.4rem; }
@@ -57,7 +62,7 @@
   #regionOverlay.on { display: block; }
   #regionRect { position: absolute; pointer-events:none; border: 2px dashed #ffd40d; background: rgba(255,212,13,0.16); display: none; }
   #regionPanel { display: flex; gap: 0.45rem; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; }
-  #regionPanel input { flex: 1; min-width: 220px; }
+  #regionPanel input { flex:1 1 100%; min-width:0; max-width:100%; }
 </style>
 </head>
 <body>
@@ -76,48 +81,48 @@
   </nav>
   <div class="row">
     <span class="title" id="pTitle">Untitled board</span>
-    <button data-tool="select" class="on">Select</button>
-    <button data-tool="pen">Brush</button>
-    <button data-tool="line">Line</button>
-    <button data-tool="arrow">Arrow</button>
-    <button data-tool="rect">Box</button>
-    <button data-tool="text">Note</button>
+    <button data-tool="select" class="on" aria-pressed="true">Select</button>
+    <button data-tool="pen" aria-pressed="false">Brush</button>
+    <button data-tool="line" aria-pressed="false">Line</button>
+    <button data-tool="arrow" aria-pressed="false">Arrow</button>
+    <button data-tool="rect" aria-pressed="false">Box</button>
+    <button data-tool="text" aria-pressed="false">Note</button>
     <input id="color" type="color" value="#ffd40d" title="Colour" style="width:34px;height:30px;background:none;border:1px solid var(--bz-line);border-radius:8px" />
     <button id="undo" title="Undo (Ctrl/Cmd+Z)">Undo</button>
     <button id="redo" title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
     <button id="clear">Clear drawing</button>
     <button id="save">Save</button>
-    <span id="savedFlag" style="font-size:.76rem;align-self:center"></span>
+    <span id="savedFlag" role="status" style="font-size:.76rem;align-self:center"></span>
     <button id="shot" title="Download a PNG of the board">Export PNG</button>
     <button id="svg" title="Download the drawing as vector SVG (images are not included)">Export SVG</button>
   </div>
 </header>
 
-<div id="stage" data-tool="select">
+<div id="stage" data-sketch-tool="select">
   <canvas id="board"></canvas>
   <div id="layers"></div>
   <div id="result">
-    <img id="resultImg" alt="" />
+    <img id="resultImg" alt="Latest rendered image" />
     <!-- Region edit: drag a box on the picture, say what should change inside it.
          The mask is drawn here, at the picture's own size, so the server never has
          to guess which pixels the owner meant. -->
     <div id="regionOverlay" title="Drag to mark the area to change"><div id="regionRect"></div></div>
     <div id="regionPanel">
-      <input id="regionPrompt" type="text" placeholder="What should change inside the box? e.g. 'make the coat red'" />
+      <input id="regionPrompt" type="text" aria-label="Describe what to change inside the box" placeholder="What should change inside the box? e.g. 'make the coat red'" />
       <button class="primary" id="regionApply">Change this area</button>
-      <span class="hint" id="regionStatus">Drag a box on the picture, then describe the change.</span>
+      <span class="hint" id="regionStatus" role="status">Drag a box on the picture, then describe the change.</span>
     </div>
-    <a id="resultLink" href="#" download>Download</a>
+    <a id="resultLink" href="#" download aria-label="Download latest rendered image">Download</a>
   </div>
 </div>
 
 <footer>
-  <input id="prompt" type="text" style="flex:1" placeholder="Describe what to create — e.g. 'a red car driving along the road I drew, evening light'" />
+  <input id="prompt" type="text" aria-label="Describe what to create" placeholder="Describe what to create — e.g. 'a red car driving along the road I drew, evening light'" />
   <label class="hint" style="display:flex;align-items:center;gap:0.35rem" title="Send the last rendered picture as the reference instead of the board">
     <input type="checkbox" id="iterate" /> Iterate from last render
   </label>
   <button class="primary" id="create">Create</button>
-  <span id="status">Drop or paste images, draw between them, then Create.</span>
+  <span id="status" role="status">Drop or paste images, draw between them, then Create.</span>
 </footer>
 
 <script>
@@ -152,7 +157,7 @@
     var hydrated = !jobId, loading = false, leaving = false, pageHidden = false;
     var createBusy = false, regionBusy = false, desktopLease = null;
     var revision = 0, savedRevision = 0, saveTimer = null, pendingSave = null;
-    var toolButtons = Array.prototype.slice.call(document.querySelectorAll("[data-tool]"));
+    var toolButtons = Array.prototype.slice.call(document.querySelectorAll("button[data-tool]"));
     function ownsPage() { return stage.isConnected && document.getElementById("stage") === stage; }
     function currentPage() {
       var selectedJob = new URLSearchParams(location.search).get("job");
@@ -662,8 +667,12 @@
       btn.addEventListener("click", function () {
         if (!editable()) return;
         tool = btn.getAttribute("data-tool");
-        stage.setAttribute("data-tool", tool);
-        toolButtons.forEach(function (b) { b.classList.toggle("on", b === btn); });
+        stage.setAttribute("data-sketch-tool", tool);
+        toolButtons.forEach(function (b) {
+          var active = b === btn;
+          b.classList.toggle("on", active);
+          b.setAttribute("aria-pressed", active ? "true" : "false");
+        });
       });
     });
     $("color").addEventListener("input", function (e) { color = e.target.value; });
@@ -918,8 +927,8 @@
         }
         var r = img.getBoundingClientRect();
         var b = box.getBoundingClientRect();
-        overlay.style.left = (r.left - b.left - box.clientLeft) + "px";
-        overlay.style.top = (r.top - b.top - box.clientTop) + "px";
+        overlay.style.left = (r.left - b.left - box.clientLeft + box.scrollLeft) + "px";
+        overlay.style.top = (r.top - b.top - box.clientTop + box.scrollTop) + "px";
         overlay.style.width = r.width + "px";
         overlay.style.height = r.height + "px";
         overlay.classList.add("on");

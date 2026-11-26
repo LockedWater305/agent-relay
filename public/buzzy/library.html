@@ -356,6 +356,7 @@
       padding: 1rem 1.2rem;
       margin-top: 0.8rem;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 0.8rem;
       color: #D8D8D8;
@@ -1402,12 +1403,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (!doc) { docsOpenDoc = null; return goDocs(); }
         app.innerHTML =
           "<div class='docs-back'><button id='docsBackList' class='secondary'>← " + escHtml(job ? jobTitle(job) : docsOpenFolder) + "</button></div>" +
-          "<h1>" + escHtml(doc.name) + "</h1>" +
+          "<h1 id='docHeading' tabindex='-1'>" + escHtml(doc.name) + "</h1>" +
           "<p class='muted'>Updated " + new Date(doc.updatedAt || doc.createdAt).toLocaleString() + "</p>" +
           "<div class='row'><button id='docDl'>Download .md</button><button id='docDlWord' class='secondary'>Download Word</button><button id='docDlPdf' class='secondary'>Download PDF</button><button id='docCopy' class='secondary'>Copy text</button></div>" +
+          "<p id='docCopyStatus' class='muted' role='status'></p>" +
           "<div class='docviewer'>" + escHtml(doc.md) + "</div>" + syncMarkup;
         paintLibrarySync();
-        document.getElementById("docsBackList").onclick = () => { docsOpenDoc = null; goDocs(); };
+        document.getElementById("docsBackList").onclick = () => {
+          const opened = docsOpenDoc;
+          docsOpenDoc = null;
+          goDocs();
+          Array.from(app.querySelectorAll("[data-open]")).find((el) => el.getAttribute("data-open") === opened)?.focus();
+        };
         document.getElementById("docDl").onclick = () => downloadText(doc.name, doc.md, "text/markdown");
         document.getElementById("docDlPdf").onclick = () => {
           try {
@@ -1423,10 +1430,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           }
         };
         document.getElementById("docDlWord").onclick = () => downloadWord(doc.name, doc.md);
-        document.getElementById("docCopy").onclick = (e) => {
-          navigator.clipboard && navigator.clipboard.writeText(doc.md);
-          e.target.textContent = "Copied";
-          setTimeout(() => { e.target.textContent = "Copy text"; }, 1200);
+        const copyStatus = document.getElementById("docCopyStatus");
+        document.getElementById("docCopy").onclick = async () => {
+          copyStatus.textContent = "";
+          try {
+            if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+              throw new Error("Clipboard unavailable");
+            }
+            await navigator.clipboard.writeText(doc.md);
+            copyStatus.textContent = "Copied to clipboard.";
+          } catch (_) {
+            copyStatus.textContent = "Could not copy. Select the preview text or download the Markdown file.";
+          }
         };
         return;
       }
@@ -1445,14 +1460,21 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
                 "<div class='docitem'>" +
                   "<span class='di-name' data-doc='" + escAttr(docRef(d)) + "'>" + escHtml(d.name) + "</span>" +
                   "<span class='di-meta'>updated " + new Date(d.updatedAt || d.createdAt).toLocaleDateString() + " · " + Math.max(1, Math.round(d.md.length / 100) / 10) + " KB</span>" +
-                  "<span class='di-actions'><button class='secondary' data-open='" + escAttr(docRef(d)) + "'>Open</button><button class='secondary' data-dl='" + escAttr(docRef(d)) + "'>Download</button></span>" +
+                  "<span class='di-actions'><button class='secondary' data-open='" + escAttr(docRef(d)) +
+                    "' aria-label='" + escAttr("Open " + d.name) + "'>Open</button><button class='secondary' data-dl='" + escAttr(docRef(d)) +
+                    "' aria-label='" + escAttr("Download " + d.name) + "'>Download</button></span>" +
                 "</div>").join("")
             : "<p class='muted'>No documents in this folder yet.</p>") +
           "</div>" + syncMarkup;
         paintLibrarySync();
         document.getElementById("docsBackFolders").onclick = () => { docsOpenFolder = null; docsOpenFromLink = null; goDocs(); };
-        app.querySelectorAll("[data-open]").forEach((el) => { el.onclick = () => { docsOpenDoc = el.getAttribute("data-open"); goDocs(); }; });
-        app.querySelectorAll(".di-name").forEach((el) => { el.onclick = () => { docsOpenDoc = el.getAttribute("data-doc"); goDocs(); }; });
+        const openPreview = (ref) => {
+          docsOpenDoc = ref;
+          goDocs();
+          document.getElementById("docHeading")?.focus();
+        };
+        app.querySelectorAll("[data-open]").forEach((el) => { el.onclick = () => openPreview(el.getAttribute("data-open")); });
+        app.querySelectorAll(".di-name").forEach((el) => { el.onclick = () => openPreview(el.getAttribute("data-doc")); });
         app.querySelectorAll("[data-dl]").forEach((el) => {
           el.onclick = () => {
             const doc = (all[docsOpenFolder] || []).find((d) => docRef(d) === el.getAttribute("data-dl"));

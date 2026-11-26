@@ -10,6 +10,10 @@ from urllib.parse import urlsplit
 from xml.etree import ElementTree
 from playwright.sync_api import sync_playwright
 HTML = Path(sys.argv.pop(1)).read_bytes()
+LIBRARY = None
+if len(sys.argv) > 2 and sys.argv[1] == "--library":
+    LIBRARY = Path(sys.argv.pop(2)).read_bytes()
+    sys.argv.pop(1)
 LINE = dict(id="road", tool="line", color="#ffff00", width=3, x1=30, y1=50, x2=200, y2=50)
 
 def solid_png(rgb):
@@ -35,6 +39,9 @@ class Sketch(unittest.TestCase):
             def do_GET(self):
                 path = urlsplit(self.path).path
                 if path == "/buzzy/sketch": self.reply(HTML, "text/html; charset=utf-8")
+                elif path == "/buzzy/library" and LIBRARY is not None: self.reply(LIBRARY, "text/html; charset=utf-8")
+                elif path == "/api/auth/get-session": self.reply(dict(user=dict(id="fixture")))
+                elif path == "/api/buzzy/jobs": self.reply(dict(jobs=[]))
                 elif path == "/api/buzzy/art": self.reply(dict(ok=True, board=cls.board, images=cls.outputs))
                 elif path == "/api/buzzy/projects/test": self.reply(dict(project=dict(title="Fixture")))
                 elif path == "/assets/front.png": self.reply(GREEN, "image/png")
@@ -246,4 +253,81 @@ class Sketch(unittest.TestCase):
         p.click("#regionApply"); p.wait_for_timeout(200)
         self.assertEqual(self.edits,[], "Old crop must not be applied to the newly generated picture")
         self.assertIn("Drag a box",p.inner_text("#regionStatus"))
+    def test_selected_tool_is_exposed_and_tracks_keyboard_activation(self):
+        p=self.start([])
+        self.assertEqual(p.get_by_role("button",name="Select",pressed=True).count(),1)
+        brush=p.get_by_role("button",name="Brush"); brush.focus(); p.keyboard.press("Space")
+        self.assertEqual(p.get_by_role("button",name="Brush",pressed=True).count(),1)
+        self.assertEqual(p.get_by_role("button",name="Select",pressed=False).count(),1)
+    def test_clicking_canvas_does_not_remove_selected_tools_visual_highlight(self):
+        p=self.start([]); brush=p.get_by_role("button",name="Brush")
+        brush.click(); self.hit(p,150,210)
+        self.assertIn("on",(brush.get_attribute("class") or "").split())
+        self.assertNotIn("on",(p.locator("#stage").get_attribute("class") or "").split())
+    def test_board_save_and_result_messages_use_live_status(self):
+        p=self.start([]); live=p.get_by_role("status")
+        self.assertEqual(live.filter(has_text="Board loaded").count(),1)
+        p.get_by_role("button",name="Brush").click(); self.hit(p,150,210); self.save(p)
+        self.assertEqual(live.filter(has_text="Saved to project").count(),1)
+        self.assertEqual(live.filter(has_text="Board saved.").count(),1)
+    def test_small_screen_create_toolbar_does_not_clip_actions_or_status(self):
+        p=self.start([]); p.set_viewport_size(dict(width=320,height=640))
+        p.fill("#prompt","Draw an owl."); p.click("#create", timeout=1000)
+        for target in ["#prompt","#create","#iterate","#status"]:
+            r=p.locator(target).bounding_box()
+            self.assertGreater(r["width"],0,target)
+            self.assertLessEqual(r["x"]+r["width"],320,target)
+    def test_small_screen_can_reach_preview_download_and_crop_controls(self):
+        p=self.start([],outputs=[dict(url="/assets/101")]); p.set_viewport_size(dict(width=320,height=640))
+        p.locator("#regionOverlay").wait_for(state="visible")
+        pane=p.locator("#result")
+        self.assertEqual(pane.evaluate("el=>getComputedStyle(el).overflowY"),"auto")
+        self.assertLessEqual(pane.evaluate("el=>el.getBoundingClientRect().bottom"),p.locator("#stage").evaluate("el=>el.getBoundingClientRect().bottom"))
+        p.locator("#regionPrompt").scroll_into_view_if_needed()
+        field=p.locator("#regionPrompt").bounding_box(); panel=pane.bounding_box()
+        self.assertLessEqual(field["x"]+field["width"],panel["x"]+panel["width"])
+        with p.expect_download(timeout=1500) as dl: p.locator("#resultLink").click(timeout=1200)
+        self.assertEqual(dl.value.path().read_bytes(),BLUE)
+    def start_library(self,mode="ok", content="Fixture text."):
+        if LIBRARY is None: self.skipTest("Supply --library path to exercise document previews")
+        p=self.browser.new_page(viewport=dict(width=735,height=670))
+        self.addCleanup(p.context.close)
+        docs=dict(fixture=[dict(name="First doc.md",md=content,createdAt=1),dict(name="Other doc.md",md="Other content.",createdAt=1)])
+        p.add_init_script("localStorage.setItem('bz_docs_v1',"+json.dumps(json.dumps(docs))+");")
+        p.add_init_script("""const mode=%s; Object.defineProperty(navigator,'clipboard',{value:mode==='unavailable'?undefined:{writeText:async function(value){if(mode==='denied') throw new Error('Test clipboard unavailable'); window.testClipboard=value;}}});"""%json.dumps(mode))
+        p.goto("http://127.0.0.1:%d/buzzy/library?job=fixture"%self.server.server_port)
+        p.locator("[data-open='First doc.md']").wait_for()
+        return p
+    def open_document(self,p,name="First doc.md"):
+        target=p.locator("[data-open='%s']"%name); target.focus(); p.keyboard.press("Enter")
+        p.locator(".docviewer").wait_for()
+    def test_library_keyboard_open_and_return_keep_focus_in_document_flow(self):
+        p=self.start_library()
+        self.open_document(p,"Other doc.md")
+        self.assertEqual(p.evaluate("document.activeElement.tagName"),"H1")
+        self.assertEqual(p.evaluate("document.activeElement.textContent"),"Other doc.md")
+        p.locator("#docsBackList").focus(); p.keyboard.press("Enter")
+        self.assertEqual(p.evaluate("document.activeElement.getAttribute('data-open')"),"Other doc.md")
+    def test_library_folder_actions_name_their_documents(self):
+        p=self.start_library()
+        self.assertEqual(p.get_by_role("button",name="Open First doc.md",exact=True).count(),1)
+        self.assertEqual(p.get_by_role("button",name="Open Other doc.md",exact=True).count(),1)
+        self.assertEqual(p.get_by_role("button",name="Download First doc.md",exact=True).count(),1)
+        self.assertEqual(p.get_by_role("button",name="Download Other doc.md",exact=True).count(),1)
+    def test_library_copy_reports_outcome_and_never_claims_unavailable_copy_worked(self):
+        for mode in ["denied","unavailable","ok"]:
+            p=self.start_library(mode,content="Actual fixture bytes • ε"); self.open_document(p)
+            p.click("#docCopy")
+            if mode == "ok":
+                self.assertEqual(p.evaluate("window.testClipboard"),"Actual fixture bytes • ε")
+                self.assertEqual(p.get_by_role("status").filter(has_text="Copied to clipboard").count(),1)
+            else:
+                self.assertNotEqual(p.inner_text("#docCopy"),"Copied",mode)
+                self.assertEqual(p.get_by_role("status").filter(has_text="Could not copy").count(),1)
+    def test_library_long_unbroken_readable_text_wraps_in_preview(self):
+        raw_url="https://example.test/"+"segment"*80
+        p=self.start_library(content=raw_url); self.open_document(p)
+        width=p.locator(".docviewer").evaluate("(el)=>[el.scrollWidth,el.clientWidth]")
+        self.assertEqual(p.locator(".docviewer").text_content(),raw_url)
+        self.assertLessEqual(width[0],width[1])
 if __name__=="__main__": unittest.main(verbosity=2)
