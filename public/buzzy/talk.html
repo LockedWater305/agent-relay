@@ -6424,7 +6424,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         '<h3 class="rw-head">Search</h3>' +
         workSearchBoxHtml() +
         '</div>' +
-        '<p class="muted rw-lead" id="rwSearchStatus">Searching…</p>' +
+        '<p class="muted rw-lead" id="rwSearchStatus" role="status" aria-atomic="true">Searching…</p>' +
         '<div id="rwSearchResults"></div>' +
         '</div>');
       var statusNode = container.querySelector("#rwSearchStatus");
