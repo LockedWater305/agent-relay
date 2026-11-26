@@ -52,6 +52,16 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
 };
 
+// Keep a malformed runtime path from aborting the independent checks that follow.
+function readRuntimeText(file) {
+  try {
+    if (!statSync(file).isFile()) return { text: null, error: "not a regular file" };
+    return { text: readFileSync(file, "utf8"), error: null };
+  } catch (error) {
+    return { text: null, error: error.code ?? error.message };
+  }
+}
+
 if (!existsSync(OUT)) {
   console.error("no dist-desktop/ — run: node desktop/dist.mjs all");
   process.exit(2);
@@ -116,11 +126,11 @@ if (!existsSync(APP)) {
   check("the runtime tree exists (resources/app)", false, "missing");
 } else {
   const server = join(APP, ".output", "server", "index.mjs");
-  check("the server bundle exists", existsSync(server));
+  const { text: code, error: serverError } = readRuntimeText(server);
+  check("the server bundle exists", code !== null, serverError ?? "");
 
-  if (existsSync(server)) {
-    const code = readFileSync(server, "utf8");
-    check("the server bundle is this build (not a stale .output)", code.length > 500_000, `${Math.round(code.length / 1024)} KB`);
+  if (code !== null) {
+    check("the server bundle meets the expected minimum size", code.length > 500_000, `${Math.round(code.length / 1024)} KB`);
     // Feature markers: each one is a route the packaged app must actually contain.
     check("the recipe catalog client is present", code.includes("BZ_CATALOG_URL"));
     check("managed search routing is present", code.includes("BZ_SEARCH_GATEWAY_URL"));
@@ -128,8 +138,12 @@ if (!existsSync(APP)) {
   }
 
   const migrations = join(APP, "migrations");
-  const sql = existsSync(migrations) ? readdirSync(migrations).filter((f) => f.endsWith(".sql")).length : 0;
-  check("migrations are staged", sql > 0, `${sql} .sql file(s)`);
+  try {
+    const sql = readdirSync(migrations).filter((f) => f.endsWith(".sql")).length;
+    check("migrations are staged", sql > 0, `${sql} .sql file(s)`);
+  } catch (error) {
+    check("migrations are staged", false, error.code ?? error.message);
+  }
 
   // PGLite's data/wasm files are restored into .output/server/_libs by the launcher
   // at boot, from the package that ships them. Either location is correct; what
@@ -148,9 +162,9 @@ if (!existsSync(APP)) {
   }
 
   const settingsPage = join(APP, "public", "buzzy", "settings.html");
-  const page = existsSync(settingsPage) ? readFileSync(settingsPage, "utf8") : "";
-  check("the settings page is staged", page.length > 5000, `${page.length} bytes`);
-  check("the settings page can connect an account", page.includes("connect-account"));
+  const { text: page, error: pageError } = readRuntimeText(settingsPage);
+  check("the settings page is staged", (page?.length ?? 0) > 5000, pageError ?? `${page.length} bytes`);
+  check("the settings page can connect an account", page?.includes("connect-account") === true);
 
   const pinsFile = join(APP, "publishers.json");
   let pins = -1;
