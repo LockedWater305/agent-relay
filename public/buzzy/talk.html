@@ -6488,8 +6488,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var sessP = fetch(SESSIONS_BASE + (co ? "?companyId=" + encodeURIComponent(co) : ""), { credentials: "same-origin" })
         .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
       Promise.all([jobsP, sessP]).then(function (res) {
-        var jobs = (res[0] && res[0].jobs) || [];
-        var sessions = (res[1] && res[1].sessions) || [];
+        var gotJobs = !!res[0] && Array.isArray(res[0].jobs);
+        var gotSessions = !!res[1] && Array.isArray(res[1].sessions);
+        var jobs = gotJobs ? res[0].jobs : [];
+        var sessions = gotSessions ? res[1].sessions : [];
+        // A linked conversation is still one row. Keep its opening behavior
+        // but don't lose the work item's review badge or more recent activity.
+        var jobsById = new Map(jobs.map(function (j) { return [j.id, j]; }));
         var items = [];
         var seen = {};
         sessions.forEach(function (s) {
@@ -6497,11 +6502,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           if (seen[key]) return;
           seen[key] = true;
           var sessAt = Date.parse(s.updatedAt || s.createdAt || "") || 0;
+          var linked = s.jobId ? jobsById.get(s.jobId) : null;
+          var linkedAt = linked ? Date.parse(linked.updatedAt || linked.createdAt || "") || 0 : 0;
+          var activeAt = Math.max(sessAt, linkedAt);
+          var needsInput = !!(linked && linked.data && linked.data.draft && !linked.data.approved);
           var sessLine = (s.summary || s.preview || "").trim();
           items.push({
-            kind: "session", session: s, at: sessAt, startedAt: s.createdAt,
-            title: s.title || "Untitled chat",
-            sub: rowSub(sessLine, s.createdAt, sessAt),
+            kind: "session", session: s, at: activeAt, startedAt: s.createdAt, needsInput: needsInput,
+            title: s.title || (linked && linked.title) || "Untitled chat",
+            sub: (needsInput ? "Needs your input · " : "") + rowSub(sessLine, s.createdAt, activeAt),
           });
         });
         jobs.forEach(function (j) {
@@ -6547,7 +6556,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           '<h3 class="rw-head">Recent work</h3>' +
           workSearchBoxHtml() +
           '</div>';
-        if (!shown.length) {
+        var missing = !gotJobs && !gotSessions ? "jobs or conversations" : !gotJobs ? "jobs" : "conversations";
+        if (!gotJobs || !gotSessions) {
+          html += '<p class="muted rw-lead" role="status">Could not load recent ' + missing +
+            (shown.length ? '. Showing the work that did load.' : '. There may still be work here.') + '</p>';
+        }
+        if (!shown.length && gotJobs && gotSessions) {
           html += '<p class="muted rw-lead">Nothing yet. Start above, or try one of these:</p>' +
             '<div class="rw-examples">' +
             RW_EXAMPLES.map(function (ex) { return '<button type="button" class="rw-ex" data-ex="' + esc(ex) + '">' + esc(ex) + "</button>"; }).join("") +
