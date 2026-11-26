@@ -470,11 +470,7 @@ function registerSettingsIpc() {
     // "Connect BeeZilla account" from the Settings screen: same flow as the menu item.
     ipcMain.handle("beezilla:settings:connect", wrap(() => connectManagedAccount()));
     // Diagnostics from the UI: one click to the folder that holds main.log.
-    ipcMain.handle("beezilla:app:openLogs", wrap(async () => {
-      const { dir } = logPaths();
-      if (dir) await shell.openPath(dir);
-      return { dir, file: logPaths().file };
-    }));
+    ipcMain.handle("beezilla:app:openLogs", wrap(openLogsFolder));
     ipcMain.handle("beezilla:app:logPath", wrap(async () => logPaths()));
     // The page knows things the shell cannot see: which device it got, what the
     // recorder produced, what the transcriber answered. Those lines belong in
@@ -503,6 +499,17 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
+async function openLogsFolder() {
+  const { dir, file } = logPaths();
+  if (!dir) throw new Error("BeeZilla’s logs folder is unavailable.");
+  console.log(`[desktop] opening logs folder ${dir}`);
+  // Electron resolves to an error message, not a rejected promise, when the
+  // operating system cannot open a path. Empty string means it succeeded.
+  const error = await shell.openPath(dir);
+  if (error) throw new Error(error);
+  return { dir, file };
+}
+
 function installMenu() {
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
@@ -524,12 +531,9 @@ function installMenu() {
           { type: "separator" },
           {
             label: "Open Logs Folder",
-            click: () => {
-              const { dir, file } = logPaths();
-              console.log(`[desktop] opening logs folder ${dir}`);
-              if (dir) void shell.openPath(dir);
-              else dialog.showErrorBox("BeeZilla", `Logging is unavailable.\n${file ?? ""}`);
-            },
+            click: () => void openLogsFolder().catch((error) => {
+              dialog.showErrorBox("BeeZilla could not open the logs folder", error.message);
+            }),
           },
           { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => {
             if (acquireLibraryTransition.held()) return;

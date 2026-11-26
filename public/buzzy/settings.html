@@ -538,9 +538,14 @@
           })
           .catch(() => {});
         $("open-logs").addEventListener("click", async () => {
-          const res = await appBridge.openLogs();
-          if (!res?.ok) say($("logs-status"), res?.error || "Could not open the folder.", "err");
-          else say($("logs-status"), "Opened.", "ok");
+          const status = $("logs-status");
+          try {
+            const res = await appBridge.openLogs();
+            if (!res?.ok) say(status, res?.error || "Could not open the folder.", "err");
+            else say(status, "Opened.", "ok");
+          } catch {
+            say(status, "Could not open the folder.", "err");
+          }
         });
       }
 
