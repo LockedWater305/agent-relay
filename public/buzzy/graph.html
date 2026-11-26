@@ -136,6 +136,15 @@
     var statusEl = document.getElementById("status");
     var saveButton = document.getElementById("save");
     var listBox = document.getElementById("list");
+    var runButton = document.getElementById("run");
+    var runRequest = null, approvalButton = null;
+    function clearRunControls() {
+      runRequest = null; runButton.disabled = false;
+      if (approvalButton) { approvalButton.remove(); approvalButton = null; }
+    }
+    function ownsRun(owner, request) {
+      return state === owner && runRequest === request && ownsCanvas();
+    }
     var signedOut = false;
     function ownsCanvas() { return canvas.isConnected && document.getElementById("canvas") === canvas; }
     function paintSave() { saveButton.disabled = signedOut || !!state.saving; }
@@ -381,13 +390,14 @@
     });
 
     document.getElementById("new").addEventListener("click", function () {
+      clearRunControls();
       state = { graphId: null, description: null, nodes: [], edges: [], sel: null, linkFrom: null, seq: 0 };
       document.getElementById("title").value = "";
       resetLink(); paintSave(); draw(); inspect(); say("");
     });
 
     // ── run ──────────────────────────────────────────────────────────────
-    function paintRun(run) {
+    function paintRun(run, owner, request) {
       var byKey = {};
       for (var i = 0; i < run.results.length; i++) { var r = run.results[i]; byKey[r.node_key] = r; }
       for (var j = 0; j < state.nodes.length; j++) {
@@ -406,38 +416,49 @@
       var line = "run " + run.id + " · " + run.status;
       if (run.cost_usd) line += " · $" + Number(run.cost_usd).toFixed(4);
       say(line, run.status === "failed" ? "bad" : "ok");
-      var old = document.getElementById("approve");
-      if (old) old.remove();
+      if (approvalButton) { approvalButton.remove(); approvalButton = null; }
       if (run.status === "awaiting_approval") {
         var b = document.createElement("button");
+        approvalButton = b;
         b.id = "approve";
         b.className = "primary";
         b.textContent = "Approve and continue";
         b.addEventListener("click", function () {
+          if (state !== owner || approvalButton !== b || !ownsCanvas()) return;
           say("Continuing…");
           fetch("/api/buzzy/runs/" + encodeURIComponent(run.id) + "/approve", { method: "POST", credentials: "same-origin" })
             .then(function (r) { return r.json(); })
             .then(function (j) {
+              if (state !== owner || approvalButton !== b || !ownsCanvas()) return;
               if (!j.ok) { say(j.error || "Could not continue.", "bad"); return; }
-              paintRun(j.run);
+              paintRun(j.run, owner, request);
+            })
+            .catch(function () {
+              if (state === owner && approvalButton === b && ownsCanvas()) {
+                say("Could not confirm whether the run continued. Check the run before approving again.", "bad");
+              }
             });
         });
-        document.querySelector(".bar").appendChild(b);
+        runButton.parentNode.appendChild(b);
       }
     }
 
-    document.getElementById("run").addEventListener("click", function () {
+    runButton.addEventListener("click", function () {
       if (!state.graphId) { say("Save the workflow before running it.", "bad"); return; }
+      var owner = state, request = {}; runRequest = request;
       say("Running…");
-      var btn = this; btn.disabled = true;
+      runButton.disabled = true;
       fetch("/api/buzzy/graphs/" + encodeURIComponent(state.graphId) + "/run", { method: "POST", credentials: "same-origin" })
         .then(function (r) { return r.json(); })
         .then(function (j) {
-          btn.disabled = false;
+          if (!ownsRun(owner, request)) return;
+          runButton.disabled = false;
           if (!j.ok) { say(j.error || "Run failed to start.", "bad"); return; }
-          paintRun(j.run);
+          paintRun(j.run, owner, request);
         })
-        .catch(function () { btn.disabled = false; say("Run failed — check the connection.", "bad"); });
+        .catch(function () {
+          if (ownsRun(owner, request)) { runButton.disabled = false; say("Could not confirm the run — check the connection.", "bad"); }
+        });
     });
 
     function loadList() {
@@ -477,6 +498,7 @@
           var edges = g.edges.map(function (e) { return { from: e.from, to: e.to, kind: e.kind }; });
           // Commit loaded identity and its metadata together; old Save replies
           // still belong to the previous canvas, not this selected workflow.
+          clearRunControls();
           state = { graphId: g.id, description: g.description,
             nodes: nodes, edges: edges, sel: null, linkFrom: null, seq: nodes.length, openRequest: request };
           resetLink(); paintSave();
