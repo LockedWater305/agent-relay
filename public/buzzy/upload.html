@@ -152,7 +152,7 @@
       var list = document.getElementById("bulkList");
       var retryBtn = document.getElementById("bulkRetry");
       var failed = [];
-      var CONC = 6;
+      var CONC = 6, uploading = false;
 
       function el(t, c, x) { var n = document.createElement(t); if (c) n.className = c; if (x != null) n.textContent = x; return n; }
       function label(f) { return f.webkitRelativePath || f.name; }
@@ -174,6 +174,9 @@
       }
 
       function run(files) {
+        if (uploading || !files.length) return;
+        uploading = true;
+        pick.disabled = true;
         var total = files.length;
         var done = 0, stored = 0, dup = 0;
         failed = [];
@@ -205,7 +208,7 @@
         return Promise.all(lanes).then(function () {
           bar.textContent = "Done. " + stored + " new, " + dup + " already here, " + failed.length + " failed.";
           if (failed.length) retryBtn.classList.remove("hidden");
-        });
+        }).finally(function () { uploading = false; pick.disabled = false; });
       }
 
       pick.addEventListener("change", function () {
