@@ -861,7 +861,8 @@
       position: relative;
       transition: border-color 0.12s, background 0.12s;
     }
-    .rw-item:hover { border-color: #3A3A3A; background: #121212; }
+    .rw-item[role="button"]:hover { border-color: #3A3A3A; background: #121212; }
+    .rw-item:not([role="button"]) { cursor: default; }
     .rw-item .rw-title {
       display: block; color: #EDEDED; font-weight: 600; font-size: 0.88rem;
       padding-right: 2.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -6395,8 +6396,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     function bindWorkSearchBox(container) {
       var el = container.querySelector("#rwSearch");
       if (!el) return;
-      var t = null;
-      el.addEventListener("input", function () {
+      var t = null, composing = false;
+      function scheduleSearch() {
         var q = el.value.trim();
         rwSearchQuery = el.value;
         var editing = ++rwViewRevision;
@@ -6406,9 +6407,17 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           if (q) renderWorkSearch(q);
           else showRecentWork();
         }, 300);
+      }
+      el.addEventListener("compositionstart", function () {
+        composing = true; ++rwViewRevision; clearTimeout(t);
+      });
+      el.addEventListener("compositionend", function () { composing = false; scheduleSearch(); });
+      el.addEventListener("input", function (e) {
+        if (!composing && !e.isComposing) scheduleSearch();
       });
       // Esc clears the search and returns to recent work.
       el.addEventListener("keydown", function (e) {
+        if (composing || e.isComposing || e.keyCode === 229) return;
         if (e.key === "Escape") {
           e.preventDefault(); clearTimeout(t);
           el.value = ""; rwSearchQuery = ""; showRecentWork();
