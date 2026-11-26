@@ -40,6 +40,7 @@
       background: transparent; color: #9a9a9a; font-size: 0.9rem; font-weight: 700;
     }
     .tab[aria-selected="true"] { background: #ffc107; color: #0A0A0A; }
+    .tab:focus-visible { outline: 2px solid #ffc107; outline-offset: 2px; }
     label { display: block; font-size: 0.8rem; color: #9a9a9a; margin: 0 0 0.35rem; font-weight: 600; }
     input {
       width: 100%; padding: 0.75rem 0.85rem; border-radius: 8px; margin-bottom: 0.9rem;
@@ -79,30 +80,32 @@
 
       <div class="msg" id="msg" role="status" aria-live="polite"></div>
 
-      <div class="tabs" role="tablist">
-        <button class="tab" id="tab-signin" role="tab" aria-selected="true">Sign in</button>
-        <button class="tab" id="tab-register" role="tab" aria-selected="false">Create account</button>
+      <div class="tabs" role="tablist" aria-label="Account options">
+        <button class="tab" type="button" id="tab-signin" role="tab" aria-selected="true" aria-controls="auth-panel">Sign in</button>
+        <button class="tab" type="button" id="tab-register" role="tab" aria-selected="false" aria-controls="auth-panel" tabindex="-1">Create account</button>
       </div>
 
-      <form id="form" autocomplete="on" novalidate>
-        <label for="email">Email</label>
-        <input id="email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" />
+      <div id="auth-panel" role="tabpanel" aria-labelledby="tab-signin">
+        <form id="form" autocomplete="on" novalidate>
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="email" required placeholder="you@example.com" />
 
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="At least 8 characters" />
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required minlength="8" placeholder="At least 8 characters" />
 
-        <div id="nameRow" class="hidden">
-          <label for="name">Name</label>
-          <input id="name" name="name" type="text" autocomplete="name" placeholder="Your name" />
-        </div>
+          <div id="nameRow" class="hidden">
+            <label for="name">Name</label>
+            <input id="name" name="name" type="text" autocomplete="name" placeholder="Your name" />
+          </div>
 
-        <button class="primary" id="submit" type="submit">Sign in</button>
-        <button class="secondary" id="magic" type="button">Email me a sign-in link</button>
-      </form>
+          <button class="primary" id="submit" type="submit">Sign in</button>
+          <button class="secondary" id="magic" type="button">Email me a sign-in link</button>
+        </form>
 
-      <p class="note" id="note">
-        No password needed if you use the email link — it signs you in on this device.
-      </p>
+        <p class="note" id="note">
+          No password needed if you use the email link — it signs you in on this device.
+        </p>
+      </div>
     </div>
   </main>
 
@@ -116,6 +119,7 @@
 
       var tabSignin = document.getElementById("tab-signin");
       var tabRegister = document.getElementById("tab-register");
+      var panel = document.getElementById("auth-panel");
       var form = document.getElementById("form");
       var email = document.getElementById("email");
       var password = document.getElementById("password");
@@ -188,6 +192,9 @@
         var registering = next === "register";
         tabSignin.setAttribute("aria-selected", registering ? "false" : "true");
         tabRegister.setAttribute("aria-selected", registering ? "true" : "false");
+        tabSignin.tabIndex = registering ? -1 : 0;
+        tabRegister.tabIndex = registering ? 0 : -1;
+        panel.setAttribute("aria-labelledby", registering ? tabRegister.id : tabSignin.id);
         nameRow.classList.toggle("hidden", !registering);
         password.setAttribute("autocomplete", registering ? "new-password" : "current-password");
         title.textContent = registering ? "Create your account" : "Welcome back";
@@ -203,6 +210,22 @@
 
       tabSignin.addEventListener("click", function () { setMode("signin"); });
       tabRegister.addEventListener("click", function () { setMode("register"); });
+      function navigateTabs(e) {
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        var target;
+        if (e.key === "Home") target = tabSignin;
+        else if (e.key === "End") target = tabRegister;
+        else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          target = e.currentTarget === tabSignin ? tabRegister : tabSignin;
+        } else return;
+        e.preventDefault();
+        var next = target === tabSignin ? "signin" : "register";
+        if (next !== mode) setMode(next);
+        target.focus();
+      }
+      tabSignin.addEventListener("keydown", navigateTabs);
+      tabRegister.addEventListener("keydown", navigateTabs);
+
 
       form.addEventListener("submit", function (e) {
         e.preventDefault();
