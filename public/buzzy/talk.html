@@ -6888,6 +6888,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         (activeAtSend && activeAtSend.id === "chatDoIt"));
       const originalDraft = input.value;
       const originalRevision = chatNavigation.composerRevision;
+      // Capture the mode when this turn is submitted; a tab switch while the
+      // conversation opens applies to the next turn, not the captured draft.
+      const turnMode = chatState.mode || "chat";
       const text = originalDraft.trim();
       if (!text) return;
       var pastedPaper = readThisBody(text);
@@ -7025,7 +7028,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           message: text,
           model: selectedModel(),
           jobContext: chatState.jobContext || undefined,
-          mode: chatState.mode || "chat",
+          mode: turnMode,
           execute: explicitExecute === true,
           attemptId: attemptId,
         };

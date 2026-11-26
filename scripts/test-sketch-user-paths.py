@@ -279,6 +279,20 @@ class Sketch(unittest.TestCase):
             r=p.locator(target).bounding_box()
             self.assertGreater(r["width"],0,target)
             self.assertLessEqual(r["x"]+r["width"],320,target)
+    def test_missing_saved_render_does_not_offer_broken_preview_actions(self):
+        p=self.start([LINE.copy()], outputs=[dict(url="/assets/missing-result.png")])
+        p.wait_for_function("""() => {
+            const image = document.querySelector("#resultImg");
+            return image.src.endsWith("/assets/missing-result.png") && image.complete && image.naturalWidth === 0;
+        }""")
+        self.assertTrue(p.locator("#result").is_visible())
+        self.assertFalse(p.locator("#resultLink").is_visible(), "Download was offered for a missing image.")
+        self.assertFalse(p.locator("#regionApply").is_visible())
+        self.assertFalse(p.locator("#regionOverlay").is_visible())
+        self.assertEqual(p.locator("#resultStatus").get_attribute("role"),"status")
+        self.assertIn("could not be loaded",p.locator("#resultStatus").inner_text())
+        self.assertEqual(self.screenshot_pixel(p,100,50),[255,255,0])
+        self.assertEqual(type(self).last_size,0)
     def test_small_screen_can_reach_preview_download_and_crop_controls(self):
         p=self.start([],outputs=[dict(url="/assets/101")]); p.set_viewport_size(dict(width=320,height=640))
         p.locator("#regionOverlay").wait_for(state="visible")

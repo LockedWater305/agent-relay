@@ -55,6 +55,7 @@
             border-radius:12px; padding:0.6rem; display:none; }
   #result img { width:100%; border-radius:8px; display:block; }
   #result a { color:var(--bz-yellow); font-size:0.8rem; text-decoration:none; display:inline-block; margin-top:0.4rem; }
+  #result img[hidden], #result a[hidden], #regionPanel[hidden] { display:none; }
   .hint { color:var(--bz-muted); font-size:0.78rem; }
   .drop { outline:2px dashed var(--bz-yellow); outline-offset:-8px; }
 
@@ -102,17 +103,18 @@
   <canvas id="board"></canvas>
   <div id="layers"></div>
   <div id="result">
-    <img id="resultImg" alt="Latest rendered image" />
+    <span class="hint" id="resultStatus" role="status"></span>
+    <img id="resultImg" alt="Latest rendered image" hidden />
     <!-- Region edit: drag a box on the picture, say what should change inside it.
          The mask is drawn here, at the picture's own size, so the server never has
          to guess which pixels the owner meant. -->
     <div id="regionOverlay" title="Drag to mark the area to change"><div id="regionRect"></div></div>
-    <div id="regionPanel">
+    <div id="regionPanel" hidden>
       <input id="regionPrompt" type="text" aria-label="Describe what to change inside the box" placeholder="What should change inside the box? e.g. 'make the coat red'" />
       <button class="primary" id="regionApply">Change this area</button>
       <span class="hint" id="regionStatus" role="status">Drag a box on the picture, then describe the change.</span>
     </div>
-    <a id="resultLink" href="#" download aria-label="Download latest rendered image">Download</a>
+    <a id="resultLink" download aria-label="Download latest rendered image" hidden>Download</a>
   </div>
 </div>
 
@@ -955,6 +957,33 @@
       }).catch(function (e) { setStatus("Could not export PNG. " + e.message); });
     });
 
+    // A saved result URL does not guarantee the image is available to view.
+    // Expose the preview actions only after the current image has loaded.
+    function showResult(url) {
+      lastRenderUrl = url;
+      $("resultImg").hidden = true;
+      $("regionPanel").hidden = true;
+      $("regionOverlay").classList.remove("on");
+      $("resultLink").hidden = true;
+      $("resultLink").removeAttribute("href");
+      $("resultStatus").textContent = "Loading latest image…";
+      $("result").style.display = "block";
+      $("resultImg").src = url;
+    }
+    $("resultImg").addEventListener("load", function () {
+      if (!ownsPage() || !this.complete || !this.naturalWidth) return;
+      this.hidden = false;
+      $("regionPanel").hidden = false;
+      $("resultStatus").textContent = "";
+      $("resultLink").href = lastRenderUrl;
+      $("resultLink").hidden = false;
+    });
+    $("resultImg").addEventListener("error", function () {
+      if (ownsPage() && this.complete && !this.naturalWidth) {
+        $("resultStatus").textContent = "The latest image could not be loaded.";
+      }
+    });
+
     $("create").addEventListener("click", function () {
       if (!editable()) return;
       var prompt = (promptEl.value || "").trim();
@@ -990,12 +1019,8 @@
           return;
         }
         var img = res.d.image;
-        lastRenderUrl = img.url;
+        showResult(img.url);
         setStatus("Done in " + Math.round((res.d.ms || 0) / 100) / 10 + "s — added to the board and to the project.");
-        var box = $("result");
-        box.style.display = "block";
-        $("resultImg").src = img.url;
-        $("resultLink").href = img.url;
         addImage(img.url, { x: 60 + images.length * 18, y: 60 + images.length * 18 });
       }).catch(function (e) {
         createBusy = false;
@@ -1124,9 +1149,7 @@
                 : "Could not change it: " + (res.d.error || "unknown");
               return;
             }
-            lastRenderUrl = res.d.image.url;
-            img.src = res.d.image.url;
-            $("resultLink").href = res.d.image.url;
+            showResult(res.d.image.url);
             addImage(res.d.image.url, { x: 60 + images.length * 18, y: 60 + images.length * 18 });
             picked = null;
             rectEl.style.display = "none";
@@ -1169,13 +1192,7 @@
               !Array.isArray(d.images) || !d.images.every(function (im) { return im && typeof im.url === "string"; })) throw new Error("Invalid board response.");
           strokes = d.board ? d.board.strokes : [];
           images = d.board ? d.board.images : [];
-          if (d.images.length) {
-            var last = d.images[d.images.length - 1];
-            lastRenderUrl = last.url;
-            $("result").style.display = "block";
-            $("resultImg").src = last.url;
-            $("resultLink").href = last.url;
-          }
+          if (d.images.length) showResult(d.images[d.images.length - 1].url);
           resize(); renderImages();
           hydrated = true;
           setStatus("Board loaded. Changes are saved to this project.");

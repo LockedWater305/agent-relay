@@ -126,7 +126,8 @@ async function cmdServe(argv) {
     stdio: "inherit",
     env: { ...process.env, BZ_DATA_DIR: DATA },
   });
-  await new Promise((r) => child.on("exit", r));
+  // A reported launcher failure must also fail for callers checking our exit status.
+  return new Promise((resolve) => child.once("exit", (code) => resolve(code ?? 1)));
 }
 
 async function cmdStatus() {
