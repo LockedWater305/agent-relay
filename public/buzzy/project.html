@@ -34,6 +34,8 @@
                text-decoration: none; font-size: 0.84rem; }
   audio { width: 100%; margin-top: 0.5rem; }
   .empty-note { color: var(--bz-muted); font-size: 0.86rem; }
+  #activity { max-width: 100%; overflow-x: auto; }
+  .turn p, .dl-name, .card .sub { overflow-wrap: anywhere; }
   table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
   th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--bz-line); vertical-align: top; }
   th { color: var(--bz-muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -128,6 +130,13 @@
       if (n < 1024) return n + (n === 1 ? " byte" : " bytes");
       return (Math.round(n / 1024 * 10) / 10) + " KiB";
     }
+    function localTime(value, compactToday) {
+      if (value == null || value === "") return "";
+      var d = new Date(value);
+      if (!Number.isFinite(d.getTime())) return "";
+      return compactToday && d.toDateString() === new Date().toDateString()
+        ? d.toLocaleTimeString() : d.toLocaleString();
+    }
     function settlePanels(message) {
       [srcBox, box, act, conv].forEach(function (panel) {
         panel.innerHTML = '<p class="empty-note">' + esc(message) + '</p>';
@@ -156,7 +165,8 @@
         var p = data.project;
         titleEl.textContent = p.title || "Untitled project";
         var chipClass = p.status === "Deliverable ready" ? "ready" : (p.status === "In progress" ? "prog" : "empty");
-        metaEl.innerHTML = esc(String(p.id)) + " · updated " + esc(new Date(p.updatedAt || p.updated_at || Date.now()).toLocaleString()) +
+        var updated = localTime(p.updatedAt != null ? p.updatedAt : p.updated_at, false);
+        metaEl.innerHTML = esc(String(p.id)) + (updated ? " · updated " + esc(updated) : " · update time unavailable") +
           '<span class="chip ' + chipClass + '">' + esc(p.status) + "</span>" +
           ' <a class="back" style="margin-left:.6rem" href="/buzzy/talk?job=' + encodeURIComponent(p.id) + '">Open conversation →</a>';
 
@@ -167,7 +177,7 @@
               var where = s.url ? '<a href="' + s.url + '">open</a>' : "";
               var size = sizeLabel(s.bytes);
               return '<div class="dl"><span class="dl-kind">' + (s.kind === "board" ? "board" : s.kind === "reference" ? "reference" : s.kind === "brief" ? "brief" : "input") +
-                '</span><span class="dl-name">' + label + '</span><span class="dl-sub">' + size + " " + where + "</span></div>";
+                '</span><span class="dl-name">' + esc(label) + '</span><span class="dl-sub">' + size + " " + where + "</span></div>";
             }).join("")
           : '<p class="empty-note">No inputs recorded yet — draw on the sketch board or fill in the brief and they appear here.</p>';
 
@@ -191,7 +201,7 @@
             data.turns.map(function (t) {
               var stages = (t.stages || []).map(function (s) { return esc(s.label || s.phase) + " @" + s.atMs + "ms"; }).join("<br>");
               var tools = (t.tools || []).map(function (x) { return esc(x.name) + " " + esc(x.state) + (x.ms != null ? " " + x.ms + "ms" : ""); }).join("<br>");
-              return "<tr><td class='mono'>" + esc(new Date(t.created_at).toLocaleTimeString()) + "</td><td>" + esc(t.surface || "") +
+              return "<tr><td class='mono'>" + esc(localTime(t.created_at, true) || "—") + "</td><td>" + esc(t.surface || "") +
                 "</td><td class='mono'>" + esc(t.latency_ms == null ? "" : t.latency_ms) + "</td><td class='mono'>" + (stages || "—") +
                 "</td><td class='mono'>" + (tools || "—") + "</td></tr>";
             }).join("") + "</tbody></table>";
@@ -200,9 +210,9 @@
         if (!data.messages || !data.messages.length) {
           conv.innerHTML = '<p class="empty-note">No transcript linked to this project.</p>';
         } else {
-          conv.innerHTML = "<details open><summary>" + data.messages.length + " messages</summary>" +
+          conv.innerHTML = "<details open><summary>" + data.messages.length + (data.messages.length === 1 ? " message" : " messages") + "</summary>" +
             data.messages.map(function (m) {
-              return '<div class="turn"><div class="who">' + esc(m.role) + " · " + esc(new Date(m.created_at).toLocaleTimeString()) +
+              return '<div class="turn"><div class="who">' + [esc(m.role), esc(localTime(m.created_at, true))].filter(Boolean).join(" · ") +
                 "</div><p>" + esc(m.content) + "</p></div>";
             }).join("") + "</details>";
         }
