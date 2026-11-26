@@ -374,6 +374,21 @@ async function cmdRun(argv) {
   return 0;
 }
 
+function hasExportZipFraming(bytes) {
+  // The workspace archive is never empty (it includes README.txt). A local
+  // file header alone also appears in a truncated download; require its end
+  // record, accounting for any ZIP comment, before writing the destination.
+  const endSize = 22;
+  if (bytes.length < endSize || bytes.readUInt32LE(0) !== 0x04034b50) return false;
+  const min = Math.max(4, bytes.length - endSize - 0xffff);
+  for (let at = bytes.length - endSize; at >= min; at--) {
+    if (bytes.readUInt32LE(at) === 0x06054b50 && at + endSize + bytes.readUInt16LE(at + 20) === bytes.length) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function cmdExport(argv) {
   const target =
     argv[0] || join(process.cwd(), `beezilla-export-${new Date().toISOString().slice(0, 10)}.zip`);
@@ -389,8 +404,8 @@ async function cmdExport(argv) {
     return 1;
   }
   const bytes = Buffer.from(await res.arrayBuffer());
-  if (bytes.subarray(0, 2).toString("latin1") !== "PK") {
-    console.error("export did not return a ZIP archive");
+  if (!hasExportZipFraming(bytes)) {
+    console.error("export did not return a complete ZIP archive");
     return 1;
   }
   writeFileSync(target, bytes);

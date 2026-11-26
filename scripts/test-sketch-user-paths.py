@@ -178,6 +178,22 @@ class Sketch(unittest.TestCase):
         pngpixel=p.evaluate("""async data=>{const i=new Image();i.src='data:image/png;base64,'+data;await i.decode();const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return [...x.getImageData(150,110,1,1).data]}""",base64.b64encode(raw_png).decode())
         self.assertLess(pngpixel[2],90)
         self.hit(p,150,110); p.keyboard.press("Delete"); self.save(p); self.assertEqual(self.board["strokes"],[])
+    def test_a_single_brush_dot_has_visible_selection_feedback(self):
+        p=self.start([])
+        p.locator("#color").fill("#00aaee")
+        p.click('[data-tool="pen"]'); self.hit(p,200,175); self.save(p)
+        self.assertEqual(self.board["strokes"][0]["points"],[dict(x=200,y=175)])
+        ink=self.screenshot_pixel(p,200,175)
+        self.assertEqual(ink,[0,170,238])
+        before=self.screenshot_pixel(p,203,175)
+        p.click('[data-tool="select"]'); self.hit(p,200,175)
+        self.assertNotEqual(self.screenshot_pixel(p,203,175),before,"Selecting a visible brush dot had no visible indication.")
+        self.assertEqual(self.screenshot_pixel(p,200,175),ink)
+        png=self.png(p)
+        self.assertEqual(self.pixel(p,png,203,175)[:3],before)
+        self.assertEqual(self.pixel(p,png,200,175)[:3],ink)
+        self.hit(p,350,240)
+        self.assertEqual(self.screenshot_pixel(p,203,175),before)
     def test_visible_end_of_saved_note_can_be_selected_without_a_ghost_hitbox(self):
         # Click on the visible baseline far from the original click anchoring the label.
         note=dict(id="note",tool="text",color="#ff0000",x1=31,y1=50,text="Existing bridge inspection label",anchor="road")

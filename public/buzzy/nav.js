@@ -76,8 +76,12 @@
     if (ink.left < frame.left + 5) bar.scrollLeft += ink.left - frame.left - 5;
     else if (ink.right > frame.right - 5) bar.scrollLeft += ink.right - frame.right + 5;
   }
+  var chromeWidth = window.innerWidth;
   window.addEventListener("resize", function () {
     applyBleed();
+    // A taller/shorter viewport does not invalidate the user's horizontal pan.
+    if (window.innerWidth === chromeWidth) return;
+    chromeWidth = window.innerWidth;
     revealActiveLink(document.getElementById("bzNav"));
   });
 

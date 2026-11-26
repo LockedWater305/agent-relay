@@ -454,7 +454,15 @@
       c.lineCap = "round";
       c.lineJoin = "round";
       c.setLineDash(isDraft ? [6, 4] : []);
-      if (!output && s === selectedStroke) {
+      if (!output && s === selectedStroke && s.tool === "pen" && s.points && s.points.length === 1) {
+        // A tap has no segment to outline. Draw its selection under the ink.
+        c.save();
+        c.fillStyle = "rgba(255,212,13,0.25)";
+        c.beginPath();
+        c.arc(s.points[0].x, s.points[0].y, c.lineWidth / 2 + 3, 0, 2 * Math.PI);
+        c.fill();
+        c.restore();
+      } else if (!output && s === selectedStroke) {
         c.lineWidth = (s.width || 3) + 6;
         c.strokeStyle = "rgba(255,212,13,0.25)";
         c.beginPath();
