@@ -103,6 +103,11 @@
       "#bzPanel .bz-panel-head{display:flex;align-items:center;justify-content:space-between;padding:0 .2rem .45rem;font-size:.82rem;color:#8d8d8d}",
       "#bzPanel .bz-panel-body{flex:1;min-height:0}",
       "#bzPanel .bz-panel-close{background:none;border:0;color:#8d8d8d;font-size:1rem;cursor:pointer;padding:0 .2rem}",
+      "#bzPanel .bz-panel-load{padding:.35rem .2rem;color:#cfcfcf;font-size:.86rem}",
+      "#bzPanel .bz-panel-load p{margin:0 0 .4rem}",
+      "#bzPanel .bz-panel-retry{background:#181818;color:#f2f2f2;border:1px solid #444;padding:.3rem .65rem;font:inherit;cursor:pointer}",
+      "#bzPanel .bz-panel-retry[aria-disabled='true']{opacity:.65;cursor:default}",
+      "#bzPanel .bz-panel-retry:focus-visible{outline:2px solid #ffd40d;outline-offset:2px}",
       // The chrome renders inside eleven different page stylesheets, and three of
       // them set their own body font-size/line-height (sketch+studio 14px/1.5,
       // capabilities 15px/1.55, memory inherits the browser default). An inherited
@@ -643,19 +648,57 @@
     head.appendChild(close);
     var body = document.createElement("div");
     body.className = "bz-panel-body";
+    var loadUI = document.createElement("div");
+    loadUI.className = "bz-panel-load";
+    loadUI.hidden = true;
+    var loadStatus = document.createElement("p");
+    loadStatus.setAttribute("role", "status");
+    var retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "bz-panel-retry";
+    retry.textContent = "Retry";
+    retry.hidden = true;
+    loadUI.appendChild(loadStatus);
+    loadUI.appendChild(retry);
+    body.appendChild(loadUI);
     panel.appendChild(head);
     panel.appendChild(body);
     document.body.appendChild(panel);
 
-    var chat = null;
+    var chat = null, loading = false;
+    function ownsPanel() { return onPage() && panel.isConnected && panel.classList.contains("open"); }
     function mountChat(api) {
-      if (!api || chat || !onPage() || !panel.isConnected || !panel.classList.contains("open")) return;
+      if (!api || chat || !ownsPanel()) return;
+      loadUI.remove();
       chat = api.mount(body, { title: "BeeZilla", placeholder: "Ask anything — or say what to make" });
     }
     function focusInput() {
       var input = body.querySelector(".bzc-in");
       if (input) input.focus();
     }
+    function loadPanel(trigger) {
+      if (loading || chat || !ownsPanel()) return;
+      loading = true;
+      loadUI.hidden = false;
+      loadStatus.textContent = "Loading Ask…";
+      retry.setAttribute("aria-disabled", "true");
+      loadAskScript().then(function (api) {
+        loading = false;
+        if (!ownsPanel()) return;
+        // Preserve focus the reader moved elsewhere during the download.
+        var keptFocus = document.activeElement === trigger;
+        if (api) {
+          mountChat(api);
+          if (keptFocus) focusInput();
+        } else {
+          loadStatus.textContent = "Could not load Ask. Try again.";
+          retry.hidden = false;
+          retry.removeAttribute("aria-disabled");
+          if (keptFocus) retry.focus();
+        }
+      });
+    }
+    retry.addEventListener("click", function () { loadPanel(retry); });
     function open() {
       panel.classList.add("open");
       btn.setAttribute("aria-expanded", "true");
@@ -663,11 +706,7 @@
         mountChat(window.BeeZillaChat);
         focusInput();
       } else {
-        loadAskScript().then(function (api) {
-          mountChat(api);
-          // Do not pull focus back if the reader moved on during the download.
-          if (onPage() && panel.classList.contains("open") && document.activeElement === btn) focusInput();
-        });
+        loadPanel(btn);
       }
     }
     function shut() {
