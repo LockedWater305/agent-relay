@@ -98,7 +98,7 @@ export async function desktop(t,fixtures,options={}) {
  }
  const state={inference:null,music:null,search:null};
  const runtimeLibraries={
-  'scripts/lib/inference.mjs':{loadInference:()=>state.inference,saveInference:(_d,cfg)=>state.inference={...cfg,encrypted:false},clearInference:()=>{state.inference=null;},resolveInference:()=>state.inference,isExpired:()=>false,redactKey:()=> '[synthetic redacted]',storePath:d=>d+'/inference.json'},
+  'scripts/lib/inference.mjs':{loadInference:()=>state.inference,hasRemovableInference:()=>state.inference!==null,saveInference:(_d,cfg)=>state.inference={...cfg,encrypted:false},clearInference:()=>{state.inference=null;},resolveInference:()=>state.inference,isExpired:()=>false,redactKey:()=> '[synthetic redacted]',storePath:d=>d+'/inference.json'},
   'scripts/lib/search-keys.mjs':{resolveSearch:()=>state.search,saveSearchKey:(_d,cfg)=>state.search={...cfg,encrypted:false},clearSearchKey:()=>{state.search=null;},saveManagedSearch:()=>{throw Error('Managed account forbidden');},loadManagedSearch:()=>null},
   'scripts/lib/music-keys.mjs':{loadMusicKey:()=>state.music,resolveMusicKey:()=>state.music,saveMusicKey:(_d,cfg)=>state.music={...cfg,encrypted:false},clearMusicKey:()=>{state.music=null;}},
  };
@@ -135,7 +135,10 @@ export async function desktop(t,fixtures,options={}) {
     clearBinding:()=>typeof clearRuntimeAuth==='function'?clearRuntimeAuth():runtimeAuth.clear(),
     bindingState:()=>({present:typeof runtimeBinding!=='undefined'&&Boolean(runtimeBinding),generation:typeof runtimeBindingGeneration==='undefined'?null:runtimeBindingGeneration}),
     openSettings,createWindow,handleAppLink,
-    settingsWindowFor:(url)=>settingsWindowFor(url),
+    // This existing fixture models two mounted Sketch documents. The real
+    // Settings entrypoint deliberately navigates only to Settings; attach the
+    // synthetic second Sketch to the same guarded window constructor.
+    secondSketchWindow:async (url)=>{const win=createSettingsWindow();await win.loadURL(url);return win;},
     acquire:(options)=>acquireLibraryTransition(options),
     currentMain:()=>mainWindow,currentSettings:()=>settingsWindow,
     runtimeBase:()=>runtimeBase,
@@ -240,7 +243,7 @@ test('prevented window close releases the matching writer and can be retried wit
  await p.draw();d.main.preventUnload=false;await d.close();assert.equal(d.main.isDestroyed(),true);assert.equal(f.data().board.strokes.length,4);
 });
 test('multiwindow Quit drains both captured mounted pages before stopping',async t=>{
- const f=await fixture(t),g=await fixture(t),p=await f.mount(),q=await g.mount(),d=await desktop(t,[f,g]);d.api.settingsWindowFor(g.h.location.href);await drain();await p.draw();await q.draw();await d.quit();
+ const f=await fixture(t),g=await fixture(t),p=await f.mount(),q=await g.mount(),d=await desktop(t,[f,g]);await d.api.secondSketchWindow(g.h.location.href);await drain();await p.draw();await q.draw();await d.quit();
  assert.equal(d.didExit(),true);assert.equal(f.data().board.strokes.length,3);assert.equal(g.data().board.strokes.length,3);assert.equal(d.stops,1);
 });
 for(const samePort of [false,true])test('reconstructed authority sequence reaches real second stop refusal, same port='+samePort,async t=>{
