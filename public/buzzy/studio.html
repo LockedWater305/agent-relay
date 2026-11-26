@@ -144,6 +144,7 @@
     var state = null;
     var selection = null; // {fromMs,toMs}
     var audioCtx = null;
+    var previewId = null, decodeGeneration = 0;
 
     // The shell can mount another Studio while this page's requests are pending.
     // Capture this page's controls once, never resolve a late response by global ID.
@@ -232,6 +233,7 @@
     function adoptState(next, submitted) {
       if (!next || next.jobId !== jobId || !validPlan(next.plan)) throw new Error("Invalid track response.");
       var changed = metadataOf(state) !== metadataOf(next);
+      if (submitted) { changed = changed || previewId !== null; previewId = null; }
       state = next;
       adoptPlan(next.plan, submitted);
       if (changed) renderRows();
@@ -305,11 +307,16 @@
 
     var peaksCache = null;
     function decodePeaks(url) {
+      var generation = ++decodeGeneration;
+      function ownsWave() { return generation === decodeGeneration && player.isConnected && player.getAttribute("src") === url; }
+      peaksCache = null;
+      drawWave(null);
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       return fetch(url, { credentials: "same-origin" })
         .then(function (r) { return r.arrayBuffer(); })
         .then(function (buf) { return audioCtx.decodeAudioData(buf); })
         .then(function (audio) {
+          if (!ownsWave()) return null;
           var ch = audio.getChannelData(0);
           var buckets = 320, step = Math.floor(ch.length / buckets) || 1;
           var peaks = [];
@@ -325,7 +332,7 @@
           drawWave(peaks);
           return audio.duration;
         })
-        .catch(function () { drawWave(null); return null; });
+        .catch(function () { if (ownsWave()) drawWave(null); return null; });
     }
 
     // Drag to select a passage: pointer x → time, clamped and ordered.
@@ -353,13 +360,15 @@
     });
     wave.addEventListener("pointerup", function () { dragging = null; });
 
-    $("clearSel").addEventListener("click", function () {
+    function clearSelection() {
+      dragging = null;
       selection = null;
       $("selLabel").textContent = "Drag on the waveform to select a passage.";
       $("editBtn").disabled = true;
       $("playSel").disabled = true;
       drawWave(peaksCache);
-    });
+    }
+    $("clearSel").addEventListener("click", clearSelection);
     $("playSel").addEventListener("click", function () {
       if (!selection) return;
       player.currentTime = selection.fromMs / 1000;
@@ -396,6 +405,14 @@
       });
     }
 
+    function showVersion(version) {
+      if (!version || player.getAttribute("src") === version.url) return;
+      clearSelection(); // A passage refers to one recording, not the same offsets on another.
+      player.src = version.url;
+      player.load();
+      decodePeaks(version.url);
+    }
+
     function renderRows() {
       if (!state) return;
       $("title").textContent = state.title || "Studio";
@@ -403,15 +420,17 @@
 
       var versions = $("versions");
       versions.innerHTML = "";
+      var preview = previewId && (state.versions || []).find(function (v) { return v.id === previewId; });
+      if (!preview) previewId = null;
+      var showing = preview || state.asset;
       (state.versions || []).slice().reverse().forEach(function (v) {
         var b = document.createElement("button");
         b.textContent = fmt(0) + " " + v.label + " · " + Math.round(v.bytes / 1024) + " KB";
         b.textContent = v.label + " · " + Math.round(v.bytes / 1024) + " KB";
-        if (state.asset && state.asset.id === v.id) b.classList.add("on");
+        if (showing && showing.id === v.id) b.classList.add("on");
         b.addEventListener("click", function () {
-          player.src = v.url;
-          player.load();
-          decodePeaks(v.url);
+          previewId = state.asset && state.asset.id === v.id ? null : v.id;
+          showVersion(v);
           Array.prototype.forEach.call(versions.children, function (c) { c.classList.remove("on"); });
           b.classList.add("on");
         });
@@ -448,12 +467,7 @@
         log.appendChild(row);
       });
 
-      if (state.asset) {
-        if (player.getAttribute("src") !== state.asset.url) {
-          player.src = state.asset.url;
-          decodePeaks(state.asset.url);
-        }
-      }
+      showVersion(showing);
     }
 
     function load() {
