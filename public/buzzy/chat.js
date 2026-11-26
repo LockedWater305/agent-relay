@@ -179,7 +179,8 @@
       if (!text || turn || !mounted() || hidden || pageKey() !== route) return;
       if (invalidJob) { stage.textContent = "Could not identify this project. Reopen it before sending."; return; }
       // Claim ownership BEFORE the first await. Enter and click share this turn.
-      var op = { controller: new AbortController(), reader: null };
+      var op = { controller: new AbortController(), reader: null,
+        restoreFocus: document.activeElement === input || document.activeElement === sendBtn };
       turn = op;
       input.disabled = true;
       sendBtn.disabled = true;
@@ -229,7 +230,9 @@
               (res.status === 400 && data.code === "bad_chat_scope") ||
               (res.status === 404 && data.code === "chat_scope_unavailable") ||
               (res.status === 409 && data.code === "chat_scope_mismatch") ||
-              (res.status === 401 && data.code === "signed_out"));
+              (res.status === 401 && data.code === "signed_out") ||
+              (res.status === 503 && data.ok === false && data.notSent === true &&
+                (data.code === "no_inference_config" || data.code === "managed_expired")));
             throw refusal;
           }
         } else {
@@ -298,13 +301,23 @@
         if (op.reader) Promise.resolve(op.reader.cancel()).catch(function () {});
         if (turn === op) {
           turn = null;
-          if (mounted()) { input.disabled = false; sendBtn.disabled = false; }
+          if (mounted()) {
+            input.disabled = false;
+            sendBtn.disabled = false;
+            // Disabling a focused composer moves keyboard focus to the body.
+            // Return it only if the user has not moved on to another control.
+            if (op.restoreFocus && document.activeElement === document.body &&
+                !hidden && pageKey() === route && document.hasFocus()) input.focus();
+          }
         }
       }
     }
 
     sendBtn.addEventListener("click", send);
-    input.addEventListener("keydown", function (e) { if (e.key === "Enter") send(); });
+    input.addEventListener("keydown", function (e) {
+      if (e.isComposing || e.keyCode === 229 || e.defaultPrevented) return;
+      if (e.key === "Enter") { e.preventDefault(); send(); }
+    });
 
     return {
       root: root,
