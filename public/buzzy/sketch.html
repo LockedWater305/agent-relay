@@ -32,7 +32,9 @@
      This rule travels with this page's stylesheet, which the shell enables only while
      Sketch is the active page. */
   #bzPage { display:flex; flex-direction:column; flex:1 1 auto; min-height:0; }
-  #board { position:absolute; inset:0; width:100%; height:100%; touch-action:none; }
+  #board { position:absolute; inset:0; width:100%; height:100%; z-index:1; touch-action:none; }
+  /* Marks sit above reference images, but only capture pointers in drawing tools. */
+  #stage[data-tool="select"] #board { pointer-events:none; }
   #layers { position:absolute; inset:0; pointer-events:none; }
   .img-wrap { position:absolute; pointer-events:auto; cursor:move; border:1px solid transparent; }
   .img-wrap.selected { border-color: var(--bz-yellow); }
@@ -44,7 +46,7 @@
   /* The closing brace used to sit at the end of the first declaration, so every rule
      after it (`position:absolute; … display:none`) was dropped: the panel rendered on
      every visit, over the canvas, with no render behind it. */
-  #result { position:absolute; right:12px; top:12px; width:210px; background:var(--bz-card); border:1px solid var(--bz-line);
+  #result { position:absolute; z-index:2; right:12px; top:12px; width:210px; background:var(--bz-card); border:1px solid var(--bz-line);
             border-radius:12px; padding:0.6rem; display:none; }
   #result img { width:100%; border-radius:8px; display:block; }
   #result a { color:var(--bz-yellow); font-size:0.8rem; text-decoration:none; display:inline-block; margin-top:0.4rem; }
@@ -91,7 +93,7 @@
   </div>
 </header>
 
-<div id="stage">
+<div id="stage" data-tool="select">
   <canvas id="board"></canvas>
   <div id="layers"></div>
   <div id="result">
@@ -177,13 +179,15 @@
         if (ownsPage() && revision === savedRevision) el.textContent = "";
       }, 2500);
     }
-    function snapshotJson() {
+    function snapshotJson() { return serializeSnapshot(images); }
+    function serializeSnapshot(imageRecords) {
       // Selection belongs to this exact ordered snapshot, not a reused live
       // array index or a legacy ID that another entry may share.
-      return JSON.stringify({ strokes: strokes, images: images, selectedImage: images.indexOf(selected) });
+      return JSON.stringify({ strokes: strokes, images: imageRecords, selectedImage: images.indexOf(selected) });
     }
-    function snapshot() {
-      undoStack.push(snapshotJson());
+    function snapshot() { pushSnapshot(snapshotJson()); }
+    function pushSnapshot(previous) {
+      undoStack.push(previous);
       if (undoStack.length > 50) undoStack.shift();
       redoStack.length = 0;
     }
@@ -484,12 +488,19 @@
     }
 
     var selectedStroke = null;
+    function selectStroke(e) {
+      var hit = hitTest(pt(e));
+      selectedStroke = hit ? hit.id : null;
+      redraw();
+      return Boolean(hit);
+    }
+    stage.addEventListener("pointerdown", function (e) {
+      if (e.target === stage && tool === "select" && editable()) selectStroke(e);
+    });
     canvas.addEventListener("pointerdown", function (e) {
       if (!editable()) return;
       if (tool === "select") {
-        var hit = hitTest(pt(e));
-        selectedStroke = hit ? hit.id : null;
-        redraw();
+        selectStroke(e);
         return;
       }
       canvas.setPointerCapture(e.pointerId);
@@ -574,6 +585,8 @@
         wrap.addEventListener("pointerdown", function (e) {
           if (tool !== "select" || !editable() || !wrap.isConnected || images.indexOf(im) < 0) return;
           e.stopPropagation();
+          // A visible mark can be selected over a picture. Handles still resize.
+          if (e.target !== handle && selectStroke(e)) return;
           selected = im;
           drag = { image: im, mode: e.target === handle ? "resize" : "move", sx: e.clientX, sy: e.clientY, ox: im.x, oy: im.y, ow: im.w, oh: im.h };
           renderImages();
@@ -592,7 +605,16 @@
       renderImages();
     });
     function finishImageDrag() {
-      if (drag && drag.changed && images.indexOf(drag.image) >= 0 && hydrated && ownsPage()) changed();
+      if (drag && drag.changed && images.indexOf(drag.image) >= 0 && hydrated && ownsPage()) {
+        var active = drag.image;
+        if (active.x !== drag.ox || active.y !== drag.oy || active.w !== drag.ow || active.h !== drag.oh) {
+          var origin = { x: drag.ox, y: drag.oy, w: drag.ow, h: drag.oh };
+          // An entire gesture is one undo step. Preserve any other edits made
+          // while the pointer was held (for example, a newly decoded image).
+          pushSnapshot(serializeSnapshot(images.map(function (im) { return im === active ? Object.assign({}, im, origin) : im; })));
+          changed();
+        }
+      }
       drag = null;
     }
     window.addEventListener("pointerup", finishImageDrag);
@@ -626,6 +648,7 @@
       btn.addEventListener("click", function () {
         if (!editable()) return;
         tool = btn.getAttribute("data-tool");
+        stage.setAttribute("data-tool", tool);
         toolButtons.forEach(function (b) { b.classList.toggle("on", b === btn); });
       });
     });
@@ -668,25 +691,28 @@
     function setStatus(t) { if (ownsPage()) statusEl.textContent = t; }
 
     // ── flatten the board for the model ───────────────────────────────
-    function flatten() {
+    function flatten(background) {
       var r = stage.getBoundingClientRect();
       var out = document.createElement("canvas");
       var s = Math.min(1, 1280 / Math.max(r.width, 1));
       out.width = Math.round(r.width * s);
       out.height = Math.round(r.height * s);
       var c = out.getContext("2d");
-      c.fillStyle = "#ffffff";
+      c.fillStyle = background || "#ffffff";
       c.fillRect(0, 0, out.width, out.height);
       var pending = images.map(function (im) {
-        return new Promise(function (resolve) {
+        return new Promise(function (resolve, reject) {
           var img = new Image();
+          var x = im.x, y = im.y, w = im.w, h = im.h;
           img.crossOrigin = "anonymous";
-          img.onload = function () { c.drawImage(img, im.x * s, im.y * s, im.w * s, im.h * s); resolve(); };
-          img.onerror = function () { resolve(); };
+          img.onload = function () { resolve({ img: img, x: x, y: y, w: w, h: h }); };
+          img.onerror = function () { reject(new Error("A reference image could not be loaded. Retry after restoring it.")); };
           img.src = im.url;
         });
       });
-      return Promise.all(pending).then(function () {
+      return Promise.all(pending).then(function (decoded) {
+        // Use board order; load timing must not swap foreground and background.
+        decoded.forEach(function (im) { c.drawImage(im.img, im.x * s, im.y * s, im.w * s, im.h * s); });
         c.setTransform(s, 0, 0, s, 0, 0);
         // Use the same mark geometry and anchors as the live board, without
         // the editor's selection decoration.
@@ -787,10 +813,10 @@
     });
 
     $("shot").addEventListener("click", function () {
-      flatten().then(function (url) {
+      flatten(getComputedStyle(stage).backgroundColor).then(function (url) {
         var a = document.createElement("a");
         a.href = url; a.download = "sketch-" + Date.now() + ".png"; a.click();
-      });
+      }).catch(function (e) { setStatus("Could not export PNG. " + e.message); });
     });
 
     $("create").addEventListener("click", function () {

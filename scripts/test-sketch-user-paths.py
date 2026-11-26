@@ -2,7 +2,7 @@
 Run: SKETCH_BROWSER=/path/to/chromium python scripts/test-sketch-user-paths.py /path/to/public/buzzy/sketch.html
 Requires Playwright (Python); no real account, provider, or remote network is used.
 """
-import json, os, sys, unittest
+import base64, json, os, struct, sys, time, unittest, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -11,6 +11,18 @@ from xml.etree import ElementTree
 from playwright.sync_api import sync_playwright
 HTML = Path(sys.argv.pop(1)).read_bytes()
 LINE = dict(id="road", tool="line", color="#ffff00", width=3, x1=30, y1=50, x2=200, y2=50)
+
+def solid_png(rgb):
+    def chunk(typ, data):
+        return struct.pack(">I",len(data))+typ+data+struct.pack(">I",zlib.crc32(typ+data))
+    return b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR",struct.pack(">IIBBBBB",8,8,8,2,0,0,0))+chunk(b"IDAT",zlib.compress((b"\0"+bytes(rgb)*8)*8))+chunk(b"IEND", b"")
+
+RED = solid_png((220,20,30))
+GREEN = solid_png((20,210,40))
+BLUE = solid_png((20,40,220))
+
+def ref(id, **geometry):
+    return dict(dict(id=id,url='/assets/'+id+'.png',x=50,y=70,w=150,h=100),**geometry)
 
 class Sketch(unittest.TestCase):
     @classmethod
@@ -25,6 +37,11 @@ class Sketch(unittest.TestCase):
                 if path == "/buzzy/sketch": self.reply(HTML, "text/html; charset=utf-8")
                 elif path == "/api/buzzy/art": self.reply(dict(ok=True, board=cls.board, images=[]))
                 elif path == "/api/buzzy/projects/test": self.reply(dict(project=dict(title="Fixture")))
+                elif path == "/assets/front.png": self.reply(GREEN, "image/png")
+                elif path == "/assets/rear-slow.png":
+                    time.sleep(0.22)
+                    self.reply(RED, "image/png")
+                elif path == "/assets/blue.png": self.reply(BLUE, "image/png")
                 else: self.reply(b"", "text/plain", 404)
             def do_POST(self):
                 data=self.rfile.read(int(self.headers["Content-Length"])); req=json.loads(data)
@@ -36,8 +53,8 @@ class Sketch(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.browser.close(); cls.pw.stop(); cls.server.shutdown(); cls.server.server_close(); cls.thread.join()
-    def start(self, strokes):
-        type(self).board=dict(version=1,strokes=strokes,images=[]); type(self).last_size=0
+    def start(self, strokes, images=None):
+        type(self).board=dict(version=1,strokes=strokes,images=images or []); type(self).last_size=0
         page=self.browser.new_page(viewport=dict(width=1050,height=770),device_scale_factor=1)
         self.addCleanup(page.context.close)
         page.goto("http://127.0.0.1:%d/buzzy/sketch?job=test"%self.server.server_port)
@@ -46,7 +63,68 @@ class Sketch(unittest.TestCase):
     def save(self,p):
         p.click("#save")
         p.wait_for_function("document.querySelector('#status').textContent==='Board saved.' || document.querySelector('#savedFlag').textContent.startsWith('Not saved')")
-    def hit(self,p,x,y): p.locator("#board").click(position=dict(x=x,y=y))
+    def hit(self,p,x,y):
+        r=p.locator("#board").bounding_box()
+        p.mouse.click(r["x"]+x,r["y"]+y)
+    def drag(self,p,x1,y1,x2,y2):
+        r=p.locator("#board").bounding_box()
+        p.mouse.move(r["x"]+x1,r["y"]+y1); p.mouse.down()
+        p.mouse.move(r["x"]+x2,r["y"]+y2,steps=4); p.mouse.up()
+    def png(self,p):
+        with p.expect_download() as dl: p.click("#shot")
+        return dl.value.path().read_bytes()
+    def pixel(self,p,png,x,y):
+        data=base64.b64encode(png).decode(); return p.evaluate("""async a=>{
+          const i=new Image(); i.src='data:image/png;base64,'+a.data; await i.decode();
+          const c=document.createElement('canvas'); c.width=i.width;c.height=i.height;
+          const g=c.getContext('2d'); g.drawImage(i,0,0);
+          return Array.from(g.getImageData(a.x,a.y,1,1).data);
+        }""",dict(data=data,x=x,y=y))
+    def screenshot_pixel(self,p,x,y):
+        from PIL import Image
+        from io import BytesIO
+        return list(Image.open(BytesIO(p.locator("#stage").screenshot())).getpixel((x,y)))[:3]
+    def test_reference_image_does_not_block_or_hide_drawing(self):
+        p=self.start([], [ref("blue")]); p.wait_for_function("document.querySelector('#layers img').naturalWidth===8")
+        p.click('[data-tool="line"]'); self.drag(p,90,120,170,120); self.save(p)
+        self.assertEqual(len(self.board["strokes"]),1)
+        self.assertEqual(self.screenshot_pixel(p,140,120),[255,212,13])
+        p.click('[data-tool="select"]'); self.hit(p,140,120); p.keyboard.press("Delete"); self.save(p)
+        self.assertEqual(self.board["strokes"],[]); self.assertEqual(len(self.board["images"]),1)
+    def test_image_move_and_resize_are_single_undoable_edits(self):
+        original=ref("blue"); p=self.start([LINE.copy()], [original])
+        self.drag(p,90,140,113,161); self.save(p)
+        moved=dict(original,x=73,y=91); self.assertEqual(self.board["images"],[moved])
+        p.click("#undo"); self.save(p); self.assertEqual(self.board["images"],[original])
+        p.click("#redo"); self.save(p); self.assertEqual(self.board["images"],[moved])
+        self.drag(p,223,191,255,205); self.save(p); resized=dict(moved,w=182,h=114)
+        self.assertEqual(self.board["images"],[resized])
+        p.click("#undo"); self.save(p); self.assertEqual(self.board["images"],[moved])
+        p.click("#redo"); self.save(p); self.assertEqual(self.board["images"],[resized])
+    def test_png_respects_board_image_order_not_download_completion(self):
+        p=self.start([], [ref("rear-slow"),ref("front")])
+        raw=self.png(p)
+        self.assertEqual(self.pixel(p,raw,140,120),[20,210,40,255])
+    def test_png_does_not_hide_a_white_note(self):
+        p=self.start([dict(id="n",tool="text",color="#ffffff",x1=100,y1=100,text="White lettering")])
+        raw=self.png(p)
+        background=self.pixel(p,raw,30,30)
+        pixels=p.evaluate("""async data=>{
+          const i=new Image();i.src='data:image/png;base64,'+data;await i.decode();
+          const c=document.createElement('canvas');c.width=i.width;c.height=i.height;
+          const g=c.getContext('2d');g.drawImage(i,0,0);
+          const a=g.getImageData(100,85,120,20).data; let n=0;
+          for(let k=0;k<a.length;k+=4) if(a[k]>220&&a[k+1]>220&&a[k+2]>220)n++;
+          return n;
+        }""",base64.b64encode(raw).decode())
+        self.assertEqual(background,[20,20,20,255])
+        self.assertGreater(pixels,25)
+    def test_png_does_not_claim_success_when_a_reference_is_missing(self):
+        p=self.start([LINE.copy()],[ref("missing")]); downloads=[]; p.on("download",lambda d: downloads.append(d))
+        p.click("#shot"); p.wait_for_timeout(250)
+        self.assertEqual(downloads,[], "A PNG with a missing image is not a complete board export.")
+        self.assertIn("reference image",p.inner_text("#status"))
+        self.assertEqual(self.board["images"],[ref("missing")])
     def svg(self,p):
         with p.expect_download() as dl: p.click("#svg")
         return ElementTree.fromstring(dl.value.path().read_bytes())
