@@ -199,19 +199,23 @@
     }
     // One immutable snapshot per request. A response acknowledges only that
     // revision, never edits completed while the request was pending.
-    function flushSave() {
+    function flushSave(keepalive) {
       clearTimeout(saveTimer);
       if (!hydrated || !ownsPage()) return Promise.resolve(false);
-      if (pendingSave) return pendingSave.then(function (ok) { return ok ? flushSave() : false; });
+      if (pendingSave) return pendingSave.then(function (ok) { return ok ? flushSave(keepalive) : false; });
       if (savedRevision === revision) return Promise.resolve(true);
       var submittedRevision = revision, board = JSON.stringify(boardJson());
       setSaved("Saving…", false);
       pendingSave = ensureJob().then(function (id) {
         if (!ownsPage()) throw new Error("Board is no longer open.");
+        var body = JSON.stringify({ action: "save", jobId: id, board: JSON.parse(board) });
+        // Ordinary saves must not be subject to the browser's shared 64 KiB
+        // keepalive budget. On exit, keep only eligible small uploads alive.
         return fetch("/api/buzzy/art", {
-          method: "POST", credentials: "same-origin", keepalive: true,
+          method: "POST", credentials: "same-origin",
+          keepalive: keepalive === true && typeof Blob === "function" && new Blob([body]).size <= 65536,
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ action: "save", jobId: id, board: JSON.parse(board) }),
+          body: body,
         });
       }).then(function (r) {
         if (!r.ok) throw new Error("Save failed.");
@@ -227,7 +231,7 @@
         return false;
       }).then(function (ok) {
         pendingSave = null;
-        if (ok && revision !== savedRevision && ownsPage()) return flushSave();
+        if (ok && revision !== savedRevision && ownsPage()) return flushSave(keepalive);
         return ok;
       });
       return pendingSave;
@@ -274,10 +278,10 @@
     });
     window.addEventListener("pagehide", function () {
       finishStroke(); finishImageDrag();
-      flushSave();
+      flushSave(true);
       pageHidden = true;
     });
-    document.addEventListener("visibilitychange", function () { if (document.hidden) flushSave(); });
+    document.addEventListener("visibilitychange", function () { if (document.hidden) flushSave(true); });
     window.addEventListener("beforeunload", function (event) {
       if (ownsPage() && hydrated && (revision !== savedRevision || pendingSave)) {
         event.preventDefault(); event.returnValue = "";
@@ -364,17 +368,27 @@
       var best = null, bestD = 9;
       strokes.forEach(function (st) {
         if (st.tool === "text") {
-          if (Math.abs(p.x - st.x1) < 80 && Math.abs(p.y - st.y1) < 14) { best = st; bestD = 0; }
+          var at = (st.anchor && anchorPoint(st.anchor)) || { x: st.x1, y: st.y1 };
+          ctx.save();
+          ctx.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif";
+          var metrics = ctx.measureText(st.text || "");
+          ctx.restore();
+          var left = at.x - (st.anchor ? 9 : 2);
+          if (p.x >= left && p.x <= at.x + metrics.width + 2 &&
+              p.y >= at.y - Math.max(10, metrics.actualBoundingBoxAscent || 0) - 2 &&
+              p.y <= at.y + Math.max(2, metrics.actualBoundingBoxDescent || 0) + 2) { best = st; bestD = 0; }
           return;
         }
         if (st.tool === "pen" && st.points) {
+          if (st.points.length === 1) {
+            var dotDistance = segDist(p, st.points[0], st.points[0]);
+            if (dotDistance < bestD) { bestD = dotDistance; best = st; }
+          }
           for (var i = 1; i < st.points.length; i++) {
             var d = segDist(p, st.points[i - 1], st.points[i]);
             if (d < bestD) { bestD = d; best = st; }
           }
         } else {
-          var d2 = segDist(p, { x: st.x1, y: st.y1 }, { x: st.x2, y: st.y2 });
-          if (d2 < bestD) { bestD = d2; best = st; }
           if (st.tool === "rect") {
             var corners = [[st.x1, st.y1, st.x2, st.y1], [st.x2, st.y1, st.x2, st.y2],
                            [st.x2, st.y2, st.x1, st.y2], [st.x1, st.y2, st.x1, st.y1]];
@@ -382,6 +396,9 @@
               var dd = segDist(p, { x: c[0], y: c[1] }, { x: c[2], y: c[3] });
               if (dd < bestD) { bestD = dd; best = st; }
             });
+          } else {
+            var d2 = segDist(p, { x: st.x1, y: st.y1 }, { x: st.x2, y: st.y2 });
+            if (d2 < bestD) { bestD = d2; best = st; }
           }
         }
       });
@@ -403,54 +420,62 @@
       if (draft) drawStroke(draft, true);
     }
 
-    function drawStroke(s, isDraft) {
-      ctx.strokeStyle = s.color || color;
-      ctx.fillStyle = s.color || color;
-      ctx.lineWidth = s.width || 3;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.setLineDash(isDraft ? [6, 4] : []);
-      if (s.id && s.id === selectedStroke) {
-        ctx.lineWidth = (s.width || 3) + 6;
-        ctx.strokeStyle = "rgba(255,212,13,0.25)";
-        ctx.beginPath();
-        if (s.tool === "pen" && s.points) { ctx.moveTo(s.points[0].x, s.points[0].y);
-          for (var i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y); }
-        else if (s.tool !== "text") { ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); }
-        ctx.stroke();
-        ctx.lineWidth = s.width || 3;
+    function drawStroke(s, isDraft, output) {
+      var c = output || ctx;
+      c.strokeStyle = s.color || color;
+      c.fillStyle = s.color || color;
+      c.lineWidth = s.width || 3;
+      c.lineCap = "round";
+      c.lineJoin = "round";
+      c.setLineDash(isDraft ? [6, 4] : []);
+      if (!output && s.id && s.id === selectedStroke) {
+        c.lineWidth = (s.width || 3) + 6;
+        c.strokeStyle = "rgba(255,212,13,0.25)";
+        c.beginPath();
+        if (s.tool === "pen" && s.points && s.points.length) { c.moveTo(s.points[0].x, s.points[0].y);
+          for (var i = 1; i < s.points.length; i++) c.lineTo(s.points[i].x, s.points[i].y); }
+        else if (s.tool === "rect") { c.rect(s.x1, s.y1, s.x2 - s.x1, s.y2 - s.y1); }
+        else if (s.tool === "line" || s.tool === "arrow") { c.moveTo(s.x1, s.y1); c.lineTo(s.x2, s.y2); }
+        c.stroke();
+        c.lineWidth = s.width || 3;
+        c.strokeStyle = s.color || color;
       }
       if (s.tool === "pen") {
         if (!s.points.length) return;
-        ctx.beginPath();
-        ctx.moveTo(s.points[0].x, s.points[0].y);
-        for (var i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
-        ctx.stroke();
+        // A tap is a saved brush mark even though it has no line segment.
+        if (s.points.length === 1) {
+          c.beginPath(); c.arc(s.points[0].x, s.points[0].y, c.lineWidth / 2, 0, 2 * Math.PI); c.fill();
+          c.setLineDash([]); return;
+        }
+        c.beginPath();
+        c.moveTo(s.points[0].x, s.points[0].y);
+        for (var i = 1; i < s.points.length; i++) c.lineTo(s.points[i].x, s.points[i].y);
+        c.stroke();
       } else if (s.tool === "line" || s.tool === "arrow") {
-        ctx.beginPath();
-        ctx.moveTo(s.x1, s.y1);
-        ctx.lineTo(s.x2, s.y2);
-        ctx.stroke();
+        c.beginPath();
+        c.moveTo(s.x1, s.y1);
+        c.lineTo(s.x2, s.y2);
+        c.stroke();
         if (s.tool === "arrow") {
           var a = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
           var head = 12;
-          ctx.setLineDash([]);
-          ctx.beginPath();
-          ctx.moveTo(s.x2, s.y2);
-          ctx.lineTo(s.x2 - head * Math.cos(a - 0.4), s.y2 - head * Math.sin(a - 0.4));
-          ctx.lineTo(s.x2 - head * Math.cos(a + 0.4), s.y2 - head * Math.sin(a + 0.4));
-          ctx.closePath();
-          ctx.fill();
+          c.setLineDash([]);
+          c.beginPath();
+          c.moveTo(s.x2, s.y2);
+          c.lineTo(s.x2 - head * Math.cos(a - 0.4), s.y2 - head * Math.sin(a - 0.4));
+          c.lineTo(s.x2 - head * Math.cos(a + 0.4), s.y2 - head * Math.sin(a + 0.4));
+          c.closePath();
+          c.fill();
         }
       } else if (s.tool === "rect") {
-        ctx.strokeRect(s.x1, s.y1, s.x2 - s.x1, s.y2 - s.y1);
+        c.strokeRect(s.x1, s.y1, s.x2 - s.x1, s.y2 - s.y1);
       } else if (s.tool === "text") {
         var at = (s.anchor && anchorPoint(s.anchor)) || { x: s.x1, y: s.y1 };
-        ctx.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif";
-        ctx.fillText(s.text || "", at.x, at.y);
-        if (s.anchor) { ctx.beginPath(); ctx.arc(at.x - 6, at.y - 4, 2.5, 0, Math.PI * 2); ctx.fill(); }
+        c.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif";
+        c.fillText(s.text || "", at.x, at.y);
+        if (s.anchor) { c.beginPath(); c.arc(at.x - 6, at.y - 4, 2.5, 0, Math.PI * 2); c.fill(); }
       }
-      ctx.setLineDash([]);
+      c.setLineDash([]);
     }
 
     function pt(e) {
@@ -608,7 +633,9 @@
     $("undo").addEventListener("click", undo);
     $("redo").addEventListener("click", redo);
     window.addEventListener("keydown", function (e) {
-      if (!editable()) return;
+      if (!editable() || e.defaultPrevented || e.isComposing) return;
+      var target = e.target;
+      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
       if (e.key === "Delete" || e.key === "Backspace") {
         if (tool === "select" && selectedStroke) {
           e.preventDefault();
@@ -626,8 +653,9 @@
       }
       var meta = e.metaKey || e.ctrlKey;
       if (!meta) return;
-      if (e.key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
-      else if ((e.key === "z" && e.shiftKey) || e.key === "y") { e.preventDefault(); redo(); }
+      var key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if ((key === "z" && e.shiftKey) || key === "y") { e.preventDefault(); redo(); }
     });
     $("clear").addEventListener("click", function () {
       if (!editable()) return;
@@ -660,19 +688,9 @@
       });
       return Promise.all(pending).then(function () {
         c.setTransform(s, 0, 0, s, 0, 0);
-        strokes.forEach(function (st) {
-          c.strokeStyle = st.color || color; c.fillStyle = st.color || color;
-          c.lineWidth = st.width || 3; c.lineCap = "round"; c.lineJoin = "round";
-          if (st.tool === "pen") { c.beginPath(); c.moveTo(st.points[0].x, st.points[0].y);
-            for (var i = 1; i < st.points.length; i++) c.lineTo(st.points[i].x, st.points[i].y); c.stroke(); }
-          else if (st.tool === "line" || st.tool === "arrow") { c.beginPath(); c.moveTo(st.x1, st.y1); c.lineTo(st.x2, st.y2); c.stroke();
-            if (st.tool === "arrow") { var a = Math.atan2(st.y2 - st.y1, st.x2 - st.x1), h = 12;
-              c.beginPath(); c.moveTo(st.x2, st.y2);
-              c.lineTo(st.x2 - h * Math.cos(a - 0.4), st.y2 - h * Math.sin(a - 0.4));
-              c.lineTo(st.x2 - h * Math.cos(a + 0.4), st.y2 - h * Math.sin(a + 0.4)); c.closePath(); c.fill(); } }
-          else if (st.tool === "rect") { c.strokeRect(st.x1, st.y1, st.x2 - st.x1, st.y2 - st.y1); }
-          else if (st.tool === "text") { c.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif"; c.fillText(st.text || "", st.x1, st.y1); }
-        });
+        // Use the same mark geometry and anchors as the live board, without
+        // the editor's selection decoration.
+        strokes.forEach(function (st) { drawStroke(st, false, c); });
         return out.toDataURL("image/png");
       });
     }
@@ -723,6 +741,10 @@
         var c = st.color || "#ffd40d";
         var w = st.width || 3;
         if (st.tool === "pen" && st.points && st.points.length) {
+          if (st.points.length === 1) {
+            parts.push('<circle cx="' + st.points[0].x + '" cy="' + st.points[0].y + '" r="' + (w / 2) + '" fill="' + c + '"/>');
+            return;
+          }
           var d = st.points.map(function (p, i) { return (i ? "L" : "M") + p.x + " " + p.y; }).join(" ");
           parts.push('<path d="' + d + '" fill="none" stroke="' + c + '" stroke-width="' + w +
             '" stroke-linecap="round" stroke-linejoin="round"/>');
@@ -741,7 +763,8 @@
             '" width="' + Math.abs(st.x2 - st.x1) + '" height="' + Math.abs(st.y2 - st.y1) +
             '" fill="none" stroke="' + c + '" stroke-width="' + w + '"/>');
         } else if (st.tool === "text") {
-          parts.push('<text x="' + st.x1 + '" y="' + st.y1 + '" fill="' + c +
+          var at = (st.anchor && anchorPoint(st.anchor)) || { x: st.x1, y: st.y1 };
+          parts.push('<text x="' + at.x + '" y="' + at.y + '" fill="' + c +
             '" font-family="Inter, Segoe UI, sans-serif" font-size="15" font-weight="600">' +
             esc(st.text || "") + "</text>");
         }
