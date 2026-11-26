@@ -121,11 +121,22 @@
         return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
       });
     }
-    function kb(n) { return n ? Math.round(n / 1024) + " KB" : ""; }
+    function sizeLabel(value) {
+      if (value == null || value === "" || (typeof value !== "number" && typeof value !== "string")) return "";
+      var n = Number(value);
+      if (!Number.isSafeInteger(n) || n < 0) return "";
+      if (n < 1024) return n + (n === 1 ? " byte" : " bytes");
+      return (Math.round(n / 1024 * 10) / 10) + " KiB";
+    }
+    function settlePanels(message) {
+      [srcBox, box, act, conv].forEach(function (panel) {
+        panel.innerHTML = '<p class="empty-note">' + esc(message) + '</p>';
+      });
+    }
     if (!jobId) {
       titleEl.textContent = "No project selected";
       metaEl.textContent = "Open a work item from Talk → Recent work.";
-      box.innerHTML = '<p class="empty-note">Nothing to show.</p>';
+      settlePanels("Select a work item to see its details.");
       return;
     }
     fetch("/api/buzzy/projects/" + encodeURIComponent(jobId), { credentials: "same-origin" })
@@ -136,6 +147,7 @@
           if (ownsUrl()) location.href = "/buzzy/landing";
           throw new Error("signed_out");
         }
+        if (r.status < 200 || r.status >= 300) throw new Error(r.status === 404 ? "This project was not found." : "Project details are unavailable. Try reloading.");
         return r.json();
       })
       .then(function (data) {
@@ -153,7 +165,7 @@
           ? sources.map(function (s) {
               var label = String(s.label || s.kind || "input");
               var where = s.url ? '<a href="' + s.url + '">open</a>' : "";
-              var size = s.bytes ? " · " + Math.max(1, Math.round(s.bytes / 1024)) + " KB" : "";
+              var size = sizeLabel(s.bytes);
               return '<div class="dl"><span class="dl-kind">' + (s.kind === "board" ? "board" : s.kind === "reference" ? "reference" : s.kind === "brief" ? "brief" : "input") +
                 '</span><span class="dl-name">' + label + '</span><span class="dl-sub">' + size + " " + where + "</span></div>";
             }).join("")
@@ -167,7 +179,7 @@
               ? '<audio controls preload="none" src="' + esc(d.url) + '"></audio>'
               : "";
             return '<div class="card"><h3>' + esc(d.name || d.kind) + "</h3>" +
-              '<div class="sub">' + esc(d.kind || "") + " · " + esc(d.type || "") + " · " + kb(d.bytes) + "</div>" +
+              '<div class="sub">' + [esc(d.kind), esc(d.type), sizeLabel(d.bytes)].filter(Boolean).join(" · ") + "</div>" +
               media + '<a class="dl" href="' + esc(d.url) + '" download>Download</a></div>';
           }).join("");
         }
@@ -199,6 +211,7 @@
         if (!ownsPage()) return;
         titleEl.textContent = "Could not load project";
         metaEl.textContent = e.message;
+        settlePanels("Project details could not be loaded.");
       });
   })();
 </script>
