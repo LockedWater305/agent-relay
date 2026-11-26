@@ -8,13 +8,13 @@ import test from "node:test";
 const zip = Buffer.from("UEsDBBQAAAAAAAAAIVDvB/oCHwAAAB8AAAAKAAAAUkVBRE1FLnR4dG9ubHkgc3ludGhldGljIGZpeHR1cmUgY29udGVudApQSwECFAMUAAAAAAAAACFQ7wf6Ah8AAAAfAAAACgAAAAAAAAAAAAAAgAEAAAAAUkVBRE1FLnR4dFBLBQYAAAAAAQABADgAAABHAAAAAAA=", "base64");
 const commentedZip = Buffer.from("UEsDBBQAAAAAAAAAIVDvB/oCHwAAAB8AAAAKAAAAUkVBRE1FLnR4dG9ubHkgc3ludGhldGljIGZpeHR1cmUgY29udGVudApQSwECFAMUAAAAAAAAACFQ7wf6Ah8AAAAfAAAACgAAAAAAAAAAAAAAgAEAAAAAUkVBRE1FLnR4dFBLBQYAAAAAAQABADgAAABHAAAAFwBmaXh0dXJlIGFyY2hpdmUgY29tbWVudA==", "base64");
 
-function run(t, response, pathMode) {
+function run(t, response, pathMode, targetOverride) {
   const root = mkdtempSync(join(tmpdir(), "bee CLI export fixture "));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const cli = "bin/beezilla.mjs";
-  const target = pathMode === "missing parent" ? "missing/backup.zip"
+  const target = targetOverride ?? (pathMode === "missing parent" ? "missing/backup.zip"
     : pathMode === "file parent" ? "regular-file/backup.zip"
-      : pathMode === "directory target" ? "existing directory" : "existing backup.zip";
+      : pathMode === "directory target" ? "existing directory" : "existing backup.zip");
   const calls = join(root, "fetch-calls");
   const original = Buffer.from("prior fixture file\n");
   const write = (rel, bytes) => {
@@ -98,4 +98,23 @@ test("export explains a write failure even if the destination changed after pref
   assert.match(result.stderr, /^could not write export to existing backup[.]zip [(][^)]+[)]\n$/);
   assert.doesNotMatch(result.stdout, /^wrote /m);
   assert.equal(calls.length, 2, "probe and export reached the mock before the local error");
+});
+
+for (const flag of ["--help", "-h"]) {
+  test(`export ${flag} prints help without fetching backup data or changing a same-named file`, (t) => {
+    const { result, saved, original, calls } = run(t, zip, undefined, flag);
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    assert.match(result.stdout, /^usage: beezilla export \[file\]\n$/);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(saved, original);
+  });
+}
+
+test("export accepts a deliberately named option-looking file when specified as a path", (t) => {
+  const { result, saved, calls } = run(t, zip, undefined, "./--help");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^wrote [.][/]+--help /m);
+  assert.deepEqual(saved, zip);
+  assert.equal(calls.length, 2);
 });

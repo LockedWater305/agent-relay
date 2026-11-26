@@ -207,6 +207,29 @@ class Sketch(unittest.TestCase):
         self.assertEqual(self.board["strokes"],[])
         p.keyboard.press("Control+z"); self.save(p); self.assertEqual(len(self.board["strokes"]),1)
         p.keyboard.press("Control+Shift+Z"); self.save(p); self.assertEqual(self.board["strokes"],[])
+    def test_nontext_controls_do_not_swallow_board_undo_or_redo(self):
+        for selector in ("#iterate","#color"):
+            with self.subTest(control=selector):
+                p=self.start([])
+                p.click('[data-tool="line"]'); self.drag(p,95,110,225,110); self.save(p)
+                line=self.board["strokes"]
+                self.assertEqual(len(line),1)
+                p.click('[data-tool="select"]'); self.hit(p,140,110)
+                p.locator(selector).focus()
+                if selector=="#iterate":
+                    p.keyboard.press("Space")
+                    self.assertTrue(p.locator(selector).is_checked())
+                p.keyboard.press("Delete"); self.save(p)
+                self.assertEqual(self.board["strokes"],line,"Focused form controls should never forward Delete to the board.")
+
+                p.locator(selector).focus(); p.keyboard.press("Control+z"); self.save(p)
+                self.assertEqual(self.board["strokes"],[])
+                p.locator(selector).focus(); p.keyboard.press("Control+Shift+z"); self.save(p)
+                self.assertEqual(self.board["strokes"],line)
+
+                p.fill("#prompt","Text input still gets its own undo.")
+                p.keyboard.press("Control+z"); self.save(p)
+                self.assertEqual(self.board["strokes"],line)
     def test_selection_outline_preserves_mark_color_and_rect_geometry(self):
         p=self.start([dict(id="box",tool="rect",color="#00ccff",width=3,x1=50,y1=50,x2=250,y2=250)])
         self.hit(p,120,50)

@@ -397,6 +397,10 @@ function hasExportZipFraming(bytes) {
 }
 
 async function cmdExport(argv) {
+  if (argv[0] === "--help" || argv[0] === "-h") {
+    console.log("usage: beezilla export [file]");
+    return 0;
+  }
   const target =
     argv[0] || join(process.cwd(), `beezilla-export-${new Date().toISOString().slice(0, 10)}.zip`);
   const parent = dirname(target);

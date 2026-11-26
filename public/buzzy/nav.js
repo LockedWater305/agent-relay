@@ -1360,6 +1360,10 @@
     return page;
   }
 
+  // These shortcuts live outside the section tab strip, but the same header
+  // replacement can remove the focused link on the first soft navigation.
+  var CHROME_FOCUS_SHORTCUTS = [".bz-brandrow > a.bz-brand", "#bzChrome > a#bzHoneyChip"];
+
   function finish(key, title, scrollY, navFocus, historyScroll) {
     // Talk consumes ?job / ?expert with replaceState during bootstrap. Adopt
     // that same-page canonical URL, or Back later misses its live DOM cache.
@@ -1393,9 +1397,12 @@
     // The first soft hop may replace the original page's header. Keep the
     // departing link's keyboard focus unless the new page set focus itself.
     if (navFocus && document.activeElement === document.body) {
-      var active = document.querySelector('#bzNav a[aria-current="page"]');
-      if (active && active.getAttribute("data-nav") === navFocus) {
-        active.focus({ preventScroll: true });
+      if (navFocus.shortcut) {
+        var shortcut = document.querySelector(navFocus.shortcut);
+        if (shortcut && keyOf(shortcut.href) === key) shortcut.focus({ preventScroll: true });
+      } else {
+        var active = document.querySelector('#bzNav a[aria-current="page"]');
+        if (active && active.getAttribute("data-nav") === navFocus.tab) active.focus({ preventScroll: true });
       }
     }
   }
@@ -1501,8 +1508,15 @@
             return;
           }
           var focused = document.activeElement;
-          var navFocus = focused && focused.matches("#bzNav a[data-nav]") && keyOf(focused.href) === key
-            ? focused.getAttribute("data-nav") : null;
+          var navFocus = null;
+          if (focused && focused.href && keyOf(focused.href) === key) {
+            if (focused.matches("#bzNav a[data-nav]")) {
+              navFocus = { tab: focused.getAttribute("data-nav") };
+            } else if (focused.matches(":focus-visible")) {
+              var shortcut = CHROME_FOCUS_SHORTCUTS.find(function (selector) { return focused.matches(selector); });
+              if (shortcut) navFocus = { shortcut: shortcut };
+            }
+          }
           ensurePageWrapper();
           var target = document.getElementById("bzPage");
           if (target) target.setAttribute("data-bz-path", currentKey);

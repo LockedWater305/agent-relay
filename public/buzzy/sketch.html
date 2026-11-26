@@ -779,8 +779,12 @@
     window.addEventListener("keydown", function (e) {
       if (!editable() || e.defaultPrevented || e.isComposing) return;
       var target = e.target;
-      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      var formControl = target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
+      if (target && target.isContentEditable) return;
+      // The color picker and checkbox don't have text history of their own.
+      if (formControl && !(target.tagName === "INPUT" && /^(checkbox|color)$/.test(target.type))) return;
       if (e.key === "Delete" || e.key === "Backspace") {
+        if (formControl) return;
         if (tool === "select" && selectedStroke) {
           e.preventDefault();
           snapshot();

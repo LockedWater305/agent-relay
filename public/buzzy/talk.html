@@ -3137,7 +3137,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       item.querySelector(".slot-edit-cancel").addEventListener("click", function () {
         cancelSlotEdit(slotId);
       });
+      var composing = false;
+      input.addEventListener("compositionstart", function () { composing = true; });
+      input.addEventListener("compositionend", function () { composing = false; });
       input.addEventListener("keydown", function (e) {
+        // Enter and Escape belong to the candidate picker during composition.
+        if (e.defaultPrevented || composing || e.isComposing || e.keyCode === 229) return;
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
           saveSlotEdit(slotId, input.value.trim());
