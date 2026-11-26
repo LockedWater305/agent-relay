@@ -179,11 +179,39 @@ async function cmdDoctor() {
 
   ok("build present", existsSync(join(ROOT, ".output", "server", "index.mjs")), ".output/server/index.mjs");
   const libs = join(ROOT, ".output", "server", "_libs");
-  ok(
-    "pglite assets",
-    ["pglite.data", "pglite.wasm", "initdb.wasm"].every((f) => existsSync(join(libs, f))),
-    "the launcher restores these on start",
-  );
+  const installed = join(ROOT, "node_modules", "@electric-sql", "pglite", "dist");
+  const inspect = (path) => {
+    try {
+      const file = statSync(path, { throwIfNoEntry: false });
+      return !file ? "missing" : !file.isFile() ? "not a regular file" : file.size === 0 ? "empty" : "present";
+    } catch (error) {
+      return `unreadable (${error.code ?? "stat failed"})`;
+    }
+  };
+  let haveLoaderDir = false;
+  try { haveLoaderDir = statSync(libs, { throwIfNoEntry: false })?.isDirectory() === true; } catch { /* report below */ }
+  if (!haveLoaderDir) {
+    ok("pglite assets", false, ".output/server/_libs directory is unavailable; the launcher restores files into that existing directory");
+  } else {
+    const restore = [], problems = [];
+    for (const name of ["pglite.data", "pglite.wasm", "initdb.wasm"]) {
+      const state = inspect(join(libs, name));
+      if (state === "present") continue;
+      if (state !== "missing") {
+        // An existing file takes precedence; the launcher will not overwrite it.
+        problems.push(`${name} is ${state} in .output/server/_libs`);
+        continue;
+      }
+      const fallback = inspect(join(installed, name));
+      if (fallback === "present") restore.push(name);
+      else if (fallback === "missing") problems.push(`${name} missing from .output/server/_libs and node_modules/@electric-sql/pglite/dist`);
+      else problems.push(`${name} absent in .output/server/_libs; installed copy is ${fallback}`);
+    }
+    const detail = problems.length ? problems.join("; ")
+      : restore.length ? `${restore.join(", ")} available for launcher restore (requires write access to _libs)`
+      : "already bundled in .output/server/_libs";
+    ok("pglite assets", problems.length === 0, detail);
+  }
 
   let writable = false;
   try {

@@ -238,11 +238,12 @@
   </script>
   <style>
     .expert-card { cursor: pointer; transition: border-color 0.12s, transform 0.12s; }
-    .expert-card:hover, .expert-card:focus-visible { border-color: var(--bz-yellow); transform: translateY(-1px); outline: none; }
+    .expert-card:hover, .expert-card:focus-visible { border-color: var(--bz-yellow); transform: translateY(-1px); }
+    .expert-card:focus-visible { outline: 2px solid var(--bz-yellow); outline-offset: 3px; }
     .expert-icon { font-size: 1.15rem; margin-right: 0.15rem; vertical-align: -0.05em; }
     .view-hint { color: var(--bz-yellow); font-size: 0.78rem; font-weight: 600; margin-top: auto; }
     .back-link { background: none; border: none; color: var(--bz-yellow); cursor: pointer; font-size: 0.9rem; font-weight: 600; padding: 0; margin: 0 0 1rem; }
-    .back-link:hover { text-decoration: underline; }
+    .back-link:hover { background: none; text-decoration: underline; }
     .expert-detail { background: var(--bz-panel); border: 1px solid #2A2A2A; border-top: 3px solid var(--bz-yellow); border-radius: 6px; padding: 1.75rem; max-width: 720px; }
     .expert-detail h1 { margin: 0 0 0.25rem; font-size: 1.5rem; color: var(--bz-yellow); }
     .expert-detail .detail-blurb { color: #C8C8C8; margin: 0 0 1.5rem; max-width: 60ch; }

@@ -446,29 +446,38 @@
       decodePeaks(version.url);
     }
 
+    function paintVersionButton(button, selected) {
+      button.setAttribute("aria-pressed", selected ? "true" : "false");
+      if (selected) button.classList.add("on");
+      else button.classList.remove("on");
+    }
+
     function renderRows() {
       if (!state) return;
       $("title").textContent = state.title || "Studio";
       $("planLine").textContent = state.musicConfigured === false ? "music provider not configured" : "";
 
-      var versions = $("versions");
+      var versions = $("versions"), focused = document.activeElement;
+      var focusedVersion = focused && focused.parentNode === versions ? focused.getAttribute("data-version") : null;
+      var restoreFocus = null;
       versions.innerHTML = "";
       var preview = previewId && (state.versions || []).find(function (v) { return v.id === previewId; });
       if (!preview) previewId = null;
       var showing = preview || state.asset;
       (state.versions || []).slice().reverse().forEach(function (v) {
         var b = document.createElement("button");
-        b.textContent = fmt(0) + " " + v.label + " · " + Math.round(v.bytes / 1024) + " KB";
         b.textContent = v.label + " · " + Math.round(v.bytes / 1024) + " KB";
-        if (showing && showing.id === v.id) b.classList.add("on");
+        b.setAttribute("data-version", v.id);
+        paintVersionButton(b, showing && showing.id === v.id);
+        if (focusedVersion !== null && focusedVersion === String(v.id)) restoreFocus = b;
         b.addEventListener("click", function () {
           previewId = state.asset && state.asset.id === v.id ? null : v.id;
           showVersion(v);
-          Array.prototype.forEach.call(versions.children, function (c) { c.classList.remove("on"); });
-          b.classList.add("on");
+          Array.prototype.forEach.call(versions.children, function (c) { paintVersionButton(c, c === b); });
         });
         versions.appendChild(b);
       });
+      if (restoreFocus && document.activeElement === document.body) restoreFocus.focus({ preventScroll: true });
 
       var log = $("log");
       log.innerHTML = "";

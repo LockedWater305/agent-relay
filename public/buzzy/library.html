@@ -1474,6 +1474,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         document.getElementById("docDlWord").onclick = () => downloadWord(doc.name, doc.md);
         const copyStatus = document.getElementById("docCopyStatus");
         document.getElementById("docCopy").onclick = async () => {
+          if (doc.md === "") {
+            copyStatus.textContent = "This document is empty. Clipboard unchanged.";
+            return;
+          }
           copyStatus.textContent = "";
           try {
             if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {

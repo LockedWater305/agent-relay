@@ -85,6 +85,7 @@ async function fixture(t){
   dispatch(name,props={}){for(const fn of this.handlers[name]||[])fn.call(this,{target:this,preventDefault(){},...props});}
   click(){if(!this.disabled)this.dispatch('click');}
   getAttribute(name){return this[name]??null;}
+  setAttribute(name,value){this[name]=String(value);}
   closest(selector){return selector==='main'?this.owner?.main??null:null;}
   getContext(){return new Proxy({},{get:()=>()=>{}});}
   getBoundingClientRect(){return {left:0,top:0,width:700,height:120};}

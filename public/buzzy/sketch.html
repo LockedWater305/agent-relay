@@ -36,7 +36,7 @@
   /* Marks sit above reference images, but only capture pointers in drawing tools. */
   #stage[data-sketch-tool="select"] #board { pointer-events:none; }
   #layers { position:absolute; inset:0; pointer-events:none; }
-  .img-wrap { position:absolute; pointer-events:auto; cursor:move; border:1px solid transparent; }
+  .img-wrap { position:absolute; pointer-events:auto; cursor:move; touch-action:none; border:1px solid transparent; }
   .img-wrap.selected { border-color: var(--bz-yellow); }
   .img-wrap img { width:100%; height:100%; object-fit:fill; display:block; user-select:none; -webkit-user-drag:none; }
   .img-wrap .handle { position:absolute; right:-6px; bottom:-6px; width:12px; height:12px; background:var(--bz-yellow);
@@ -625,19 +625,25 @@
         wrap.appendChild(img);
         wrap.appendChild(handle);
         wrap.addEventListener("pointerdown", function (e) {
-          if (tool !== "select" || !editable() || !primaryPointer(e) || !wrap.isConnected || images.indexOf(im) < 0) return;
+          if (tool !== "select" || !editable() || drag || !primaryPointer(e) || !wrap.isConnected || images.indexOf(im) < 0) return;
           e.stopPropagation();
           // A visible mark can be selected over a picture. Handles still resize.
           if (e.target !== handle && selectStroke(e)) return;
           selected = im;
-          drag = { image: im, mode: e.target === handle ? "resize" : "move", sx: e.clientX, sy: e.clientY, ox: im.x, oy: im.y, ow: im.w, oh: im.h };
+          drag = { image: im, pointerId: e.pointerId, mode: e.target === handle ? "resize" : "move", sx: e.clientX, sy: e.clientY, ox: im.x, oy: im.y, ow: im.w, oh: im.h };
+          // Wrappers are rebuilt as geometry changes. The stable stage owns
+          // the pointer so a different finger or a removed wrapper cannot end it.
+          if (e.pointerId !== undefined) stage.setPointerCapture(e.pointerId);
           renderImages();
         });
         layers.appendChild(wrap);
       });
     }
+    function ownsImagePointer(e) {
+      return drag && (e.pointerId === undefined || e.pointerId === drag.pointerId);
+    }
     window.addEventListener("pointermove", function (e) {
-      if (!drag || !editable()) return;
+      if (!ownsImagePointer(e) || !editable()) return;
       var im = drag.image;
       if (images.indexOf(im) < 0) return;
       var dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
@@ -659,8 +665,22 @@
       }
       drag = null;
     }
-    window.addEventListener("pointerup", finishImageDrag);
-    window.addEventListener("pointercancel", finishImageDrag);
+    window.addEventListener("pointerup", function (e) {
+      if (ownsImagePointer(e)) finishImageDrag();
+    });
+    function cancelImageDrag(e) {
+      if (!ownsImagePointer(e)) return;
+      var abandoned = drag;
+      drag = null;
+      if (!abandoned.changed || !ownsPage() || images.indexOf(abandoned.image) < 0) return;
+      var im = abandoned.image;
+      im.x = abandoned.ox; im.y = abandoned.oy; im.w = abandoned.ow; im.h = abandoned.oh;
+      renderImages();
+    }
+    window.addEventListener("pointercancel", cancelImageDrag);
+    stage.addEventListener("lostpointercapture", function (e) {
+      if (e.target === stage) cancelImageDrag(e);
+    });
 
     stage.addEventListener("dragover", function (e) { e.preventDefault(); stage.classList.add("drop"); });
     stage.addEventListener("dragleave", function () { stage.classList.remove("drop"); });
