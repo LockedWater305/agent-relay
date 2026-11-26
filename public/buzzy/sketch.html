@@ -375,12 +375,13 @@
     }
 
     // Which mark is under the cursor? Cheap segment distance is enough for selecting.
-    function hitTest(p) {
+    function hitTest(p, shapesOnly) {
       var best = null, bestD = 9;
       // The most recently drawn mark is painted on top. In a distance tie,
       // pick it rather than an otherwise invisible mark underneath.
       strokes.slice().reverse().forEach(function (st) {
         if (st.tool === "text") {
+          if (shapesOnly) return;
           var at = (st.anchor && anchorPoint(st.anchor)) || { x: st.x1, y: st.y1 };
           ctx.save();
           ctx.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif";
@@ -486,6 +487,16 @@
       } else if (s.tool === "text") {
         var at = (s.anchor && anchorPoint(s.anchor)) || { x: s.x1, y: s.y1 };
         c.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif";
+        if (!output && s === selectedStroke) {
+          var noteSize = c.measureText(s.text || "");
+          var ascent = Math.max(10, noteSize.actualBoundingBoxAscent || 0);
+          var descent = Math.max(3, noteSize.actualBoundingBoxDescent || 0);
+          var leftInset = s.anchor ? 10 : 3;
+          c.save();
+          c.fillStyle = "rgba(255,212,13,0.3)";
+          c.fillRect(at.x - leftInset, at.y - ascent - 3, noteSize.width + leftInset + 3, ascent + descent + 6);
+          c.restore();
+        }
         c.fillText(s.text || "", at.x, at.y);
         if (s.anchor) { c.beginPath(); c.arc(at.x - 6, at.y - 4, 2.5, 0, Math.PI * 2); c.fill(); }
       }
@@ -520,12 +531,15 @@
         if (t) {
           snapshot();
           // Clicking a mark anchors the note to it; clicking empty space leaves it free.
-          var hit = hitTest(p);
+          var hit = hitTest(p, true);
+          // Older marks with no unique attachment key can still receive a
+          // nearby free note, but don't imply it was anchored to that mark.
+          var anchor = hit && hit.id && strokes.find(function (st) { return st.id === hit.id; }) === hit ? hit.id : null;
           strokes.push({ id: newId(), tool: "text", color: color, x1: p.x, y1: p.y, text: t,
-                         anchor: hit ? hit.id : null });
+                         anchor: anchor });
           redraw();
           changed();
-          setStatus(hit ? "Note attached to that mark." : "Note added.");
+          setStatus(anchor ? "Note attached to that mark." : "Note added.");
         }
         return;
       }
@@ -546,6 +560,14 @@
     function ownsDraftPointer(e) { return e.pointerId === undefined || e.pointerId === draftPointerId; }
     function finishStroke() {
       if (!draft || !hydrated || !ownsPage()) return;
+      var dx = draft.x2 - draft.x1, dy = draft.y2 - draft.y1;
+      if ((draft.tool === "rect" && (!dx || !dy)) ||
+          ((draft.tool === "line" || draft.tool === "arrow") && !dx && !dy)) {
+        // A tap belongs to Brush, not to the geometry tools. Do not overwrite
+        // the user's undo/redo history with an empty shape.
+        draft = null; draftPointerId = null; redraw();
+        return;
+      }
       snapshot();
       draft.id = newId();
       strokes.push(draft);
@@ -715,13 +737,48 @@
 
     function setStatus(t) { if (ownsPage()) statusEl.textContent = t; }
 
+    // A local download is the board, not a viewport screenshot. Preserve a
+    // drawing even if its browser window was resized after it was saved.
+    function downloadFrame(withImages) {
+      var r = stage.getBoundingClientRect();
+      var area = { left: 0, top: 0, right: Math.ceil(r.width), bottom: Math.ceil(r.height) };
+      function cover(x, y, margin) {
+        area.left = Math.min(area.left, Math.floor(x - margin));
+        area.top = Math.min(area.top, Math.floor(y - margin));
+        area.right = Math.max(area.right, Math.ceil(x + margin));
+        area.bottom = Math.max(area.bottom, Math.ceil(y + margin));
+      }
+      strokes.forEach(function (st) {
+        var rim = (st.width || 3) / 2 + 1;
+        if (st.tool === "pen") {
+          st.points.forEach(function (p) { cover(p.x, p.y, rim); });
+        } else if (st.tool === "text") {
+          var at = (st.anchor && anchorPoint(st.anchor)) || { x: st.x1, y: st.y1 };
+          ctx.save();
+          ctx.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif";
+          var size = ctx.measureText(st.text || "");
+          ctx.restore();
+          cover(at.x - (st.anchor ? 9 : 2), at.y - Math.max(14, size.actualBoundingBoxAscent || 0), 1);
+          cover(at.x + size.width, at.y + Math.max(4, size.actualBoundingBoxDescent || 0), 1);
+        } else {
+          cover(st.x1, st.y1, rim);
+          cover(st.x2, st.y2, st.tool === "arrow" ? Math.max(13, rim) : rim);
+        }
+      });
+      if (withImages) images.forEach(function (im) { cover(im.x, im.y, 0); cover(im.x + im.w, im.y + im.h, 0); });
+      return area;
+    }
+
     // ── flatten the board for the model ───────────────────────────────
-    function flatten(background) {
+    function flatten(background, frame) {
       var r = stage.getBoundingClientRect();
       var out = document.createElement("canvas");
-      var s = Math.min(1, 1280 / Math.max(r.width, 1));
-      out.width = Math.round(r.width * s);
-      out.height = Math.round(r.height * s);
+      var w = frame ? frame.right - frame.left : r.width;
+      var h = frame ? frame.bottom - frame.top : r.height;
+      var left = frame ? frame.left : 0, top = frame ? frame.top : 0;
+      var s = Math.min(1, 1280 / Math.max(w, 1), frame ? 4096 / Math.max(h, 1) : 1);
+      out.width = Math.max(1, Math.round(w * s));
+      out.height = Math.max(1, Math.round(h * s));
       var c = out.getContext("2d");
       c.fillStyle = background || "#ffffff";
       c.fillRect(0, 0, out.width, out.height);
@@ -737,8 +794,8 @@
       });
       return Promise.all(pending).then(function (decoded) {
         // Use board order; load timing must not swap foreground and background.
-        decoded.forEach(function (im) { c.drawImage(im.img, im.x * s, im.y * s, im.w * s, im.h * s); });
-        c.setTransform(s, 0, 0, s, 0, 0);
+        decoded.forEach(function (im) { c.drawImage(im.img, (im.x - left) * s, (im.y - top) * s, im.w * s, im.h * s); });
+        c.setTransform(s, 0, 0, s, -left * s, -top * s);
         // Use the same mark geometry and anchors as the live board, without
         // the editor's selection decoration.
         strokes.forEach(function (st) { drawStroke(st, false, c); });
@@ -782,8 +839,8 @@
     // export is a serialiser, not a re-render. Images stay out on purpose: they are
     // bitmaps, and inlining them would produce a big file that is not scalable anyway.
     function svgText() {
-      var r = stage.getBoundingClientRect();
-      var pad = 2;
+      var frame = downloadFrame(false);
+      var width = frame.right - frame.left + 4, height = frame.bottom - frame.top + 4;
       var parts = [];
       function esc(t) {
         return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -820,10 +877,10 @@
             esc(st.text || "") + "</text>");
         }
       });
-      return '<svg xmlns="http://www.w3.org/2000/svg" width="' + Math.round(r.width + pad * 2) +
-        '" height="' + Math.round(r.height + pad * 2) + '" viewBox="0 0 ' + Math.round(r.width + pad * 2) +
-        " " + Math.round(r.height + pad * 2) + '">' +
-        '<rect width="100%" height="100%" fill="#141414"/>' + parts.join("") + "</svg>";
+      return '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + height +
+        '" viewBox="' + [frame.left, frame.top, width, height].join(" ") + '">' +
+        '<rect x="' + frame.left + '" y="' + frame.top + '" width="' + width + '" height="' + height +
+        '" fill="#141414"/>' + parts.join("") + "</svg>";
     }
 
     $("svg").addEventListener("click", function () {
@@ -838,7 +895,7 @@
     });
 
     $("shot").addEventListener("click", function () {
-      flatten(getComputedStyle(stage).backgroundColor).then(function (url) {
+      flatten(getComputedStyle(stage).backgroundColor, downloadFrame(true)).then(function (url) {
         var a = document.createElement("a");
         a.href = url; a.download = "sketch-" + Date.now() + ".png"; a.click();
       }).catch(function (e) { setStatus("Could not export PNG. " + e.message); });

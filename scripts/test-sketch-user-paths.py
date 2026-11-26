@@ -374,4 +374,52 @@ class Sketch(unittest.TestCase):
         markdown="Before\n\n"+chr(96)*3+"sh\n"+code+"\n"+chr(96)*3+"\n\nAfter"
         result=self.library_doc_download(markdown,"return [body.querySelector('pre code')?.textContent,[...body.querySelectorAll('p')].map(p=>p.textContent)];")
         self.assertEqual(result,[code,["Before","After"]])
+    def test_export_keeps_saved_content_outside_a_smaller_viewport(self):
+        right=dict(LINE,id="right",color="#ff0000",x1=510,x2=610,y1=85,y2=85)
+        left=dict(LINE,id="left",color="#00ff00",x1=-44,x2=12,y1=120,y2=120)
+        image=ref("blue",x=70,y=580,w=115,h=70)
+        p=self.start([right,left],[image]); p.set_viewport_size(dict(width=320,height=580))
+        svg=self.svg(p); left_x,_,svg_w,_=map(float,svg.get("viewBox").split())
+        self.assertLessEqual(left_x,-44)
+        self.assertGreaterEqual(left_x+svg_w,610)
+        from PIL import Image
+        from io import BytesIO
+        raw=self.png(p); image=Image.open(BytesIO(raw)).convert("RGB")
+        self.assertGreaterEqual(image.width,654)
+        self.assertGreaterEqual(image.height,650)
+        colors={color:n for n,color in image.getcolors(image.width*image.height)}
+        self.assertGreater(colors.get((255,0,0),0),50)
+        self.assertGreater(colors.get((0,255,0),0),50)
+        self.assertGreater(colors.get((20,40,220),0),1000)
+    def test_click_without_drag_does_not_save_empty_geometric_marks_or_clear_redo(self):
+        p=self.start([]); p.click('[data-tool="pen"]'); self.hit(p,140,170); self.save(p)
+        stroke=self.board["strokes"]
+        self.assertEqual(len(stroke),1)
+        p.click("#undo"); self.save(p); self.assertEqual(self.board["strokes"],[])
+        for tool in ('line','rect','arrow'):
+            p.click('[data-tool="%s"]'%tool); self.hit(p,140,170)
+        self.save(p); self.assertEqual(self.board["strokes"],[])
+        p.click("#redo"); self.save(p); self.assertEqual(self.board["strokes"],stroke)
+        p.click('[data-tool="rect"]'); self.drag(p,140,170,240,245); self.save(p)
+        self.assertEqual([s["tool"] for s in self.board["strokes"]],["pen","rect"])
+    def test_new_note_anchors_to_shape_behind_existing_text_not_to_the_note(self):
+        older=dict(id="older",tool="text",color="#ff0000",x1=95,y1=53,text="Existing note")
+        p=self.start([LINE.copy(),older]); p.click('[data-tool="text"]')
+        p.once("dialog",lambda d:d.accept("New note"))
+        self.hit(p,105,50); self.save(p)
+        expected=self.board["strokes"][-1]
+        self.assertEqual(expected["anchor"],"road")
+        self.assertEqual(expected["text"],"New note")
+        p.once("dialog",lambda d:d.accept("Free note"))
+        self.hit(p,175,40); self.save(p)
+        self.assertIsNone(self.board["strokes"][-1]["anchor"])
+    def test_selected_text_note_has_visible_feedback_but_png_is_not_decorated(self):
+        note=dict(id="n",tool="text",color="#ffffff",x1=100,y1=100,text="Note selection")
+        p=self.start([note]); original=self.screenshot_pixel(p,98,94)
+        self.hit(p,110,94)
+        selected=self.screenshot_pixel(p,98,94)
+        self.assertNotEqual(selected,original)
+        self.assertEqual(self.pixel(p,self.png(p),98,94)[:3],original)
+        self.hit(p,30,30)
+        self.assertEqual(self.screenshot_pixel(p,98,94),original)
 if __name__=="__main__": unittest.main(verbosity=2)
