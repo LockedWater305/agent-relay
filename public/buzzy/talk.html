@@ -404,6 +404,10 @@
       color: #D8D8D8;
       font-size: 0.9rem;
     }
+    .chat-messages .message-copy, .chat-messages .bubble.streaming {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     .bubble.me {
       background: var(--bz-col);
       border-color: var(--bz-yellow-dim);
@@ -2580,7 +2584,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         return out;
       })(chatState.messages);
       const html = ordered.map((m) => {
-        const cls = m.role === "user" ? "bubble me" : "bubble";
+        const cls = m.role === "user" ? "bubble me message-copy" : "bubble message-copy";
         const escaped = String(m.content).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>");
         var notice = m.onlineLookupSkipped === true
           ? '<div class="bz-what" role="status">Online lookup skipped because Local Only is on.</div>' : "";

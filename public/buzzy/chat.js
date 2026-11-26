@@ -94,7 +94,12 @@
       return b;
     }
 
+    function atLatest() {
+      return log.scrollHeight - log.clientHeight - log.scrollTop <= 3;
+    }
+
     function card(art) {
+      var follow = atLatest();
       var c = el("div", "bzc-card");
       if (art.kind === "image" && art.url) {
         var img = el("img");
@@ -112,7 +117,7 @@
       size.style.fontSize = ".78rem";
       c.appendChild(size);
       log.appendChild(c);
-      log.scrollTop = log.scrollHeight;
+      if (follow) log.scrollTop = log.scrollHeight;
     }
 
     var invalidJob = Object.prototype.hasOwnProperty.call(opts, "jobId") &&
@@ -248,7 +253,12 @@
             var p;
             try { p = JSON.parse(lines.join("\n")); } catch (_) { return; }
             if (!p || typeof p !== "object") return;
-            if (ev === "text") { liveText += p.t || ""; live.textContent = liveText; log.scrollTop = log.scrollHeight; }
+            if (ev === "text") {
+              var follow = atLatest();
+              liveText += p.t || "";
+              live.textContent = liveText;
+              if (follow) log.scrollTop = log.scrollHeight;
+            }
             else if (ev === "stage") { stage.textContent = p.label || p.phase || "Working…"; }
             else if (ev === "tool") { stage.textContent = p.state === "running" ? "Working — " + String(p.name || "a tool").replace(/_/g, " ") + "…" : "Writing the reply…"; }
             else if (ev === "done") finalData = p;
@@ -277,8 +287,10 @@
         // mount and happens only after the entire matching reply has completed.
         jobId = selectedJob || (typeof data.jobId === "string" && data.jobId ? data.jobId : null);
         stage.textContent = Math.round(performance.now() - started) / 1000 + "s";
+        var follow = atLatest();
         if (data.reply) live.textContent = data.reply;
         else if (!liveText) live.textContent = "(no reply)";
+        if (follow) log.scrollTop = log.scrollHeight;
         (data.artifacts || []).forEach(card);
         if (data.audio && data.audio.url) card({ kind: "audio", url: data.audio.url, name: data.audio.name, bytes: data.audio.bytes });
       } catch (e) {
