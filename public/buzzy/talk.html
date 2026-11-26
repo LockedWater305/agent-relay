@@ -7517,12 +7517,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           card.setAttribute("aria-labelledby", title.id);
           card.querySelector(".sc-summary").textContent = s.summary || "No summary yet.";
           card.querySelector(".sc-meta").textContent = mc + (active ? " · Current conversation" : "");
+          const summarize = card.querySelector(".sc-summarize");
+          const summaryHint = document.createElement("span");
+          summaryHint.id = "session-card-summary-hint-" + index;
+          summaryHint.hidden = true;
+          summaryHint.textContent = summarize.title;
+          card.appendChild(summaryHint);
           card.querySelectorAll(".sc-actions button").forEach(function (button) {
-            button.setAttribute("aria-describedby", title.id);
+            button.setAttribute("aria-describedby", title.id + (button === summarize ? " " + summaryHint.id : ""));
           });
           card.querySelector(".sc-open").addEventListener("click", function () { openSession(s); });
           card.querySelector(".sc-rename").addEventListener("click", function () { renameSession(s, card); });
-          card.querySelector(".sc-summarize").addEventListener("click", function () { summarizeSession(s); });
+          summarize.addEventListener("click", function () { summarizeSession(s); });
           list.appendChild(card);
         });
       } catch (e) {
