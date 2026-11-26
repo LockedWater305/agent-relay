@@ -362,9 +362,10 @@
     // A note belongs to a mark, not to a coordinate: "this road is too narrow" must
     // stay attached to the road when the drawing around it moves. Anchor = stroke id;
     // the note's own x1/y1 is only a fallback for marks that no longer exist.
-    function anchorPoint(id) {
+    function anchorPoint(id, marks) {
+      var pool = marks || strokes;
       var st = null;
-      for (var i = 0; i < strokes.length; i++) if (strokes[i].id === id) { st = strokes[i]; break; }
+      for (var i = 0; i < pool.length; i++) if (pool[i].id === id) { st = pool[i]; break; }
       if (!st) return null;
       if (st.tool === "pen" && st.points && st.points.length) {
         var p = st.points[Math.floor(st.points.length / 2)];
@@ -435,7 +436,7 @@
       if (draft) drawStroke(draft, true);
     }
 
-    function drawStroke(s, isDraft, output) {
+    function drawStroke(s, isDraft, output, marks) {
       var c = output || ctx;
       c.strokeStyle = s.color || color;
       c.fillStyle = s.color || color;
@@ -485,7 +486,7 @@
       } else if (s.tool === "rect") {
         c.strokeRect(s.x1, s.y1, s.x2 - s.x1, s.y2 - s.y1);
       } else if (s.tool === "text") {
-        var at = (s.anchor && anchorPoint(s.anchor)) || { x: s.x1, y: s.y1 };
+        var at = (s.anchor && anchorPoint(s.anchor, marks)) || { x: s.x1, y: s.y1 };
         c.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif";
         if (!output && s === selectedStroke) {
           var noteSize = c.measureText(s.text || "");
@@ -739,7 +740,7 @@
 
     // A local download is the board, not a viewport screenshot. Preserve a
     // drawing even if its browser window was resized after it was saved.
-    function downloadFrame(withImages) {
+    function downloadFrame(withImages, marks) {
       var r = stage.getBoundingClientRect();
       var area = { left: 0, top: 0, right: Math.ceil(r.width), bottom: Math.ceil(r.height) };
       function cover(x, y, margin) {
@@ -748,12 +749,12 @@
         area.right = Math.max(area.right, Math.ceil(x + margin));
         area.bottom = Math.max(area.bottom, Math.ceil(y + margin));
       }
-      strokes.forEach(function (st) {
+      (marks || strokes).forEach(function (st) {
         var rim = (st.width || 3) / 2 + 1;
         if (st.tool === "pen") {
           st.points.forEach(function (p) { cover(p.x, p.y, rim); });
         } else if (st.tool === "text") {
-          var at = (st.anchor && anchorPoint(st.anchor)) || { x: st.x1, y: st.y1 };
+          var at = (st.anchor && anchorPoint(st.anchor, marks)) || { x: st.x1, y: st.y1 };
           ctx.save();
           ctx.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif";
           var size = ctx.measureText(st.text || "");
@@ -770,7 +771,7 @@
     }
 
     // ── flatten the board for the model ───────────────────────────────
-    function flatten(background, frame) {
+    function flatten(background, frame, marks) {
       var r = stage.getBoundingClientRect();
       var out = document.createElement("canvas");
       var w = frame ? frame.right - frame.left : r.width;
@@ -798,7 +799,7 @@
         c.setTransform(s, 0, 0, s, -left * s, -top * s);
         // Use the same mark geometry and anchors as the live board, without
         // the editor's selection decoration.
-        strokes.forEach(function (st) { drawStroke(st, false, c); });
+        (marks || strokes).forEach(function (st) { drawStroke(st, false, c, marks); });
         return out.toDataURL("image/png");
       });
     }
@@ -895,7 +896,11 @@
     });
 
     $("shot").addEventListener("click", function () {
-      flatten(getComputedStyle(stage).backgroundColor, downloadFrame(true)).then(function (url) {
+      // Reference images decode asynchronously. Keep the local download's ink
+      // and note anchors at the click, not later edits to the live board.
+      // Committed pen points never mutate; the record holds mutable note anchors.
+      var marks = strokes.map(function (st) { return Object.assign({}, st, { color: st.color || color }); });
+      flatten(getComputedStyle(stage).backgroundColor, downloadFrame(true, marks), marks).then(function (url) {
         var a = document.createElement("a");
         a.href = url; a.download = "sketch-" + Date.now() + ".png"; a.click();
       }).catch(function (e) { setStatus("Could not export PNG. " + e.message); });

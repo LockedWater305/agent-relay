@@ -422,4 +422,27 @@ class Sketch(unittest.TestCase):
         self.assertEqual(self.pixel(p,self.png(p),98,94)[:3],original)
         self.hit(p,30,30)
         self.assertEqual(self.screenshot_pixel(p,98,94),original)
+    def test_png_uses_the_board_at_click_even_if_live_marks_change_while_a_reference_loads(self):
+        note=dict(id="note",tool="text",color="#ff0000",x1=31,y1=50,text="Bridge",anchor="road")
+        p=self.start([LINE.copy(),note],[ref("blue")])
+        p.wait_for_function("document.querySelector('#layers img').naturalWidth===8")
+        delayed=[]
+        p.route("**/assets/blue.png",lambda request:delayed.append(request))
+        with p.expect_download() as dl:
+            p.click("#shot")
+            p.wait_for_timeout(40)
+            self.assertEqual(len(delayed),1,"Export is waiting for the existing reference to decode")
+            self.hit(p,100,50); p.keyboard.press("Delete")
+            p.click('[data-tool="line"]'); self.drag(p,330,200,423,200)
+            delayed[0].fulfill(body=BLUE,content_type="image/png")
+        saved_png=dl.value.path().read_bytes()
+        self.assertEqual(self.pixel(p,saved_png,100,50),[255,255,0,255])
+        self.assertEqual(self.pixel(p,saved_png,375,200),[20,20,20,255])
+        from PIL import Image
+        from io import BytesIO
+        image=Image.open(BytesIO(saved_png)).convert("RGB")
+        anchored=image.crop((115,20,180,40))
+        self.assertGreater(sum(n for n,color in anchored.getcolors(1300) if color[0]>180 and color[1]<80 and color[2]<80),10)
+        self.save(p); self.assertEqual([s["tool"] for s in self.board["strokes"]],["text","line"])
+        self.assertIsNone(self.board["strokes"][0]["anchor"])
 if __name__=="__main__": unittest.main(verbosity=2)
