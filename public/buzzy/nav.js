@@ -568,22 +568,53 @@
       .catch(function () { /* keep whatever we painted */ });
   }
 
+  var activeAsk = null, askScript = null;
+
+  function askPage() {
+    // Embedded chat already scopes its mount to this path/query. The shared
+    // header can persist longer than that page, so its Ask view must not.
+    return location.pathname.replace(/\.html$/, "") + location.search;
+  }
+  function showAskOn(chrome) {
+    var key = askPage();
+    if (activeAsk && activeAsk.chrome === chrome && activeAsk.key === key &&
+        activeAsk.button.isConnected) return;
+    if (activeAsk) activeAsk.destroy();
+    askControl(chrome);
+  }
+  function loadAskScript() {
+    if (askScript) return askScript;
+    askScript = new Promise(function (resolve) {
+      var s = document.createElement("script");
+      s.src = "/buzzy/chat.js";
+      s.onload = function () { resolve(window.BeeZillaChat); };
+      s.onerror = function () { s.remove(); resolve(null); };
+      document.head.appendChild(s);
+    }).then(function (api) {
+      if (!api) askScript = null;
+      return api;
+    });
+    return askScript;
+  }
+
   /** Ask: the chat, on every page, in a panel anchored to the nav. */
   function askControl(nav) {
+    var key = askPage();
     var btn = document.createElement("button");
     btn.className = "bz-ask";
     btn.type = "button";
-    btn.setAttribute("aria-expanded", "false");
-    btn.setAttribute("aria-controls", "bzPanel");
     btn.innerHTML = "&#128172; Ask";
     nav.appendChild(btn);
 
     // On Talk the chat is the page. Opening a second chat engine in a panel over it
     // would be two composers and two sessions on one screen, so the nav control
     // takes you to the one that exists.
+    var view = activeAsk = { chrome: nav, key: key, button: btn, destroy: function () { btn.remove(); } };
+    function onPage() { return btn.isConnected && askPage() === key; }
     if (section() === "talk") {
       btn.title = "Talk to BeeZilla";
       btn.addEventListener("click", function () {
+        if (!onPage()) return;
         var input = document.getElementById("chatInput");
         if (input) {
           input.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -594,6 +625,8 @@
     }
 
     var panel = document.createElement("div");
+    btn.setAttribute("aria-expanded", "false");
+    btn.setAttribute("aria-controls", "bzPanel");
     panel.id = "bzPanel";
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-label", "Ask BeeZilla");
@@ -614,25 +647,16 @@
     panel.appendChild(body);
     document.body.appendChild(panel);
 
-    var mounted = false;
-    function mountChat() {
-      if (mounted) return;
-      mounted = true;
-      var boot = function () {
-        if (!window.BeeZillaChat) return;
-        window.BeeZillaChat.mount(body, { title: "BeeZilla", placeholder: "Ask anything — or say what to make" });
-      };
-      if (window.BeeZillaChat) return boot();
-      var s = document.createElement("script");
-      s.src = "/buzzy/chat.js";
-      s.onload = boot;
-      document.head.appendChild(s);
+    var chat = null;
+    function mountChat(api) {
+      if (!api || chat || !onPage() || !panel.isConnected || !panel.classList.contains("open")) return;
+      chat = api.mount(body, { title: "BeeZilla", placeholder: "Ask anything — or say what to make" });
     }
-
     function open() {
       panel.classList.add("open");
       btn.setAttribute("aria-expanded", "true");
-      mountChat();
+      if (window.BeeZillaChat) mountChat(window.BeeZillaChat);
+      else loadAskScript().then(mountChat);
       var input = body.querySelector(".bzc-in");
       if (input) input.focus();
     }
@@ -640,14 +664,22 @@
       panel.classList.remove("open");
       btn.setAttribute("aria-expanded", "false");
     }
+    function escape(e) {
+      if (e.key === "Escape" && panel.classList.contains("open")) shut();
+    }
     btn.addEventListener("click", function () {
+      if (!onPage()) return;
       if (panel.classList.contains("open")) shut();
       else open();
     });
     close.addEventListener("click", shut);
-    document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape" && panel.classList.contains("open")) shut();
-    });
+    document.addEventListener("keydown", escape);
+    view.destroy = function () {
+      document.removeEventListener("keydown", escape);
+      btn.remove();
+      if (chat && typeof chat.destroy === "function") chat.destroy();
+      panel.remove();
+    };
   }
 
   function loadCompanies() {
@@ -680,15 +712,10 @@
 
   function boot() {
     style();
-    // The Ask panel lives outside the page wrapper, so a soft navigation would
-    // otherwise leave the previous page's panel in the document with the same id
-    // and a dead mount. One panel at a time.
-    Array.prototype.forEach.call(document.querySelectorAll("#bzPanel"), function (n) {
-      var page = document.getElementById("bzPage");
-      if (!page || !page.contains(n)) n.remove();
-    });
     var nav = ensureNav();
-    if (document.getElementById("bzChrome")) {
+    var mountedChrome = document.getElementById("bzChrome");
+    if (mountedChrome) {
+      showAskOn(mountedChrome);
       // Re-derive the body-padding bleed for the page that is active NOW.
       applyBleed();
       revealActiveLink(nav);
@@ -774,7 +801,7 @@
     voiceDock(chrome);
     companyControl(chrome);
     accountControl(chrome);
-    askControl(chrome);
+    showAskOn(chrome);
   }
 
   /**
