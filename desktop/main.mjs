@@ -512,7 +512,7 @@ function installMenu() {
           {
             label: "Settings…",
             accelerator: "CmdOrCtrl+,",
-            click: () => void openSettings(),
+            click: requestSettingsWindow,
           },
           {
             label: "Connect BeeZilla account…",
@@ -551,7 +551,7 @@ function installMenu() {
  * It shares the default session, so the auth header injected for `base` already
  * applies and the page can reach the preload bridge.
  */
-function settingsWindowFor(url) {
+function createSettingsWindow() {
   if (acquireLibraryTransition.held()) return null;
   settingsWindow = new BrowserWindow({
     width: 760,
@@ -579,8 +579,6 @@ function settingsWindowFor(url) {
   settingsWindow.webContents.on("console-message", ({ message }) =>
     console.log(`[settings] ${message}`),
   );
-  void settingsWindow.loadURL(url);
-  console.log(`[desktop] settings window opened ${url}`);
   return settingsWindow;
 }
 
@@ -699,6 +697,20 @@ async function performConnect() {
   return { ...outcome, ...(restartFailure ? { ok: false, error: `Account credentials were saved, but BeeZilla did not restart. ${restartFailure} Retry from Settings without force-quitting.` } : {}), token: undefined, search: { ...outcome.search, ...(saved.searchError ? { ok: false, error: saved.searchError } : {}), token: undefined, saved: searchSaved }, savedTo: saved.saved?.key };
 }
 
+function requestSettingsWindow() {
+  // Menu and onboarding trigger this without awaiting it. Report an ordinary
+  // Settings failure here instead of losing it to the global rejection logger.
+  void openSettings().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[desktop] could not open settings:", error instanceof Error ? error.stack || message : message);
+    const { file } = logPaths();
+    dialog.showErrorBox(
+      "BeeZilla could not open Settings",
+      `${message}\n\nIf a blank Settings window opened, close it before trying again.\n\nLog file:\n${file ?? "(logging unavailable)"}`,
+    );
+  });
+}
+
 async function openSettings() {
   if (acquireLibraryTransition.held()) return;
   if (settingsWindow) {
@@ -712,7 +724,15 @@ async function openSettings() {
     if (acquireLibraryTransition.held()) return;
     bindRuntime(rt, true);
   }
-  settingsWindowFor(`${runtimeBase}/buzzy/settings`);
+  const win = createSettingsWindow();
+  if (!win) return;
+  const url = `${runtimeBase}/buzzy/settings`;
+  try { await win.loadURL(url); }
+  catch (error) {
+    if (settingsWindow !== win || win.isDestroyed()) return; // Normal close while loading.
+    throw error;
+  }
+  if (settingsWindow === win && !win.isDestroyed()) console.log(`[desktop] settings window opened ${url}`);
 }
 
 async function createWindow() {
@@ -852,7 +872,7 @@ async function createWindow() {
   // that makes it usable instead of handing a new user a dead window.
   if (!quiet && !process.env.BZ_CHAT_KEY) {
     console.log("[desktop] onboarding: no inference configured — opening Settings");
-    void openSettings();
+    requestSettingsWindow();
   }
   if (!quiet && process.env.BZ_FIRSTRUN_TEST) {
     // Bounded test launch: a configured install has nothing to prove and no other
