@@ -185,12 +185,20 @@
           box.innerHTML = '<p class="empty-note">No file behind this project yet. A project is only ready when it holds a deliverable.</p>';
         } else {
           box.innerHTML = data.deliverables.map(function (d) {
-            var media = d.type && String(d.type).indexOf("audio/") === 0
-              ? '<audio controls preload="none" src="' + esc(d.url) + '"></audio>'
+            // Saved document records carry filename/contentType, whereas asset
+            // cards carry name/type/url. Do not invent a URL for a saved original.
+            var name = d.name || d.filename || d.kind || "Project file";
+            var type = d.type || d.contentType || "";
+            var url = typeof d.url === "string" ? d.url.trim() : "";
+            var media = url && String(type).indexOf("audio/") === 0
+              ? '<audio controls preload="none" aria-label="' + esc(name) + '" src="' + esc(url) + '"></audio>'
               : "";
-            return '<div class="card"><h3>' + esc(d.name || d.kind) + "</h3>" +
-              '<div class="sub">' + [esc(d.kind), esc(d.type), sizeLabel(d.bytes)].filter(Boolean).join(" · ") + "</div>" +
-              media + '<a class="dl" href="' + esc(d.url) + '" download>Download</a></div>';
+            var access = url
+              ? '<a class="dl" href="' + esc(url) + '" aria-label="' + esc("Download " + name) + '" download>Download</a>'
+              : '<p class="empty-note">No download link on this card. Check the project conversation for the original.</p>';
+            return '<div class="card"><h3>' + esc(name) + "</h3>" +
+              '<div class="sub">' + [esc(d.kind), esc(type), sizeLabel(d.bytes)].filter(Boolean).join(" · ") + "</div>" +
+              media + access + '</div>';
           }).join("");
         }
 
