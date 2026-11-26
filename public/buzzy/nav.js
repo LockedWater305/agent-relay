@@ -652,17 +652,29 @@
       if (!api || chat || !onPage() || !panel.isConnected || !panel.classList.contains("open")) return;
       chat = api.mount(body, { title: "BeeZilla", placeholder: "Ask anything — or say what to make" });
     }
-    function open() {
-      panel.classList.add("open");
-      btn.setAttribute("aria-expanded", "true");
-      if (window.BeeZillaChat) mountChat(window.BeeZillaChat);
-      else loadAskScript().then(mountChat);
+    function focusInput() {
       var input = body.querySelector(".bzc-in");
       if (input) input.focus();
     }
+    function open() {
+      panel.classList.add("open");
+      btn.setAttribute("aria-expanded", "true");
+      if (window.BeeZillaChat) {
+        mountChat(window.BeeZillaChat);
+        focusInput();
+      } else {
+        loadAskScript().then(function (api) {
+          mountChat(api);
+          // Do not pull focus back if the reader moved on during the download.
+          if (onPage() && panel.classList.contains("open") && document.activeElement === btn) focusInput();
+        });
+      }
+    }
     function shut() {
+      var returnFocus = panel.contains(document.activeElement);
       panel.classList.remove("open");
       btn.setAttribute("aria-expanded", "false");
+      if (returnFocus && onPage()) btn.focus({ preventScroll: true });
     }
     function escape(e) {
       if (e.key === "Escape" && panel.classList.contains("open")) shut();
