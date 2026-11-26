@@ -533,4 +533,34 @@ class Sketch(unittest.TestCase):
         self.assertEqual(self.board["strokes"],before)
         p.keyboard.press("Control+z"); self.save(p)
         self.assertEqual(self.board["strokes"],before[:1])
+    def test_pending_autosave_does_not_persist_a_reference_move_still_in_progress(self):
+        image,p,point,send,x=self.touch_image_setup()
+        p.click('[data-tool="line"]'); self.drag(p,360,170,470,170)
+        p.click('[data-tool="select"]')
+        send("touchStart",point(1,100,110)); send("touchMove",point(1,143,110))
+        self.assertAlmostEqual(x(),image["x"]+43,delta=1)
+        with p.expect_response(lambda r:r.url.endswith("/api/buzzy/art") and r.request.method=="POST") as saved:
+            p.wait_for_timeout(1300)
+        outbound=saved.value.request.post_data_json["board"]
+        send("touchCancel")
+        self.assertEqual([s["tool"] for s in outbound["strokes"]],["line"])
+        self.assertEqual(outbound["images"],[image])
+        self.assertAlmostEqual(x(),image["x"],delta=1)
+        p.reload(); p.wait_for_function("document.querySelector('#status').textContent.startsWith('Board loaded')")
+        self.assertAlmostEqual(x(),image["x"],delta=1)
+    def test_line_ends_where_the_pointer_releases_even_without_a_final_move_event(self):
+        p=self.start([]); p.click('[data-tool="line"]')
+        box=p.locator("#board").bounding_box()
+        c=p.context.new_cdp_session(p)
+        def mouse(kind,x,y,**kwargs):
+            c.send("Input.dispatchMouseEvent",dict(type=kind,x=box["x"]+x,y=box["y"]+y,**kwargs))
+        mouse("mouseMoved",100,150,buttons=0)
+        mouse("mousePressed",100,150,button="left",buttons=1,clickCount=1)
+        mouse("mouseMoved",138,166,buttons=1)
+        mouse("mouseReleased",242,234,button="left",buttons=0,clickCount=1)
+        self.save(p)
+        self.assertEqual(len(self.board["strokes"]),1)
+        line=self.board["strokes"][0]
+        self.assertAlmostEqual(line["x2"],242,delta=1)
+        self.assertAlmostEqual(line["y2"],234,delta=1)
 if __name__=="__main__": unittest.main(verbosity=2)

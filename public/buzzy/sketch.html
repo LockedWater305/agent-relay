@@ -556,11 +556,15 @@
         : { tool: tool, color: color, width: 3, x1: p.x, y1: p.y, x2: p.x, y2: p.y };
       redraw();
     });
+    function sampleDraft(p) {
+      if (draft.tool === "pen") {
+        var last = draft.points[draft.points.length - 1];
+        if (last.x !== p.x || last.y !== p.y) draft.points.push(p);
+      } else { draft.x2 = p.x; draft.y2 = p.y; }
+    }
     canvas.addEventListener("pointermove", function (e) {
       if (!draft || !editable() || !ownsDraftPointer(e)) return;
-      var p = pt(e);
-      if (draft.tool === "pen") draft.points.push(p);
-      else { draft.x2 = p.x; draft.y2 = p.y; }
+      sampleDraft(pt(e));
       redraw();
     });
     function ownsDraftPointer(e) { return e.pointerId === undefined || e.pointerId === draftPointerId; }
@@ -582,7 +586,12 @@
       changed();
       setStatus(strokes.length + " marks on the board");
     }
-    canvas.addEventListener("pointerup", function (e) { if (ownsDraftPointer(e)) finishStroke(); });
+    canvas.addEventListener("pointerup", function (e) {
+      if (!draft || !ownsDraftPointer(e)) return;
+      // A release can arrive after the last delivered move at a new position.
+      if (Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) sampleDraft(pt(e));
+      finishStroke();
+    });
     function discardDraft() {
       draft = null; draftPointerId = null;
       redraw();
@@ -659,14 +668,17 @@
       drag.changed = true;
       renderImages();
     });
+    function imageBeforeDrag(im) {
+      if (!drag || im !== drag.image) return im;
+      return Object.assign({}, im, { x: drag.ox, y: drag.oy, w: drag.ow, h: drag.oh });
+    }
     function finishImageDrag() {
       if (drag && drag.changed && images.indexOf(drag.image) >= 0 && hydrated && ownsPage()) {
         var active = drag.image;
         if (active.x !== drag.ox || active.y !== drag.oy || active.w !== drag.ow || active.h !== drag.oh) {
-          var origin = { x: drag.ox, y: drag.oy, w: drag.ow, h: drag.oh };
           // An entire gesture is one undo step. Preserve any other edits made
           // while the pointer was held (for example, a newly decoded image).
-          pushSnapshot(serializeSnapshot(images.map(function (im) { return im === active ? Object.assign({}, im, origin) : im; })));
+          pushSnapshot(serializeSnapshot(images.map(imageBeforeDrag)));
           changed();
         }
       }
@@ -850,7 +862,9 @@
       // Images are data-only records, just like strokes. Retain their existing
       // IDs/metadata exactly; legacy absent or duplicate IDs are not rewritten.
       // Live selection/drag use the entry itself, never first-match ID lookup.
-      return { version: 1, strokes: strokes, images: images };
+      // A pending autosave for another edit must not commit an image preview
+      // that is still under the user's pointer and might be canceled.
+      return { version: 1, strokes: strokes, images: drag && drag.changed ? images.map(imageBeforeDrag) : images };
     }
 
     $("save").addEventListener("click", function () {

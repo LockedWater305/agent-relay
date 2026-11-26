@@ -10,12 +10,20 @@ import {
 
 export function HelpPanel({ onClose }: { onClose: () => void }) {
   const [copied, setCopied] = useState<string | null>(null);
+  const [copyFailed, setCopyFailed] = useState(false);
   const base =
     typeof window !== "undefined" ? window.location.origin : DEFAULT_PUBLIC_BASE;
   const md = useMemo(() => clientAgentGuideMarkdown(base), [base]);
 
   const copy = async (id: string, text: string) => {
-    await navigator.clipboard.writeText(text);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      setCopied(null);
+      setCopyFailed(true);
+      return;
+    }
+    setCopyFailed(false);
     setCopied(id);
     toast.success("Copied");
     setTimeout(() => setCopied(null), 1500);
@@ -72,6 +80,11 @@ export function HelpPanel({ onClose }: { onClose: () => void }) {
               Copy full guide
             </Button>
           </div>
+          {copyFailed && (
+            <p role="status" className="text-xs text-fg-muted">
+              Could not copy automatically. Select the guide text and copy it manually.
+            </p>
+          )}
           <p className="text-[11px] text-fg-subtle">
             Base for this site:{" "}
             <code className="text-fg-muted">{base}</code>

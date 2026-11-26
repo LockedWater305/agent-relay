@@ -5760,6 +5760,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       invalidateDraftApproval();
       chatState.draftReady = false;
       chatState.draftText = "";
+      // A new review can only restore a version from that review.
+      chatState.previousDraft = null;
+      var restore = document.getElementById("restorePrevious");
+      if (restore) restore.classList.add("hidden");
       chatState.draftVersion = 1;
       chatState.approvedText = null;
       chatState.outwardConfirmed = false;

@@ -18,7 +18,7 @@
  * so a fresh install works from the first command with no ceremony.
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, rmdirSync, writeFileSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -237,14 +237,30 @@ async function cmdDoctor() {
   }
 
   let writable = false;
+  let probe, probeFile, cleanupHint = "";
   try {
     mkdirSync(DATA, { recursive: true });
-    writeFileSync(join(DATA, ".doctor"), "ok");
-    writable = statSync(join(DATA, ".doctor")).size > 0;
+    // A named file in the user's data tree might already belong to them.
+    probe = mkdtempSync(join(DATA, ".doctor-"));
+    const candidate = join(probe, "write");
+    const fd = openSync(candidate, "wx");
+    probeFile = candidate; // Clean only a file this process actually created.
+    try { writeFileSync(fd, "ok"); }
+    finally { closeSync(fd); }
+    writable = statSync(probeFile).size > 0;
   } catch {
     writable = false;
+  } finally {
+    if (probe) {
+      try {
+        if (probeFile) rmSync(probeFile, { force: true });
+        rmdirSync(probe); // Never recursively remove other files.
+      } catch {
+        cleanupHint = ` (could not remove temporary probe: ${probe})`;
+      }
+    }
   }
-  ok("data dir writable", writable, DATA);
+  ok("data dir writable", writable, DATA + cleanupHint);
 
   const inference = resolveInference(DATA);
   ok(
