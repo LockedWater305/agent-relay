@@ -34,7 +34,7 @@ class SettingsPresentation(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.browser.close(); cls.pw.stop(); cls.server.shutdown(); cls.server.server_close(); cls.thread.join()
-    def start(self,responses=(),*,logs=None,width=1000):
+    def start(self,responses=(),*,logs=None,width=1000,copy=None):
         p=self.browser.new_page(viewport=dict(width=width,height=820))
         self.addCleanup(p.context.close)
         p.set_default_timeout(3000)
@@ -42,7 +42,7 @@ class SettingsPresentation(unittest.TestCase):
         p.route("**/*",lambda r:r.continue_() if r.request.url.startswith(origin+"/") else r.abort())
         if responses or logs is not None:
             p.add_init_script("""(() => {
-              const results = %s, logs = %s;
+              const results = %s, logs = %s, copy = %s;
               window.readCount=0; window.logReadCount=0;
               const unexpected=()=>{throw Error("A protected operation is forbidden in this read-only test");};
               window.beezilla={settings:{
@@ -58,8 +58,22 @@ class SettingsPresentation(unittest.TestCase):
                   if(logs==="fail") throw Error("Read unavailable");
                   return {ok:true,data:{file:logs}};
                 }, openLogs:unexpected};
+                if(copy) {
+                  window.copyAttempts=0; window.copiedDiagnostics=null; window.diagnosticLogs=[];
+                  window.beezilla.app.version=()=>{
+                    if(copy.version==="throws") throw Error("Version bridge unavailable");
+                    if(copy.version==="incomplete") return Promise.resolve({ok:true});
+                    return Promise.resolve({ok:true,data:{version:"0.0-fixture"}});
+                  };
+                  window.beezilla.app.log=async message=>{window.diagnosticLogs.push(message);};
+                  Object.defineProperty(navigator,"clipboard",{value:{writeText:async block=>{
+                    window.copyAttempts++;
+                    if(copy.blocked) throw Error("Clipboard blocked in fixture");
+                    window.copiedDiagnostics=block;
+                  }}});
+                }
               }
-            })();"""%(json.dumps(responses),json.dumps(logs)))
+            })();"""%(json.dumps(responses),json.dumps(logs),json.dumps(copy)))
         p.goto(origin+"/buzzy/settings")
         return p
     def test_failed_settings_read_has_live_status_for_assistive_technology(self):
@@ -96,5 +110,24 @@ class SettingsPresentation(unittest.TestCase):
         p.locator("#open-logs").wait_for(); self.assertEqual(p.evaluate("window.logReadCount"),1)
         self.assertIn("Could not read the log file path.",p.locator("#logs-path").inner_text())
         self.assertTrue(p.locator("#open-logs").is_enabled())
+
+    def test_copy_diagnostics_still_works_when_version_read_throws_or_is_incomplete(self):
+        for version in ("throws","incomplete"):
+            with self.subTest(version=version):
+                p=self.start([SETTINGS],logs=LOG,copy={"version":version})
+                p.locator("#mic-copy").click()
+                p.locator("#mic-copy-status").get_by_text("Copied.",exact=True).wait_for()
+                self.assertEqual(p.evaluate("window.copyAttempts"),1)
+                self.assertTrue(p.evaluate("window.copiedDiagnostics").startswith("BeeZilla ?\n"))
+    def test_copy_diagnostics_failure_does_not_log_a_success(self):
+        p=self.start([SETTINGS],logs=LOG,copy={"version":"valid","blocked":True})
+        p.locator("#mic-copy").click()
+        p.locator("#mic-copy-status").get_by_text("Copy blocked",exact=False).wait_for()
+        self.assertEqual(p.evaluate("window.copyAttempts"),1)
+        self.assertIsNone(p.evaluate("window.copiedDiagnostics"))
+        self.assertTrue(p.locator("#mic-result").text_content().startswith("BeeZilla 0.0-fixture\n"))
+        logs=p.evaluate("window.diagnosticLogs")
+        self.assertTrue(any("diagnostics copy blocked" in line for line in logs),logs)
+        self.assertFalse(any("diagnostics copied" in line for line in logs),logs)
 
 if __name__=="__main__": unittest.main(verbosity=2)

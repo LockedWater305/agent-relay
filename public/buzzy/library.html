@@ -1428,13 +1428,28 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         const doc = docs.find((d) => docRef(d) === docsOpenDoc);
         const job = catalog.jobs.find((x) => x.id === docsOpenFolder);
         if (!doc) { docsOpenDoc = null; return goDocs(); }
+        const backLabel = "← " + (job ? jobTitle(job) : docsOpenFolder);
+        const updated = doc.updatedAt || doc.createdAt;
+        const previous = document.getElementById("docPreview")?.bzPreviewRecord;
+        // Passive catalog/sync updates can change the folder's label without
+        // changing this file. Keep the actual reader node so browser focus,
+        // selection and scroll position survive a harmless metadata refresh.
+        if (previous && previous.folder === docsOpenFolder && previous.ref === docsOpenDoc &&
+            previous.name === doc.name && previous.md === doc.md && previous.updated === updated) {
+          document.getElementById("docsBackList").textContent = backLabel;
+          paintLibrarySync();
+          return;
+        }
         app.innerHTML =
-          "<div class='docs-back'><button id='docsBackList' class='secondary'>← " + escHtml(job ? jobTitle(job) : docsOpenFolder) + "</button></div>" +
+          "<div class='docs-back'><button id='docsBackList' class='secondary'>" + escHtml(backLabel) + "</button></div>" +
           "<h1 id='docHeading' tabindex='-1'>" + escHtml(doc.name) + "</h1>" +
-          "<p class='muted'>Updated " + new Date(doc.updatedAt || doc.createdAt).toLocaleString() + "</p>" +
+          "<p class='muted'>Updated " + new Date(updated).toLocaleString() + "</p>" +
           "<div class='row'><button id='docDl'>Download .md</button><button id='docDlWord' class='secondary'>Download Word</button><button id='docDlPdf' class='secondary'>Download PDF</button><button id='docCopy' class='secondary'>Copy text</button></div>" +
           "<p id='docCopyStatus' class='muted' role='status'></p>" +
-          "<div class='docviewer'>" + escHtml(doc.md) + "</div>" + syncMarkup;
+          "<div class='docviewer' id='docPreview'>" + escHtml(doc.md) + "</div>" + syncMarkup;
+        document.getElementById("docPreview").bzPreviewRecord = {
+          folder: docsOpenFolder, ref: docsOpenDoc, name: doc.name, md: doc.md, updated,
+        };
         paintLibrarySync();
         document.getElementById("docsBackList").onclick = () => {
           const opened = docsOpenDoc;

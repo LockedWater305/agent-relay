@@ -290,7 +290,7 @@ class Sketch(unittest.TestCase):
         self.assertLessEqual(field["x"]+field["width"],panel["x"]+panel["width"])
         with p.expect_download(timeout=1500) as dl: p.locator("#resultLink").click(timeout=1200)
         self.assertEqual(dl.value.path().read_bytes(),BLUE)
-    def start_library(self,mode="ok", content="Fixture text.", *, name="First doc.md", grid=False, shelf=None):
+    def start_library(self,mode="ok", content="Fixture text.", *, name="First doc.md", grid=False, shelf=None, hold_catalog=None):
         if LIBRARY is None: self.skipTest("Supply --library path to exercise document previews")
         p=self.browser.new_page(viewport=dict(width=735,height=670))
         self.addCleanup(p.context.close)
@@ -298,6 +298,8 @@ class Sketch(unittest.TestCase):
         docs=dict(fixture=[dict(name=name,md=content,createdAt=1),dict(name="Other doc.md",md="Other content.",createdAt=1)])
         p.add_init_script("localStorage.setItem('bz_docs_v1',"+json.dumps(json.dumps(docs))+");")
         p.add_init_script("""const mode=%s; Object.defineProperty(navigator,'clipboard',{value:mode==='unavailable'?undefined:{writeText:async function(value){if(mode==='denied') throw new Error('Test clipboard unavailable'); window.testClipboard=value;}}});"""%json.dumps(mode))
+        if hold_catalog is not None:
+            p.route("**/api/buzzy/jobs",lambda route:hold_catalog.append(route))
         p.goto("http://127.0.0.1:%d/buzzy/library"%self.server.server_port + ("" if grid else "?job=fixture"))
         p.locator("[data-folder='fixture']" if grid else "[data-open='%s']"%name).wait_for()
         return p
@@ -445,4 +447,31 @@ class Sketch(unittest.TestCase):
         self.assertGreater(sum(n for n,color in anchored.getcolors(1300) if color[0]>180 and color[1]<80 and color[2]<80),10)
         self.save(p); self.assertEqual([s["tool"] for s in self.board["strokes"]],["text","line"])
         self.assertIsNone(self.board["strokes"][0]["anchor"])
+    def test_background_catalog_read_does_not_interrupt_an_open_document(self):
+        pending=[]
+        body="\n".join("Saved line "+str(i) for i in range(240))
+        p=self.start_library(content=body,hold_catalog=pending)
+        self.open_document(p)
+        p.locator("#docCopy").focus()
+        p.evaluate("""() => {
+            const preview=document.querySelector('.docviewer');
+            preview.scrollTop=390;
+            const range=document.createRange();
+            range.setStart(preview.firstChild,0); range.setEnd(preview.firstChild,12);
+            window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+        }""")
+        self.assertEqual(p.evaluate("document.activeElement.id"),"docCopy")
+        self.assertEqual(p.evaluate("getSelection().toString()"),"Saved line 0")
+        self.assertEqual(p.locator(".docviewer").evaluate("el=>el.scrollTop"),390)
+        self.assertEqual(len(pending),1)
+        pending[0].fulfill(json=dict(jobs=[dict(id="fixture",title="Loaded job title")]))
+        p.locator("#docsBackList").get_by_text("Loaded job title",exact=False).wait_for()
+        self.assertEqual(p.locator(".docviewer").evaluate("el=>el.scrollTop"),390)
+        self.assertEqual(p.evaluate("document.activeElement.id"),"docCopy")
+        self.assertEqual(p.evaluate("getSelection().toString()"),"Saved line 0")
+        with p.expect_download() as dl: p.click("#docDl")
+        self.assertEqual(dl.value.path().read_bytes(),body.encode())
+        p.click("#docsBackList"); self.assertEqual(p.evaluate("document.activeElement.getAttribute('data-open')"),"First doc.md")
+        self.open_document(p,"Other doc.md")
+        self.assertEqual(p.locator(".docviewer").inner_text(),"Other content.")
 if __name__=="__main__": unittest.main(verbosity=2)

@@ -806,7 +806,9 @@
     /* ── Edit icon ──────────────────────────────────────────── */
     .slot-edit-icon {
       cursor: pointer;
-      color: #555;
+      color: #929292;
+      background: transparent;
+      border: 1px solid transparent;
       font-size: 0.72rem;
       margin-left: auto;
       padding: 0.1rem 0.25rem;
@@ -817,7 +819,13 @@
     }
     .slot-edit-icon:hover {
       color: var(--bz-yellow);
+      border-color: transparent;
       background: rgba(255,193,7,0.08);
+    }
+    .slot-edit-icon:focus-visible {
+      outline: 2px solid var(--bz-yellow);
+      outline-offset: 2px;
+      color: var(--bz-yellow);
     }
     .slot-item.filled .slot-check {
       background: var(--bz-yellow);
@@ -3046,7 +3054,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           '<span class="slot-label-secondary">' + escapedLabel + '</span>' +
           '<span class="slot-value-headline">' + escapedValue + '</span>' +
           '</span>' +
-          '<span class="slot-edit-icon" data-slot="' + id + '" title="Edit">&#9998;</span>' +
+          '<button type="button" class="slot-edit-icon" data-slot="' + id +
+          '" aria-label="Edit ' + escapedLabel + '" title="Edit ' + escapedLabel + '">&#9998;</button>' +
           '</div>';
       }).join("");
       container.innerHTML = html;
@@ -3110,14 +3119,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         saveSlotEdit(slotId, input.value.trim());
       });
       item.querySelector(".slot-edit-cancel").addEventListener("click", function () {
-        cancelSlotEdit();
+        cancelSlotEdit(slotId);
       });
       input.addEventListener("keydown", function (e) {
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
           saveSlotEdit(slotId, input.value.trim());
         } else if (e.key === "Escape") {
-          cancelSlotEdit();
+          // Cancelling removes this input; don't let the same key reach the
+          // page shortcut and collapse the Brief after the editor is gone.
+          e.preventDefault();
+          e.stopPropagation();
+          cancelSlotEdit(slotId);
         }
       });
     }
@@ -3127,9 +3140,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (on) setBrief(true);
     }
 
-    function cancelSlotEdit() {
+    function cancelSlotEdit(slotId) {
       setBriefEditWidth(false);
       renderSlotChecklist();
+      const trigger = document.querySelector('#slotItems .slot-edit-icon[data-slot="' + slotId + '"]');
+      if (trigger) trigger.focus();
     }
 
     function saveSlotEdit(slotId, newValue) {

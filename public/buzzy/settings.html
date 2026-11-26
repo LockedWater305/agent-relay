@@ -864,10 +864,12 @@
       $("mic-copy")?.addEventListener("click", async () => {
         const generation = micGeneration;
         if (!micCurrent(generation)) return;
-        const version = await appBridge?.version?.().catch(() => null);
+        let version;
+        try { version = await appBridge?.version?.(); } catch { /* Version is optional in diagnostics. */ }
         if (!micCurrent(generation)) return;
+        const label = version?.ok && typeof version.data?.version === "string" ? version.data.version : "?";
         const block = [
-          `BeeZilla ${version?.ok ? version.data.version : "?"}`,
+          `BeeZilla ${label}`,
           `user agent: ${navigator.userAgent}`,
           `device: ${micInfo.label || "(none)"} rate=${micInfo.settings.sampleRate || "?"} ch=${micInfo.settings.channelCount || "?"}`,
           `peak: ${micPeak.toFixed(0)} dBFS · frames ${micFrames} · ctx ${micCtxState}`,
@@ -879,12 +881,13 @@
           await navigator.clipboard.writeText(block);
           if (!micCurrent(generation)) return;
           say($("mic-copy-status"), "Copied.", "ok");
+          micLog(`diagnostics copied peak=${micPeak.toFixed(0)}`);
         } catch (_) {
           if (!micCurrent(generation)) return;
           $("mic-result").textContent = block;
           say($("mic-copy-status"), "Copy blocked — the block is shown above.", "err");
+          micLog(`diagnostics copy blocked; shown in Settings peak=${micPeak.toFixed(0)}`);
         }
-        micLog(`diagnostics copied peak=${micPeak.toFixed(0)}`);
       });
 
       if (appBridge && micPanel) {

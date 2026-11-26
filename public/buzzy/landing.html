@@ -29,6 +29,8 @@
       letter-spacing: 0.06em; font-size: 1.15rem; color: #ffc107;
       text-transform: uppercase; font-weight: 800;
     }
+    /* The shell inserts one parent around main and footer on a soft return. */
+    body > #bzPage { display: flex; flex: 1; flex-direction: column; }
     main { flex: 1; display: grid; place-items: center; padding: 2rem 1.5rem; }
     .hero { max-width: 460px; width: 100%; text-align: center; }
     .hero .mascot {
