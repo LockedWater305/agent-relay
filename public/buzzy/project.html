@@ -28,6 +28,14 @@
   .grid { display: grid; gap: 0.7rem; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
   .card { background: var(--bz-card); border: 1px solid var(--bz-line); border-radius: 14px;
           padding: 0.8rem 0.9rem; }
+  #sources .dl {
+    display: grid; grid-template-columns: max-content minmax(0, 1fr);
+    align-items: baseline; column-gap: 0.55rem; row-gap: 0.15rem;
+    background: var(--bz-card); border: 1px solid var(--bz-line); padding: 0.6rem 0.8rem;
+  }
+  #sources .dl-kind { color: var(--bz-muted); font-size: 0.78rem; }
+  #sources .dl-sub { grid-column: 2; color: var(--bz-muted); font-size: 0.78rem; }
+  #sources .dl-sub a { color: var(--bz-yellow); }
   .card h3 { font-size: 0.92rem; margin: 0 0 0.35rem; word-break: break-word; }
   .card .sub { color: var(--bz-muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
   .card a.dl { display: inline-block; margin-top: 0.5rem; color: var(--bz-yellow);
@@ -174,7 +182,7 @@
         srcBox.innerHTML = sources.length
           ? sources.map(function (s) {
               var label = String(s.label || s.kind || "input");
-              var where = s.url ? '<a href="' + s.url + '">open</a>' : "";
+              var where = s.url ? '<a href="' + esc(s.url) + '" aria-label="' + esc("Open source " + label) + '">Open</a>' : "";
               var size = sizeLabel(s.bytes);
               return '<div class="dl"><span class="dl-kind">' + (s.kind === "board" ? "board" : s.kind === "reference" ? "reference" : s.kind === "brief" ? "brief" : "input") +
                 '</span><span class="dl-name">' + esc(label) + '</span><span class="dl-sub">' + size + " " + where + "</span></div>";
