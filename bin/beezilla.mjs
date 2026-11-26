@@ -200,7 +200,6 @@ async function cmdDoctor() {
   const ok = (name, pass, detail = "") => checks.push({ name, pass, detail, soft: false });
   const soft = (name, pass, detail = "") => checks.push({ name, pass, detail, soft: true });
 
-  ok("build present", existsSync(join(ROOT, ".output", "server", "index.mjs")), ".output/server/index.mjs");
   const libs = join(ROOT, ".output", "server", "_libs");
   const installed = join(ROOT, "node_modules", "@electric-sql", "pglite", "dist");
   const inspect = (path) => {
@@ -211,6 +210,9 @@ async function cmdDoctor() {
       return `unreadable (${error.code ?? "stat failed"})`;
     }
   };
+  const entry = ".output/server/index.mjs";
+  const build = inspect(join(ROOT, entry));
+  ok("build present", build === "present", build === "present" ? entry : `${entry} is ${build}`);
   let haveLoaderDir = false;
   try { haveLoaderDir = statSync(libs, { throwIfNoEntry: false })?.isDirectory() === true; } catch { /* report below */ }
   if (!haveLoaderDir) {

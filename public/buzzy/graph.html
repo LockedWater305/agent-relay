@@ -149,6 +149,17 @@
     var signedOut = false;
     function ownsCanvas() { return canvas.isConnected && document.getElementById("canvas") === canvas; }
     function paintSave() { saveButton.disabled = signedOut || !!state.saving; }
+    function paintGraphChoice() {
+      for (var link = listBox.firstElementChild; link; link = link.nextElementSibling) {
+        var id = link.getAttribute("data-g");
+        if (!id) continue;
+        var current = id === state.graphId;
+        link.classList.toggle("sel", current);
+        if (current) link.setAttribute("aria-current", "true");
+        else link.removeAttribute("aria-current");
+      }
+    }
+
 
     function say(msg, cls) { statusEl.textContent = msg; statusEl.className = "hint " + (cls || ""); }
     function rid() {
@@ -394,7 +405,7 @@
       clearRunControls();
       state = { graphId: null, description: null, nodes: [], edges: [], sel: null, linkFrom: null, seq: 0 };
       document.getElementById("title").value = "";
-      resetLink(); paintSave(); draw(); inspect(); say("");
+      resetLink(); paintSave(); paintGraphChoice(); draw(); inspect(); say("");
     });
 
     // ── run ──────────────────────────────────────────────────────────────
@@ -476,6 +487,7 @@
           Array.prototype.forEach.call(box.querySelectorAll(".gl"), function (a) {
             a.addEventListener("click", function (ev) { ev.preventDefault(); open(a.getAttribute("data-g")); });
           });
+          paintGraphChoice();
         })
         .catch(function () { if (ownsCanvas()) listBox.innerHTML = '<span class="hint">Could not load.</span>'; });
     }
@@ -499,12 +511,17 @@
           var edges = g.edges.map(function (e) { return { from: e.from, to: e.to, kind: e.kind }; });
           // Commit loaded identity and its metadata together; old Save replies
           // still belong to the previous canvas, not this selected workflow.
+          var changedGraph = state.graphId !== g.id;
           clearRunControls();
           state = { graphId: g.id, description: g.description,
             nodes: nodes, edges: edges, sel: null, linkFrom: null, seq: nodes.length, openRequest: request };
-          resetLink(); paintSave();
+          resetLink(); paintSave(); paintGraphChoice();
           document.getElementById("title").value = g.title;
           draw(); inspect();
+          if (changedGraph) {
+            canvas.scrollLeft = 0;
+            canvas.scrollTop = 0;
+          }
           say("Opened v" + g.version, "ok");
         })
         .catch(function () { if (state.openRequest === request) say("Could not open — check the connection.", "bad"); });

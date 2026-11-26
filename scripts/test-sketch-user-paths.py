@@ -573,4 +573,24 @@ class Sketch(unittest.TestCase):
         self.assertEqual(self.board["images"],[dict(image,w=175,h=115)])
         self.hit(p,320,270)
         self.assertEqual(p.locator(".img-wrap.selected").count(),0)
+    def test_clearing_an_empty_board_does_not_discard_its_redo_history(self):
+        image=ref("blue"); p=self.start([],[image])
+        p.click('[data-tool="line"]'); self.drag(p,340,185,460,185); self.save(p)
+        saved=self.board["strokes"]
+        self.assertEqual(len(saved),1)
+        p.click("#undo"); self.save(p); self.assertEqual(self.board["strokes"],[])
+        dialogs=[]
+        def confirm(dialog):
+            dialogs.append(dialog.type); dialog.accept()
+        p.on("dialog",confirm)
+        p.click("#clear"); p.click("#redo"); self.save(p)
+        self.assertEqual(self.board["strokes"],saved)
+        self.assertEqual(dialogs,[])
+        # The original confirmation and Undo contract on nonempty boards remains.
+        p.click("#clear"); self.save(p)
+        self.assertEqual(dialogs,["confirm"])
+        self.assertEqual(self.board["strokes"],[])
+        self.assertEqual(self.board["images"],[image])
+        p.click("#undo"); self.save(p)
+        self.assertEqual(self.board["strokes"],saved)
 if __name__=="__main__": unittest.main(verbosity=2)

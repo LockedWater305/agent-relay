@@ -5116,6 +5116,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var fill = document.getElementById("ctxFill");
       var text = document.getElementById("ctxText");
       if (!meter || !fill || !text) return;
+      // A fresh turn measurement supersedes any read already in flight.
+      loadContext.generation = (loadContext.generation || 0) + 1;
       var pct = Math.max(0, Math.min(100, Number(ctx.pct) || 0));
       meter.classList.remove("hidden");
       fill.style.width = pct + "%";
@@ -5132,16 +5134,22 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // Works with no session too — the window size is knowable before the
       // first turn, and the meter should not appear out of nowhere later.
       var context = chatContextSnapshot();
+      var generation = loadContext.generation = (loadContext.generation || 0) + 1;
       var q = chatState.sessionId ? "?sessionId=" + encodeURIComponent(chatState.sessionId) : "?";
       if (selectedModel()) q += (q === "?" ? "" : "&") + "model=" + encodeURIComponent(selectedModel());
       fetch("/api/buzzy/context" + q,
             { credentials: "same-origin", signal: AbortSignal.timeout(8000) })
         .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (d) { if (chatContextCurrent(context) && d && d.ok && d.context) paintContext(d.context); })
+        .then(function (d) {
+          if (generation === loadContext.generation && chatContextCurrent(context) && d && d.ok && d.context) {
+            paintContext(d.context);
+          }
+        })
         .catch(function () {});
     }
 
     function resetContextMeter() {
+      loadContext.generation = (loadContext.generation || 0) + 1;
       var meter = document.getElementById("ctxMeter");
       var fill = document.getElementById("ctxFill");
       var text = document.getElementById("ctxText");

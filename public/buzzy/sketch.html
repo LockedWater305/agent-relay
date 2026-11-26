@@ -775,6 +775,8 @@
     });
     $("clear").addEventListener("click", function () {
       if (!editable()) return;
+      // A no-op must not take a snapshot: that would discard Redo history.
+      if (!strokes.length && !draft) { setStatus("No drawing to clear."); return; }
       if (!confirm("Clear every mark you drew? (images stay)")) return;
       snapshot();
       strokes = []; selectedStroke = null; redraw();
