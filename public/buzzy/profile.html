@@ -153,7 +153,9 @@
       return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
-    const $ = (html) => { document.getElementById("app").innerHTML = html; };
+    const profileApp = document.getElementById("app");
+    const ownsProfile = () => profileApp && profileApp.isConnected && document.getElementById("app") === profileApp;
+    const $ = (html) => { profileApp.innerHTML = html; };
 
     let FIELDS = [];
     let PROFILE = { fields: {}, hasProfile: false };
@@ -326,14 +328,15 @@
           return r.json();
         })
         .then(function (session) {
-          if (!(session && session.user)) window.location.replace("/buzzy/landing");
+          if (ownsProfile() && /^\/buzzy\/profile(?:\.html)?\/?$/.test(location.pathname) && !(session && session.user)) window.location.replace("/buzzy/landing");
         })
         .catch(function () {});
     })();
 
     loadProfile()
-      .then(render)
+      .then(function () { if (ownsProfile()) render(); })
       .catch(function (e) {
+        if (!ownsProfile()) return;
         $("<h1>About your business</h1><p class='muted'>" + escapeHtml(e.message) + "</p><p>Please sign in to set up your business profile.</p><div class='row'><a href='/buzzy/landing'><button>Sign in</button></a></div>");
       });
   </script>
