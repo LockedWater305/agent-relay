@@ -263,10 +263,18 @@
       if (el) { el.style.left = drag.n.x + "px"; el.style.top = drag.n.y + "px"; }
       drawEdges();
     });
-    canvas.addEventListener("pointerup", function () { drag = null; });
+    function endDrag() { drag = null; }
+    canvas.addEventListener("pointerup", endDrag);
+    canvas.addEventListener("pointercancel", endDrag);
+    canvas.addEventListener("lostpointercapture", endDrag);
 
     // ── link two nodes: click Link, then source, then target ─────────────
     var linkMode = false;
+    function resetLink() {
+      state.linkFrom = null; linkMode = false;
+      document.getElementById("linkBtn").classList.remove("on");
+      document.getElementById("linkHint").textContent = "";
+    }
     document.getElementById("linkBtn").addEventListener("click", function () {
       linkMode = !linkMode; state.linkFrom = null;
       this.classList.toggle("on", linkMode);
@@ -283,9 +291,7 @@
       var target = byId(key);
       var kind = target && (target.kind === "review" || target.kind === "gate") ? target.kind : "data";
       state.edges.push({ from: from, to: key, kind: kind });
-      state.linkFrom = null; linkMode = false;
-      document.getElementById("linkBtn").classList.remove("on");
-      document.getElementById("linkHint").textContent = "";
+      resetLink();
       draw(); say("linked " + from + " → " + key + " (" + kind + ")", "ok");
     });
 
@@ -340,6 +346,7 @@
         commit();
       });
       document.getElementById("del").addEventListener("click", function () {
+        if (state.linkFrom === n.key) { resetLink(); say(""); }
         state.nodes = state.nodes.filter(function (x) { return x.key !== n.key; });
         state.edges = state.edges.filter(function (e) { return e.from !== n.key && e.to !== n.key; });
         state.sel = null; draw(); inspect();
@@ -376,7 +383,7 @@
     document.getElementById("new").addEventListener("click", function () {
       state = { graphId: null, description: null, nodes: [], edges: [], sel: null, linkFrom: null, seq: 0 };
       document.getElementById("title").value = "";
-      paintSave(); draw(); inspect(); say("");
+      resetLink(); paintSave(); draw(); inspect(); say("");
     });
 
     // ── run ──────────────────────────────────────────────────────────────
@@ -472,7 +479,7 @@
           // still belong to the previous canvas, not this selected workflow.
           state = { graphId: g.id, description: g.description,
             nodes: nodes, edges: edges, sel: null, linkFrom: null, seq: nodes.length, openRequest: request };
-          paintSave();
+          resetLink(); paintSave();
           document.getElementById("title").value = g.title;
           draw(); inspect();
           say("Opened v" + g.version, "ok");
