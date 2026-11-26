@@ -42,6 +42,8 @@ class Sketch(unittest.TestCase):
                 elif path == "/buzzy/library" and LIBRARY is not None: self.reply(LIBRARY, "text/html; charset=utf-8")
                 elif path == "/api/auth/get-session": self.reply(dict(user=dict(id="fixture")))
                 elif path == "/api/buzzy/jobs": self.reply(dict(jobs=[]))
+                elif path == "/api/buzzy/assets": self.reply(dict(items=cls.shelf))
+                elif path == "/api/buzzy/assets/441": self.reply(BLUE,"image/png")
                 elif path == "/api/buzzy/art": self.reply(dict(ok=True, board=cls.board, images=cls.outputs))
                 elif path == "/api/buzzy/projects/test": self.reply(dict(project=dict(title="Fixture")))
                 elif path == "/assets/front.png": self.reply(GREEN, "image/png")
@@ -72,7 +74,7 @@ class Sketch(unittest.TestCase):
         cls.browser.close(); cls.pw.stop(); cls.server.shutdown(); cls.server.server_close(); cls.thread.join()
     def start(self, strokes, images=None, *, outputs=None, touch=False):
         type(self).board=dict(version=1,strokes=strokes,images=images or []); type(self).last_size=0
-        type(self).outputs=outputs or []; type(self).edits=[]
+        type(self).outputs=outputs or []; type(self).edits=[]; type(self).shelf=[]
         page=self.browser.new_page(viewport=dict(width=1050,height=770),device_scale_factor=1,has_touch=touch)
         self.addCleanup(page.context.close)
         page.goto("http://127.0.0.1:%d/buzzy/sketch?job=test"%self.server.server_port)
@@ -288,15 +290,16 @@ class Sketch(unittest.TestCase):
         self.assertLessEqual(field["x"]+field["width"],panel["x"]+panel["width"])
         with p.expect_download(timeout=1500) as dl: p.locator("#resultLink").click(timeout=1200)
         self.assertEqual(dl.value.path().read_bytes(),BLUE)
-    def start_library(self,mode="ok", content="Fixture text."):
+    def start_library(self,mode="ok", content="Fixture text.", *, name="First doc.md", grid=False, shelf=None):
         if LIBRARY is None: self.skipTest("Supply --library path to exercise document previews")
         p=self.browser.new_page(viewport=dict(width=735,height=670))
         self.addCleanup(p.context.close)
-        docs=dict(fixture=[dict(name="First doc.md",md=content,createdAt=1),dict(name="Other doc.md",md="Other content.",createdAt=1)])
+        type(self).shelf=shelf or []
+        docs=dict(fixture=[dict(name=name,md=content,createdAt=1),dict(name="Other doc.md",md="Other content.",createdAt=1)])
         p.add_init_script("localStorage.setItem('bz_docs_v1',"+json.dumps(json.dumps(docs))+");")
         p.add_init_script("""const mode=%s; Object.defineProperty(navigator,'clipboard',{value:mode==='unavailable'?undefined:{writeText:async function(value){if(mode==='denied') throw new Error('Test clipboard unavailable'); window.testClipboard=value;}}});"""%json.dumps(mode))
-        p.goto("http://127.0.0.1:%d/buzzy/library?job=fixture"%self.server.server_port)
-        p.locator("[data-open='First doc.md']").wait_for()
+        p.goto("http://127.0.0.1:%d/buzzy/library"%self.server.server_port + ("" if grid else "?job=fixture"))
+        p.locator("[data-folder='fixture']" if grid else "[data-open='%s']"%name).wait_for()
         return p
     def open_document(self,p,name="First doc.md"):
         target=p.locator("[data-open='%s']"%name); target.focus(); p.keyboard.press("Enter")
@@ -330,4 +333,45 @@ class Sketch(unittest.TestCase):
         width=p.locator(".docviewer").evaluate("(el)=>[el.scrollWidth,el.clientWidth]")
         self.assertEqual(p.locator(".docviewer").text_content(),raw_url)
         self.assertLessEqual(width[0],width[1])
+    def test_library_folder_opens_by_keyboard_and_returns_focus_to_same_folder(self):
+        p=self.start_library(grid=True)
+        folder=p.locator("[data-folder='fixture']")
+        folder.focus(); p.keyboard.press("Enter")
+        self.assertEqual(p.locator("[data-open]").count(),2)
+        self.assertEqual(p.evaluate("document.activeElement.tagName"),"H1")
+        p.locator("#docsBackFolders").focus(); p.keyboard.press("Enter")
+        self.assertEqual(p.evaluate("document.activeElement.getAttribute('data-folder')"),"fixture")
+    def test_long_filename_keeps_mobile_open_and_download_within_viewport(self):
+        name="a"*120+".md"; doc="The original local bytes • ε"
+        p=self.start_library(name=name,content=doc); p.set_viewport_size(dict(width=320,height=680))
+        open_btn=p.get_by_role("button",name="Open "+name,exact=True)
+        dl_btn=p.get_by_role("button",name="Download "+name,exact=True)
+        for btn in (open_btn,dl_btn):
+            rect=btn.bounding_box()
+            self.assertLessEqual(rect["x"]+rect["width"],320)
+        with p.expect_download() as dl: dl_btn.click()
+        self.assertEqual(dl.value.path().read_bytes(),doc.encode())
+        open_btn.click(); self.assertEqual(p.locator(".docviewer").inner_text(),doc)
+    def test_previewed_image_artifact_has_download_with_original_bytes(self):
+        p=self.start_library(grid=True,shelf=[dict(id=441,name="map source.png",type="image/png",bytes=len(BLUE))])
+        img=p.get_by_role("img",name="map source.png",exact=True); img.wait_for()
+        download=p.get_by_role("link",name="Download map source.png",exact=True)
+        self.assertEqual(download.count(),1)
+        with p.expect_download() as dl: download.click()
+        self.assertEqual(dl.value.suggested_filename,"map source.png")
+        self.assertEqual(dl.value.path().read_bytes(),BLUE)
+    def library_doc_download(self,markdown,js):
+        p=self.start_library(content=markdown); self.open_document(p)
+        with p.expect_download() as dl: p.click("#docDlWord")
+        word=dl.value.path().read_bytes().decode("utf-8-sig")
+        return p.evaluate("(raw)=>{const body=new DOMParser().parseFromString(raw,'text/html').body;"+js+"}",word)
+    def test_word_export_preserves_ordered_list_structure_and_start_numbers(self):
+        src="First run:\n\n3. Check the fan\n4. Record the result\n\nNext run:\n\n8) Repeat"
+        result=self.library_doc_download(src,"return [...body.querySelectorAll('ol')].map(x=>[x.start,[...x.children].map(li=>li.textContent)]);")
+        self.assertEqual(result,[[3,["Check the fan","Record the result"]],[8,["Repeat"]]])
+    def test_word_export_preserves_code_block_whitespace_and_literal_markdown(self):
+        code="# Not a heading\n  echo a < b && c > d\n\n  finish"
+        markdown="Before\n\n"+chr(96)*3+"sh\n"+code+"\n"+chr(96)*3+"\n\nAfter"
+        result=self.library_doc_download(markdown,"return [body.querySelector('pre code')?.textContent,[...body.querySelectorAll('p')].map(p=>p.textContent)];")
+        self.assertEqual(result,[code,["Before","After"]])
 if __name__=="__main__": unittest.main(verbosity=2)
