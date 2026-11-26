@@ -6446,7 +6446,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           if (!d || d.ok === false) { status.textContent = "Couldn't search right now. Try again in a moment."; return; }
           var jobs = d.jobs || [];
           var sessions = d.sessions || [];
-          var total = jobs.length + sessions.length;
+          var documents = Array.isArray(d.documents) ? d.documents : [];
+          var total = jobs.length + sessions.length + documents.length;
           if (!total) { status.textContent = 'No work matches "' + q + '".'; return; }
           status.textContent = total + " result" + (total === 1 ? "" : "s") + ' for "' + q + '"';
           var items = [];
@@ -6464,18 +6465,28 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
                 (s.updatedAt ? " · updated " + timeAgo(s.updatedAt) : "") + (s.snippet ? " · " + s.snippet : ""),
             });
           });
-          var groups = {}, order = [];
+          documents.forEach(function (doc) {
+            // The existing search endpoint returns a snippet, not a download
+            // grant. Open only the existing project view when an owner job is known.
+            items.push({ kind: "document", document: doc, company: "Documents",
+              title: doc.title || "Untitled document",
+              sub: ["Document", doc.status || "", doc.currentVersion != null ? "v" + doc.currentVersion : "",
+                doc.snippet || ""].filter(Boolean).join(" · ") });
+          });
+          var groups = new Map();
           items.forEach(function (it) {
-            if (!groups[it.company]) { groups[it.company] = []; order.push(it.company); }
-            groups[it.company].push(it);
+            var key = it.kind === "document" ? "documents" : "company:" + it.company;
+            if (!groups.has(key)) groups.set(key, { label: it.company, rows: [] });
+            groups.get(key).rows.push(it);
           });
           var html = "";
-          order.forEach(function (g) {
-            html += '<h4 class="rw-group">' + esc(g) + '</h4>';
-            groups[g].forEach(function (it) {
+          groups.forEach(function (group) {
+            html += '<h4 class="rw-group">' + esc(group.label) + '</h4>';
+            group.rows.forEach(function (it) {
               var idx = items.indexOf(it);
               html += '<div class="rw-item' + (it.kind === "session" ? " rw-session" : "") + '" data-idx="' + idx +
-                '" role="button" tabindex="0" title="' + esc(it.title) + '">' +
+                '"' + (it.kind !== "document" || it.document.jobId ? ' role="button" tabindex="0"' : '') +
+                ' title="' + esc(it.title) + '">' +
                 '<span class="rw-title">' + esc(it.title) + '</span>' +
                 '<span class="rw-sub">' + esc(it.sub) + '</span></div>';
             });
@@ -6483,7 +6494,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           var res = container.querySelector("#rwSearchResults");
           if (!res) return;
           res.innerHTML = html;
-          res.querySelectorAll(".rw-item").forEach(function (el) {
+          res.querySelectorAll('.rw-item[role="button"]').forEach(function (el) {
             el.addEventListener("click", function () {
               var it = items[Number(el.getAttribute("data-idx"))];
               if (!it) return;
@@ -6493,7 +6504,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
               else {
                 // Soft hop: the shell keeps this document (and the live mic)
                 // while the project page is fetched in. BZ-19.
-                var pu = "/buzzy/project?job=" + encodeURIComponent(it.job.id);
+                var pu = "/buzzy/project?job=" + encodeURIComponent(it.kind === "document" ? it.document.jobId : it.job.id);
                 if (window.BeeZillaShell) window.BeeZillaShell.go(pu);
                 else window.location.href = pu;
               }
