@@ -62,7 +62,7 @@
       margin: 1.2rem 0;
     }
     .mem-digest h2 { margin: 0 0 0.4rem; color: var(--yellow); font-size: 1rem; }
-    .mem-digest p { margin: 0; color: var(--text); font-size: 0.92rem; line-height: 1.5; }
+    .mem-digest p { margin: 0; color: var(--text); font-size: 0.92rem; line-height: 1.5; overflow-wrap: anywhere; }
     .mem-job {
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -83,9 +83,10 @@
       cursor: pointer;
     }
     .mem-job-head:hover { background: rgba(255,193,7,0.05); }
-    .mem-job-head .mj-title { font-weight: 600; color: #fff; min-width: 90px; }
+    .mem-job-head .mj-title { flex: 0 1 45%; min-width: 0; overflow-wrap: anywhere; font-weight: 600; color: #fff; }
     .mem-job-head .mj-digest {
       flex: 1;
+      min-width: 0;
       color: var(--muted);
       font-size: 0.82rem;
       white-space: nowrap;
@@ -93,6 +94,7 @@
       text-overflow: ellipsis;
     }
     .mem-job-head .mj-count {
+      flex: none;
       background: rgba(255,193,7,0.12);
       color: var(--yellow);
       border-radius: 10px;
@@ -145,8 +147,12 @@
       gap: 1rem;
       align-items: baseline;
     }
-    .fact .v { font-weight: 600; }
-    .fact .k { color: var(--muted); font-size: 0.85rem; }
+    .fact .v { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; font-weight: 600; }
+    .fact .k { min-width: 0; overflow-wrap: anywhere; color: var(--muted); font-size: 0.85rem; }
+    @media (max-width: 32rem) {
+      .fact { flex-direction: column; gap: 0.3rem; align-items: stretch; }
+      .mem-job-head { gap: 0.5rem; }
+    }
     .fact .j { color: var(--muted); font-size: 0.75rem; }
     .msg {
       background: var(--panel);
@@ -156,9 +162,10 @@
       margin-bottom: 0.5rem;
       font-size: 0.9rem;
     }
+    .msg .msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
     .msg.assistant { border-left: 3px solid #6c7bd9; }
     .msg.user { border-left: 3px solid var(--yellow); }
-    .msg .who { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 0.2rem; }
+    .msg .who { overflow-wrap: anywhere; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 0.2rem; }
     .empty { color: var(--muted); padding: 1rem 0; }
     .signout {
       text-align: center;
@@ -368,19 +375,20 @@
         </div>`;
 
       const jobsHtml = groups.size
-        ? Array.from(groups.values()).map(({ source, facts: fs }) => {
+        ? Array.from(groups.values()).map(({ source, facts: fs }, index) => {
             const label = sourceLabel(source);
+            const panelId = "memory-source-" + index;
             const digestLine = fs.map((f) => esc(f.value)).join(" · ");
             const detailRows = fs
               .map((f) => `<div class="fact"><span class="k">${esc(f.key)}</span><span class="v">${esc(f.value)}</span></div>`)
               .join("");
             return `<div class="mem-job">
-              <button type="button" class="mem-job-head">
+              <button type="button" class="mem-job-head" aria-expanded="false" aria-controls="${panelId}">
                 <span class="mj-title">${esc(label)}</span>
                 <span class="mj-digest">${digestLine}</span>
                 <span class="mj-count">${fs.length}</span>
               </button>
-              <div class="mem-job-detail" style="display:none">${detailRows}</div>
+              <div class="mem-job-detail" id="${panelId}" style="display:none">${detailRows}</div>
             </div>`;
           }).join("")
         : '<p class="empty">No decisions captured yet. Talk to BeeZilla and locked-in decisions will appear here.</p>';
@@ -389,7 +397,7 @@
         ? messages.slice(0, 20)
             .map(
               (m) =>
-                `<div class="msg ${m.role === "assistant" ? "assistant" : "user"}"><div class="who">${m.role === "assistant" ? "BeeZilla" : "You"} · ${esc(sourceLabel(m.source))}</div>${esc(m.content)}</div>`,
+                `<div class="msg ${m.role === "assistant" ? "assistant" : "user"}"><div class="who">${m.role === "assistant" ? "BeeZilla" : "You"} · ${esc(sourceLabel(m.source))}</div><div class="msg-text">${esc(m.content)}</div></div>`,
             )
             .join("")
         : '<p class="empty">No conversations yet.</p>';
@@ -411,6 +419,7 @@
           const open = d.style.display !== "none";
           d.style.display = open ? "none" : "block";
           btn.classList.toggle("open", !open);
+          btn.ariaExpanded = open ? "false" : "true";
         });
       });
       } catch (err) {

@@ -185,6 +185,7 @@ test("main wiring retains guards, isolated cloud session and extensionless setti
   assert.match(src, /confineAppWindow\(mainWindow\)/);
   assert.match(src, /confineAppWindow\(settingsWindow\)/);
   assert.match(src, /fromPartition\("persist:beezilla-connect"\)/);
-  assert.match(src, /settingsWindowFor\(`\$\{runtimeBase\}\/buzzy\/settings`\)/);
+  const openSettings = src.slice(src.indexOf("async function openSettings()"), src.indexOf("async function createWindow()"));
+  assert.match(openSettings, /const url = `\$\{runtimeBase\}\/buzzy\/settings`;[\s\S]*?await win\.loadURL\(url\)/);
   assert.equal((src.match(/onBeforeSendHeaders\(/g) ?? []).length, 1);
 });

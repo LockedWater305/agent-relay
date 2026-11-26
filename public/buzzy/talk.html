@@ -861,7 +861,8 @@
       position: relative;
       transition: border-color 0.12s, background 0.12s;
     }
-    .rw-item:hover { border-color: #3A3A3A; background: #121212; }
+    .rw-item[role="button"]:hover { border-color: #3A3A3A; background: #121212; }
+    .rw-item:not([role="button"]) { cursor: default; }
     .rw-item .rw-title {
       display: block; color: #EDEDED; font-weight: 600; font-size: 0.88rem;
       padding-right: 2.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -6364,6 +6365,27 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
     // ── Work search across all of the user's companies ─────────────────
     var rwSearchQuery = "";
+    var rwViewRevision = 0;
+
+    // The search field belongs to the user while the list underneath changes.
+    // Reuse it across list renders: keep focus/caret only if it had focus.
+    function paintWorkList(container, markup) {
+      var previous = container.querySelector("#rwSearch");
+      var focused = previous && previous === document.activeElement;
+      var start = focused ? previous.selectionStart : 0, end = focused ? previous.selectionEnd : 0;
+      var direction = focused ? previous.selectionDirection : "none";
+      container.innerHTML = markup;
+      var next = container.querySelector("#rwSearch");
+      if (previous && next) {
+        next.replaceWith(previous);
+        if (focused) {
+          previous.focus({ preventScroll: true });
+          if (start != null && end != null) previous.setSelectionRange(start, end, direction);
+        }
+      } else {
+        bindWorkSearchBox(container);
+      }
+    }
 
     function workSearchBoxHtml() {
       return '<div class="rw-search"><input id="rwSearch" type="search" ' +
@@ -6374,47 +6396,67 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     function bindWorkSearchBox(container) {
       var el = container.querySelector("#rwSearch");
       if (!el) return;
-      var t = null;
-      el.addEventListener("input", function () {
+      var t = null, composing = false;
+      function scheduleSearch() {
         var q = el.value.trim();
+        rwSearchQuery = el.value;
+        var editing = ++rwViewRevision;
         clearTimeout(t);
         t = setTimeout(function () {
-          rwSearchQuery = q;
-          if (q.length >= 2) { renderWorkSearch(q); }
-          else if (!q) { rwSearchQuery = ""; showRecentWork(); }
+          if (editing !== rwViewRevision || !container.contains(el)) return;
+          if (q) renderWorkSearch(q);
+          else showRecentWork();
         }, 300);
+      }
+      el.addEventListener("compositionstart", function () {
+        composing = true; ++rwViewRevision; clearTimeout(t);
+      });
+      el.addEventListener("compositionend", function () { composing = false; scheduleSearch(); });
+      el.addEventListener("input", function (e) {
+        if (!composing && !e.isComposing) scheduleSearch();
       });
       // Esc clears the search and returns to recent work.
       el.addEventListener("keydown", function (e) {
-        if (e.key === "Escape") { el.value = ""; rwSearchQuery = ""; showRecentWork(); }
+        if (composing || e.isComposing || e.keyCode === 229) return;
+        if (e.key === "Escape") {
+          e.preventDefault(); clearTimeout(t);
+          el.value = ""; rwSearchQuery = ""; showRecentWork();
+        }
       });
     }
 
     function renderWorkSearch(q) {
       var container = document.getElementById("recentBelow");
-      container.innerHTML = '<div class="recent-work">' +
+      var revision = ++rwViewRevision;
+      paintWorkList(container, '<div class="recent-work">' +
         '<div class="rw-head-row">' +
         '<h3 class="rw-head">Search</h3>' +
         workSearchBoxHtml() +
         '</div>' +
-        '<p class="muted rw-lead" id="rwSearchStatus">Searching…</p>' +
+        '<p class="muted rw-lead" id="rwSearchStatus" role="status" aria-atomic="true">Searching…</p>' +
         '<div id="rwSearchResults"></div>' +
-        '</div>';
-      bindWorkSearchBox(container);
-      var input = container.querySelector("#rwSearch");
-      if (input) { input.focus(); }
+        '</div>');
+      var statusNode = container.querySelector("#rwSearchStatus");
+      if (q.length < 2) {
+        statusNode.textContent = "Enter at least two characters to search.";
+        return;
+      }
+      function current() {
+        return revision === rwViewRevision && container.querySelector("#rwSearchStatus") === statusNode;
+      }
       fetch("/api/buzzy/search?q=" + encodeURIComponent(q), { credentials: "same-origin" })
         .then(function (r) {
           if (r.status === 401) { window.location.href = "/buzzy/landing"; return null; }
           return r.ok ? r.json() : null;
         })
         .then(function (d) {
-          var status = container.querySelector("#rwSearchStatus");
-          if (!status) return; // re-rendered by a newer query
+          if (!current()) return;
+          var status = statusNode;
           if (!d || d.ok === false) { status.textContent = "Couldn't search right now. Try again in a moment."; return; }
           var jobs = d.jobs || [];
           var sessions = d.sessions || [];
-          var total = jobs.length + sessions.length;
+          var documents = Array.isArray(d.documents) ? d.documents : [];
+          var total = jobs.length + sessions.length + documents.length;
           if (!total) { status.textContent = 'No work matches "' + q + '".'; return; }
           status.textContent = total + " result" + (total === 1 ? "" : "s") + ' for "' + q + '"';
           var items = [];
@@ -6432,18 +6474,28 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
                 (s.updatedAt ? " · updated " + timeAgo(s.updatedAt) : "") + (s.snippet ? " · " + s.snippet : ""),
             });
           });
-          var groups = {}, order = [];
+          documents.forEach(function (doc) {
+            // The existing search endpoint returns a snippet, not a download
+            // grant. Open only the existing project view when an owner job is known.
+            items.push({ kind: "document", document: doc, company: "Documents",
+              title: doc.title || "Untitled document",
+              sub: ["Document", doc.status || "", doc.currentVersion != null ? "v" + doc.currentVersion : "",
+                doc.snippet || ""].filter(Boolean).join(" · ") });
+          });
+          var groups = new Map();
           items.forEach(function (it) {
-            if (!groups[it.company]) { groups[it.company] = []; order.push(it.company); }
-            groups[it.company].push(it);
+            var key = it.kind === "document" ? "documents" : "company:" + it.company;
+            if (!groups.has(key)) groups.set(key, { label: it.company, rows: [] });
+            groups.get(key).rows.push(it);
           });
           var html = "";
-          order.forEach(function (g) {
-            html += '<h4 class="rw-group">' + esc(g) + '</h4>';
-            groups[g].forEach(function (it) {
+          groups.forEach(function (group) {
+            html += '<h4 class="rw-group">' + esc(group.label) + '</h4>';
+            group.rows.forEach(function (it) {
               var idx = items.indexOf(it);
               html += '<div class="rw-item' + (it.kind === "session" ? " rw-session" : "") + '" data-idx="' + idx +
-                '" role="button" tabindex="0" title="' + esc(it.title) + '">' +
+                '"' + (it.kind !== "document" || it.document.jobId ? ' role="button" tabindex="0"' : '') +
+                ' title="' + esc(it.title) + '">' +
                 '<span class="rw-title">' + esc(it.title) + '</span>' +
                 '<span class="rw-sub">' + esc(it.sub) + '</span></div>';
             });
@@ -6451,7 +6503,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           var res = container.querySelector("#rwSearchResults");
           if (!res) return;
           res.innerHTML = html;
-          res.querySelectorAll(".rw-item").forEach(function (el) {
+          res.querySelectorAll('.rw-item[role="button"]').forEach(function (el) {
             el.addEventListener("click", function () {
               var it = items[Number(el.getAttribute("data-idx"))];
               if (!it) return;
@@ -6461,7 +6513,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
               else {
                 // Soft hop: the shell keeps this document (and the live mic)
                 // while the project page is fetched in. BZ-19.
-                var pu = "/buzzy/project?job=" + encodeURIComponent(it.job.id);
+                var pu = "/buzzy/project?job=" + encodeURIComponent(it.kind === "document" ? it.document.jobId : it.job.id);
                 if (window.BeeZillaShell) window.BeeZillaShell.go(pu);
                 else window.location.href = pu;
               }
@@ -6472,24 +6524,32 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           });
         })
         .catch(function () {
-          var s = container.querySelector("#rwSearchStatus");
-          if (s) s.textContent = "Couldn't search right now. Try again in a moment.";
+          if (current()) statusNode.textContent = "Couldn't search right now. Try again in a moment.";
         });
     }
 
     function showRecentWork() {
       var co = activeCompanyId();
-      if (rwSearchQuery && rwSearchQuery.length >= 2) { renderWorkSearch(rwSearchQuery); return; }
+      var query = rwSearchQuery.trim();
+      if (query) { renderWorkSearch(query); return; }
       var container = document.getElementById("recentBelow");
       if (!container) return;
-      container.innerHTML = '<p class="muted" style="padding:0.5rem 0">Loading your recent work…</p>';
+      var revision = ++rwViewRevision;
+      paintWorkList(container, '<div class="recent-work"><div class="rw-head-row"><h3 class="rw-head">Recent work</h3>' +
+        workSearchBoxHtml() + '</div><p class="muted rw-lead">Loading your recent work…</p></div>');
       var jobsP = fetch("/api/buzzy/jobs" + (co ? "?companyId=" + encodeURIComponent(co) : ""), { credentials: "same-origin" })
         .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
       var sessP = fetch(SESSIONS_BASE + (co ? "?companyId=" + encodeURIComponent(co) : ""), { credentials: "same-origin" })
         .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
       Promise.all([jobsP, sessP]).then(function (res) {
-        var jobs = (res[0] && res[0].jobs) || [];
-        var sessions = (res[1] && res[1].sessions) || [];
+        if (revision !== rwViewRevision) return;
+        var gotJobs = !!res[0] && Array.isArray(res[0].jobs);
+        var gotSessions = !!res[1] && Array.isArray(res[1].sessions);
+        var jobs = gotJobs ? res[0].jobs : [];
+        var sessions = gotSessions ? res[1].sessions : [];
+        // A linked conversation is still one row. Keep its opening behavior
+        // but don't lose the work item's review badge or more recent activity.
+        var jobsById = new Map(jobs.map(function (j) { return [j.id, j]; }));
         var items = [];
         var seen = {};
         sessions.forEach(function (s) {
@@ -6497,11 +6557,15 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           if (seen[key]) return;
           seen[key] = true;
           var sessAt = Date.parse(s.updatedAt || s.createdAt || "") || 0;
+          var linked = s.jobId ? jobsById.get(s.jobId) : null;
+          var linkedAt = linked ? Date.parse(linked.updatedAt || linked.createdAt || "") || 0 : 0;
+          var activeAt = Math.max(sessAt, linkedAt);
+          var needsInput = !!(linked && linked.data && linked.data.draft && !linked.data.approved);
           var sessLine = (s.summary || s.preview || "").trim();
           items.push({
-            kind: "session", session: s, at: sessAt, startedAt: s.createdAt,
-            title: s.title || "Untitled chat",
-            sub: rowSub(sessLine, s.createdAt, sessAt),
+            kind: "session", session: s, at: activeAt, startedAt: s.createdAt, needsInput: needsInput,
+            title: s.title || (linked && linked.title) || "Untitled chat",
+            sub: (needsInput ? "Needs your input · " : "") + rowSub(sessLine, s.createdAt, activeAt),
           });
         });
         jobs.forEach(function (j) {
@@ -6547,7 +6611,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           '<h3 class="rw-head">Recent work</h3>' +
           workSearchBoxHtml() +
           '</div>';
-        if (!shown.length) {
+        var missing = !gotJobs && !gotSessions ? "jobs or conversations" : !gotJobs ? "jobs" : "conversations";
+        if (!gotJobs || !gotSessions) {
+          html += '<p class="muted rw-lead" role="status">Could not load recent ' + missing +
+            (shown.length ? '. Showing the work that did load.' : '. There may still be work here.') + '</p>';
+        }
+        if (!shown.length && gotJobs && gotSessions) {
           html += '<p class="muted rw-lead">Nothing yet. Start above, or try one of these:</p>' +
             '<div class="rw-examples">' +
             RW_EXAMPLES.map(function (ex) { return '<button type="button" class="rw-ex" data-ex="' + esc(ex) + '">' + esc(ex) + "</button>"; }).join("") +
@@ -6569,7 +6638,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             '</div>';
         }
         html += '</div>';
-        container.innerHTML = html;
+        paintWorkList(container, html);
         container.querySelectorAll(".rw-item").forEach(function (el) {
           el.addEventListener("click", function () {
             var it = shown[Number(el.getAttribute("data-idx"))];
@@ -6628,7 +6697,6 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             });
           });
         });
-        bindWorkSearchBox(container);
       });
     }
 

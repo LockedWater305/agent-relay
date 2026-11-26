@@ -36,13 +36,26 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 0.45rem; flex: 0 0 auto; }
   .ok .dot { background: var(--bz-good); }
   .no .dot { background: var(--bz-bad); }
+  .card > div { min-width: 0; overflow-wrap: anywhere; }
   .cap-label { font-weight: 600; font-size: 0.95rem; }
+  .cap-state { font-size: 0.8rem; font-weight: 600; }
+  .ok .cap-state { color: var(--bz-good); }
+  .no .cap-state { color: var(--bz-bad); }
   .cap-detail { color: var(--bz-muted); font-size: 0.83rem; margin-top: 0.15rem; font-variant-numeric: tabular-nums; }
   h2 { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--bz-muted); margin: 1.7rem 0 0.6rem; }
   table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
   th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--bz-line); }
   th { color: var(--bz-muted); font-weight: 500; }
   td.num { font-variant-numeric: tabular-nums; color: var(--bz-muted); }
+  th, td { overflow-wrap: anywhere; vertical-align: top; }
+  @media (max-width: 38rem) {
+    table { table-layout: fixed; }
+    th, td { padding-inline: 0.25rem; }
+  }
+  #capsRetry {
+    background: var(--bz-card); color: var(--bz-text); border: 1px solid var(--bz-muted);
+    border-radius: 6px; padding: 0.35rem 0.8rem; font: inherit; cursor: pointer;
+  }
   .stamp { color: var(--bz-muted); font-size: 0.75rem; margin-top: 1.4rem; }
   code { background: #1d1d1d; padding: 0.05rem 0.3rem; border-radius: 4px; font-size: 0.8rem; }
 </style>
@@ -63,44 +76,98 @@
     <a href="/buzzy/landing" class="account-link" id="accountLink">Sign in</a>
   </nav>
   <h1>What BeeZilla can do here</h1>
-  <p class="sub">Read from the same registry the chat loop uses. A green line means the capability is configured on <em>this</em> deployment; red names the missing setting.</p>
+  <p class="sub">Status from the same registry the chat loop uses. Each card says whether a capability is configured on <em>this</em> deployment.</p>
 </header>
 <main>
-  <div id="caps"><p class="sub">Loading…</p></div>
+  <div id="caps" tabindex="-1" aria-busy="true"><p class="sub" role="status">Loading…</p></div>
+  <button id="capsRetry" type="button" hidden>Retry</button>
   <h2>Tools the model may call</h2>
-  <div id="tools"><p class="sub">Loading…</p></div>
+  <div id="tools" aria-busy="true"><p class="sub" role="status">Loading…</p></div>
   <p class="stamp" id="stamp"></p>
 </main>
 <script>
-  function esc(v) { return String(v == null ? "" : v).replace(/</g, "&lt;").replace(/"/g, "&quot;"); }
+  (function () {
+    var capsEl = document.getElementById("caps");
+    var toolsEl = document.getElementById("tools");
+    var stampEl = document.getElementById("stamp");
+    var retryEl = document.getElementById("capsRetry");
+    var serial = 0;
 
-  fetch("/api/buzzy/capabilities", { credentials: "same-origin" })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      var caps = d.capabilities || [];
-      document.getElementById("caps").innerHTML = caps.map(function (c) {
-        return '<div class="card ' + (c.ok ? "ok" : "no") + '">' +
-          '<span class="dot"></span>' +
-          '<div><div class="cap-label">' + esc(c.label) + "</div>" +
-          '<div class="cap-detail">' + esc(c.detail) + "</div></div></div>";
-      }).join("");
+    function esc(v) {
+      return String(v == null ? "" : v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+    }
+    function message(el, text) {
+      var line = document.createElement("p");
+      line.className = "sub";
+      line.setAttribute("role", "status");
+      line.textContent = text;
+      el.replaceChildren(line);
+    }
+    function owned() {
+      return capsEl.isConnected && document.getElementById("caps") === capsEl &&
+        document.getElementById("tools") === toolsEl && document.getElementById("stamp") === stampEl;
+    }
 
-      var tools = d.tools || [];
-      document.getElementById("tools").innerHTML =
-        "<table><thead><tr><th>tool</th><th>gate</th><th>cost</th><th>budget</th><th>state</th></tr></thead><tbody>" +
-        tools.map(function (t) {
-          return "<tr><td><code>" + esc(t.name) + "</code></td>" +
-            "<td>" + esc(t.gate) + "</td>" +
-            "<td>" + esc(t.cost) + "</td>" +
-            '<td class="num">' + Math.round(t.timeoutMs / 1000) + "s</td>" +
-            "<td>" + (t.offered ? "offered" : "withheld — " + esc(t.withheld)) + "</td></tr>";
-        }).join("") + "</tbody></table>";
+    function loadCapabilities() {
+      if (!owned()) return;
+      var request = ++serial;
+      var restoreFocus = document.activeElement === retryEl;
+      function current() { return request === serial && owned(); }
+      retryEl.hidden = true;
+      stampEl.textContent = "";
+      capsEl.setAttribute("aria-busy", "true");
+      toolsEl.setAttribute("aria-busy", "true");
+      message(capsEl, "Loading…");
+      message(toolsEl, "Loading…");
+      fetch("/api/buzzy/capabilities", { credentials: "same-origin" })
+        .then(function (r) {
+          if (!r.ok) throw new Error("Registry unavailable");
+          return r.json();
+        })
+        .then(function (d) {
+          if (!current()) return;
+          if (!d || d.ok === false || !Array.isArray(d.capabilities) || !Array.isArray(d.tools)) {
+            throw new Error("No registry data");
+          }
+          if (!d.capabilities.length) message(capsEl, "No capabilities were reported.");
+          else capsEl.innerHTML = d.capabilities.map(function (c) {
+            return '<div class="card ' + (c.ok ? "ok" : "no") + '">' +
+              '<span class="dot" aria-hidden="true"></span>' +
+              '<div><div class="cap-label">' + esc(c.label) + "</div>" +
+              '<div class="cap-state">' + (c.ok ? "Configured here" : "Not configured here") + "</div>" +
+              '<div class="cap-detail">' + esc(c.detail) + "</div></div></div>";
+          }).join("");
 
-      document.getElementById("stamp").textContent = "Generated " + (d.generatedAt || "");
-    })
-    .catch(function (e) {
-      document.getElementById("caps").innerHTML = '<p class="sub">Could not read capabilities: ' + esc(e.message) + "</p>";
-    });
+          if (!d.tools.length) message(toolsEl, "No tools were reported.");
+          else toolsEl.innerHTML =
+            "<table><thead><tr><th scope='col'>tool</th><th scope='col'>gate</th><th scope='col'>cost</th><th scope='col'>budget</th><th scope='col'>state</th></tr></thead><tbody>" +
+            d.tools.map(function (t) {
+              return "<tr><td><code>" + esc(t.name) + "</code></td>" +
+                "<td>" + esc(t.gate) + "</td>" +
+                "<td>" + esc(t.cost) + "</td>" +
+                '<td class="num">' + Math.round(t.timeoutMs / 1000) + "s</td>" +
+                "<td>" + (t.offered ? "offered" : "withheld — " + esc(t.withheld)) + "</td></tr>";
+            }).join("") + "</tbody></table>";
+
+          stampEl.textContent = d.generatedAt ? "Generated " + d.generatedAt : "";
+          if (restoreFocus && document.activeElement === document.body) capsEl.focus();
+        })
+        .catch(function () {
+          if (!current()) return;
+          message(capsEl, "Could not load capabilities.");
+          message(toolsEl, "Could not load the tool list.");
+          retryEl.hidden = false;
+          if (restoreFocus && document.activeElement === document.body) retryEl.focus();
+        })
+        .finally(function () {
+          if (!current()) return;
+          capsEl.setAttribute("aria-busy", "false");
+          toolsEl.setAttribute("aria-busy", "false");
+        });
+    }
+    retryEl.addEventListener("click", loadCapabilities);
+    loadCapabilities();
+  })();
 </script>
 <script id="caps-account">
   /* Retired: the chrome owns identity now. This block used to replace the header's

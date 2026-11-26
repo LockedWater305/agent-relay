@@ -68,7 +68,7 @@ async function runFixture(mode) {
     console:{log:(...a)=>trace.logs.push(a.join(" ")),error:(...a)=>trace.errors.push(a.join(" "))},
     // createWindow starts a 30-second fallback timer. The mocked load always
     // settles on its own; leave the unrelated timer inert in this fixture.
-    setTimeout:noop
+    setTimeout:noop, clearTimeout:noop
   });
   try {
     const subject=new vm.SourceTextModule(fs.readFileSync(source,"utf8")+"\nexport {installMenu,createWindow};",{

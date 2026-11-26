@@ -66,7 +66,20 @@
     h.style.marginLeft = (-padL) + "px";
     h.style.marginRight = (-padR) + "px";
   }
-  window.addEventListener("resize", applyBleed);
+  function revealActiveLink(nav) {
+    if (!nav) return;
+    var bar = nav.closest(".bz-navbar");
+    var active = nav.querySelector('a[aria-current="page"]');
+    if (!active || !bar || bar.scrollWidth <= bar.clientWidth) return;
+    var frame = bar.getBoundingClientRect(), ink = active.getBoundingClientRect();
+    // Scroll only the links, not the whole page or the panel the reader is using.
+    if (ink.left < frame.left + 5) bar.scrollLeft += ink.left - frame.left - 5;
+    else if (ink.right > frame.right - 5) bar.scrollLeft += ink.right - frame.right + 5;
+  }
+  window.addEventListener("resize", function () {
+    applyBleed();
+    revealActiveLink(document.getElementById("bzNav"));
+  });
 
   function style() {
     if (document.getElementById("bz-chrome-css")) return;
@@ -76,10 +89,10 @@
       // BZ-23: the dead `#companyTabs` divs are gone from talk/library/memory and
       // companies.js no longer mounts into a cached copy, so there is nothing left
       // to hide here. The visible switcher is the #bzSelect row below.
-      "#bzChrome{display:flex;align-items:center;gap:.55rem;flex-wrap:nowrap;min-width:0}",
-      "#bzChrome .bz-co-wrap{display:flex;align-items:center;gap:.3rem;min-width:0}",
+      "#bzChrome{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap;min-width:0;max-width:100%}",
+      "#bzChrome .bz-co-wrap{display:flex;align-items:center;gap:.3rem;min-width:0;max-width:100%}",
       "#bzChrome .bz-co-label{color:#8d8d8d;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}",
-      "#bzChrome select.bz-co-select{appearance:none;background:#101010;color:#f2f2f2;border:1px solid #2c2c2c;border-radius:8px;padding:.28rem 1.5rem .28rem .5rem;font:inherit;font-size:.82rem;max-width:15rem;text-overflow:ellipsis;cursor:pointer;background-image:linear-gradient(45deg,transparent 50%,#8d8d8d 50%),linear-gradient(135deg,#8d8d8d 50%,transparent 50%);background-position:calc(100% - 14px) 52%,calc(100% - 9px) 52%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}",
+      "#bzChrome select.bz-co-select{appearance:none;background:#101010;color:#f2f2f2;border:1px solid #2c2c2c;border-radius:8px;padding:.28rem 1.5rem .28rem .5rem;font:inherit;font-size:.82rem;min-width:0;max-width:15rem;text-overflow:ellipsis;cursor:pointer;background-image:linear-gradient(45deg,transparent 50%,#8d8d8d 50%),linear-gradient(135deg,#8d8d8d 50%,transparent 50%);background-position:calc(100% - 14px) 52%,calc(100% - 9px) 52%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}",
       "#bzChrome button.bz-ask{display:inline-flex;align-items:center;gap:.35rem;background:#ffd40d;color:#111;border:0;border-radius:999px;padding:.3rem .7rem;font:inherit;font-size:.82rem;font-weight:700;cursor:pointer;white-space:nowrap}",
       "#bzChrome button.bz-ask[aria-expanded='true']{background:#fff0a8}",
       "#bzChrome button.bz-voice{display:inline-flex;align-items:center;gap:.35rem;background:#161616;color:#f2f2f2;border:1px solid #3a3a3a;border-radius:999px;padding:.3rem .7rem;font:inherit;font-size:.82rem;font-weight:600;cursor:pointer;white-space:nowrap}",
@@ -103,11 +116,14 @@
       // The chrome is one identity in one place: it names a stack every host can
       // resolve the same way instead of inheriting whatever the page happened to load.
       ".bz-brandrow,.bz-brandrow *{line-height:1.55;font-family:system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif}",
-      ".bz-brandrow{display:flex;align-items:center;gap:.9rem;height:56px;min-height:56px;padding:0 .1rem;font-size:16px}",
+      ".bz-brandrow{display:flex;align-items:center;gap:.35rem .9rem;min-height:56px;padding:0 .1rem;font-size:16px}",
       ".bz-brandrow .bz-brand{display:flex;align-items:center;gap:.5rem;text-decoration:none;color:#f2f2f2}",
       ".bz-brandrow .bz-brand img{width:26px;height:26px;border-radius:6px;display:block}",
       ".bz-brandrow .bz-brand strong{font-size:.98rem;letter-spacing:.01em}",
       ".bz-brandrow .bz-cluster{margin-left:auto;display:flex;align-items:center;gap:.7rem;min-width:0}",
+      // A narrow desktop window must keep the company, account and Ask on-screen.
+      // Add rows instead of clipping controls or allowing the document to scroll sideways.
+      "@media (max-width:760px){.bz-brandrow{flex-wrap:wrap;padding-bottom:.35rem}#bzChrome{width:100%;justify-content:flex-start}}",
       // The link row is centred, not left-anchored: the brand owns the left edge and the
       // identity cluster owns the right, so a left-hugging link row reads as a mistake.
       // 'safe center' falls back to start the moment the row is wider than the bar, so
@@ -122,7 +138,7 @@
       "#bzNav a:focus-visible{outline:2px solid #ffd40d;outline-offset:3px;border-radius:4px}",
       "#bzNav a.active{color:#ffd40d;font-weight:700}",
       ".bz-chrome-scroll{overflow-x:auto;scrollbar-width:none}",
-      "#bzChrome .bz-account{color:#8d8d8d;font-size:.82rem;text-decoration:none;white-space:nowrap}",
+      "#bzChrome .bz-account{display:block;max-width:min(12rem,100%);overflow:hidden;text-overflow:ellipsis;color:#8d8d8d;font-size:.82rem;text-decoration:none;white-space:nowrap}",
       "#bzChrome .bz-account:hover{color:#ffd40d}",
       // The dropdown is chrome, so the chrome styles it: pages without a local
       // .account-menu rule (landing, wallet) would otherwise get an unstyled block.
@@ -215,7 +231,11 @@
       else { a.removeAttribute("target"); a.removeAttribute("rel"); }
       ordered.push(a);
     });
-    ordered.forEach(function (a) { nav.appendChild(a); });
+    // Moving an existing anchor drops its focus. Reorder only real differences.
+    var existingOrder = nav.querySelectorAll("a[data-nav]");
+    if (ordered.some(function (a, i) { return a !== existingOrder[i]; })) {
+      ordered.forEach(function (a) { nav.appendChild(a); });
+    }
     // Anchors too: `#bzNav a` is a page-owned id rule on sketch/studio/capabilities,
     // so an inherited value cannot reach them. 0.86rem is the shared nav.css size;
     // writing it inline keeps the label box identical wherever the row is rendered.
@@ -671,6 +691,7 @@
     if (document.getElementById("bzChrome")) {
       // Re-derive the body-padding bleed for the page that is active NOW.
       applyBleed();
+      revealActiveLink(nav);
       return;
     }
     var header = nav.closest("header") || document.querySelector("header") || document.body;
@@ -732,6 +753,7 @@
 
     header.appendChild(brandRow);
     header.appendChild(bar);
+    revealActiveLink(nav);
     // The header owns the two chrome rows and NOTHING else. Page toolbars used to be
     // appended into it, so the header measured 132px on Talk, 155 on Sketch and 219 on
     // Capabilities and the chrome read as a different component per page (BZ-11, frodo's
@@ -1200,7 +1222,7 @@
     return page;
   }
 
-  function finish(key, title, scrollY) {
+  function finish(key, title, scrollY, navFocus) {
     // Talk consumes ?job / ?expert with replaceState during bootstrap. Adopt
     // that same-page canonical URL, or Back later misses its live DOM cache.
     var canonicalKey = keyOf(location.href);
@@ -1228,6 +1250,14 @@
     // soft navigation; a synthetic event keeps their boot code honest.
     try { document.dispatchEvent(new Event("DOMContentLoaded")); } catch (e) {}
     try { window.scrollTo(0, scrollY || 0); } catch (e) {}
+    // The first soft hop may replace the original page's header. Keep the
+    // departing link's keyboard focus unless the new page set focus itself.
+    if (navFocus && document.activeElement === document.body) {
+      var active = document.querySelector('#bzNav a[aria-current="page"]');
+      if (active && active.getAttribute("data-nav") === navFocus) {
+        active.focus({ preventScroll: true });
+      }
+    }
   }
 
   function stashCurrent() {
@@ -1266,13 +1296,13 @@
     }
   }
 
-  function restore(key) {
+  function restore(key, navFocus) {
     var entry = cache[key];
     var page = entry.el;
     document.getElementById("bzPageCache").removeChild(page);
     page.id = "bzPage";
     document.body.insertBefore(page, document.getElementById("bzPageCache"));
-    finish(key, entry.title, entry.scrollY);
+    finish(key, entry.title, entry.scrollY, navFocus);
   }
 
   // Resolves true only for a completed/current page, false if superseded or
@@ -1315,6 +1345,9 @@
         if (id !== navigationId) return;
         var commit = commitQueue.then(function () {
           if (id !== navigationId || (key === currentKey && currentReady)) return;
+          var focused = document.activeElement;
+          var navFocus = focused && focused.matches("#bzNav a[data-nav]") && keyOf(focused.href) === key
+            ? focused.getAttribute("data-nav") : null;
           ensurePageWrapper();
           var target = document.getElementById("bzPage");
           if (target) target.setAttribute("data-bz-path", currentKey);
@@ -1341,7 +1374,7 @@
               return;
             }
             stashCurrent();
-            if (cache[key]) { restore(key); return; }
+            if (cache[key]) { restore(key, navFocus); return; }
             var doc = new DOMParser().parseFromString(html, "text/html");
             var page = buildFromDoc(doc, key);
             document.body.insertBefore(page, document.getElementById("bzPageCache"));
@@ -1350,7 +1383,7 @@
             adoptStyles(doc, key);
             return runScripts(page, function () { return id === navigationId; }).then(function () {
               if (id !== navigationId) return;
-              finish(key, doc.title, 0);
+              finish(key, doc.title, 0, navFocus);
             });
           });
         });
