@@ -53,9 +53,9 @@
   .hint { color:var(--bz-muted); font-size:0.78rem; }
   .drop { outline:2px dashed var(--bz-yellow); outline-offset:-8px; }
 
-  #regionOverlay { position: absolute; inset: 0; cursor: crosshair; display: none; }
+  #regionOverlay { position: absolute; inset: 0; cursor: crosshair; display: none; touch-action: none; }
   #regionOverlay.on { display: block; }
-  #regionRect { position: absolute; border: 2px dashed #ffd40d; background: rgba(255,212,13,0.16); display: none; }
+  #regionRect { position: absolute; pointer-events:none; border: 2px dashed #ffd40d; background: rgba(255,212,13,0.16); display: none; }
   #regionPanel { display: flex; gap: 0.45rem; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; }
   #regionPanel input { flex: 1; min-width: 220px; }
 </style>
@@ -306,6 +306,7 @@
       // whose object belonged to the replaced snapshot.
       selected = Number.isInteger(d.selectedImage) && d.selectedImage >= 0 ? images[d.selectedImage] || null : null;
       drag = null;
+      selectedStroke = null;
       renderImages();
       redraw();
     }
@@ -327,6 +328,7 @@
     }
     var drag = null;
     var draft = null;
+    var draftPointerId = null;
     var scale = 1;           // canvas pixels per CSS pixel
 
     function resize() {
@@ -370,7 +372,9 @@
     // Which mark is under the cursor? Cheap segment distance is enough for selecting.
     function hitTest(p) {
       var best = null, bestD = 9;
-      strokes.forEach(function (st) {
+      // The most recently drawn mark is painted on top. In a distance tie,
+      // pick it rather than an otherwise invisible mark underneath.
+      strokes.slice().reverse().forEach(function (st) {
         if (st.tool === "text") {
           var at = (st.anchor && anchorPoint(st.anchor)) || { x: st.x1, y: st.y1 };
           ctx.save();
@@ -380,7 +384,8 @@
           var left = at.x - (st.anchor ? 9 : 2);
           if (p.x >= left && p.x <= at.x + metrics.width + 2 &&
               p.y >= at.y - Math.max(10, metrics.actualBoundingBoxAscent || 0) - 2 &&
-              p.y <= at.y + Math.max(2, metrics.actualBoundingBoxDescent || 0) + 2) { best = st; bestD = 0; }
+              p.y <= at.y + Math.max(2, metrics.actualBoundingBoxDescent || 0) + 2 &&
+              bestD > 0) { best = st; bestD = 0; }
           return;
         }
         if (st.tool === "pen" && st.points) {
@@ -432,7 +437,7 @@
       c.lineCap = "round";
       c.lineJoin = "round";
       c.setLineDash(isDraft ? [6, 4] : []);
-      if (!output && s.id && s.id === selectedStroke) {
+      if (!output && s === selectedStroke) {
         c.lineWidth = (s.width || 3) + 6;
         c.strokeStyle = "rgba(255,212,13,0.25)";
         c.beginPath();
@@ -490,20 +495,20 @@
     var selectedStroke = null;
     function selectStroke(e) {
       var hit = hitTest(pt(e));
-      selectedStroke = hit ? hit.id : null;
+      selectedStroke = hit;
       redraw();
       return Boolean(hit);
     }
+    function primaryPointer(e) { return (e.button === 0 || e.button === undefined) && e.isPrimary !== false; }
     stage.addEventListener("pointerdown", function (e) {
-      if (e.target === stage && tool === "select" && editable()) selectStroke(e);
+      if (e.target === stage && tool === "select" && editable() && primaryPointer(e)) selectStroke(e);
     });
     canvas.addEventListener("pointerdown", function (e) {
-      if (!editable()) return;
+      if (!editable() || !primaryPointer(e) || draft) return;
       if (tool === "select") {
         selectStroke(e);
         return;
       }
-      canvas.setPointerCapture(e.pointerId);
       var p = pt(e);
       if (tool === "text") {
         var t = window.prompt("Note:");
@@ -519,30 +524,39 @@
         }
         return;
       }
-      snapshot();
+      canvas.setPointerCapture(e.pointerId);
+      draftPointerId = e.pointerId;
       draft = tool === "pen"
         ? { tool: "pen", color: color, width: 3, points: [p] }
         : { tool: tool, color: color, width: 3, x1: p.x, y1: p.y, x2: p.x, y2: p.y };
       redraw();
     });
     canvas.addEventListener("pointermove", function (e) {
-      if (!draft || !editable()) return;
+      if (!draft || !editable() || !ownsDraftPointer(e)) return;
       var p = pt(e);
       if (draft.tool === "pen") draft.points.push(p);
       else { draft.x2 = p.x; draft.y2 = p.y; }
       redraw();
     });
+    function ownsDraftPointer(e) { return e.pointerId === undefined || e.pointerId === draftPointerId; }
     function finishStroke() {
       if (!draft || !hydrated || !ownsPage()) return;
+      snapshot();
       draft.id = newId();
       strokes.push(draft);
-      draft = null;
+      draft = null; draftPointerId = null;
       redraw();
       changed();
       setStatus(strokes.length + " marks on the board");
     }
-    canvas.addEventListener("pointerup", finishStroke);
-    canvas.addEventListener("pointercancel", finishStroke);
+    canvas.addEventListener("pointerup", function (e) { if (ownsDraftPointer(e)) finishStroke(); });
+    function cancelStroke(e) {
+      if (!draft || !ownsDraftPointer(e)) return;
+      draft = null; draftPointerId = null;
+      redraw();
+    }
+    canvas.addEventListener("pointercancel", cancelStroke);
+    canvas.addEventListener("lostpointercapture", cancelStroke);
 
     // ── images: drop, paste, move, resize ─────────────────────────────
     function addImage(url, at) {
@@ -583,7 +597,7 @@
         wrap.appendChild(img);
         wrap.appendChild(handle);
         wrap.addEventListener("pointerdown", function (e) {
-          if (tool !== "select" || !editable() || !wrap.isConnected || images.indexOf(im) < 0) return;
+          if (tool !== "select" || !editable() || !primaryPointer(e) || !wrap.isConnected || images.indexOf(im) < 0) return;
           e.stopPropagation();
           // A visible mark can be selected over a picture. Handles still resize.
           if (e.target !== handle && selectStroke(e)) return;
@@ -663,10 +677,12 @@
         if (tool === "select" && selectedStroke) {
           e.preventDefault();
           snapshot();
-          strokes = strokes.filter(function (x) { return x.id !== selectedStroke; });
-          // Notes anchored to a deleted mark keep their fallback position, so the
-          // comment survives the mark it described.
-          strokes.forEach(function (x) { if (x.anchor === selectedStroke) x.anchor = null; });
+          var target = selectedStroke;
+          var detach = target.id && strokes.find(function (st) { return st.id === target.id; }) === target;
+          strokes = strokes.filter(function (x) { return x !== target; });
+          // Preserve other marks that happen to share an old saved ID. A note
+          // anchored to the deleted record itself still gets its fallback.
+          if (detach) strokes.forEach(function (x) { if (x.anchor === target.id) x.anchor = null; });
           selectedStroke = null;
           redraw();
           changed();
@@ -684,7 +700,7 @@
       if (!editable()) return;
       if (!confirm("Clear every mark you drew? (images stay)")) return;
       snapshot();
-      strokes = []; redraw();
+      strokes = []; selectedStroke = null; redraw();
       changed();
     });
 
@@ -882,54 +898,73 @@
       var btn = $("regionApply");
       var note = $("regionStatus");
       var dragStart = null;
-      var picked = null;   // {x,y,w,h} in CSS pixels relative to the picture
+      var picked = null;  // normalized coordinates owned by one rendered image
+      var previewUrl = null;
+
+      function showRect(rect) {
+        if (!rect) { rectEl.style.display = "none"; return; }
+        rectEl.style.display = "block";
+        rectEl.style.left = (100 * rect.x) + "%"; rectEl.style.top = (100 * rect.y) + "%";
+        rectEl.style.width = (100 * rect.w) + "%"; rectEl.style.height = (100 * rect.h) + "%";
+      }
 
       function syncOverlay() {
-        if (!lastRenderUrl) { overlay.classList.remove("on"); return; }
+        if (!lastRenderUrl || !img.complete || !img.naturalWidth) { overlay.classList.remove("on"); return; }
+        if (previewUrl !== lastRenderUrl) {
+          dragStart = null;
+          if (picked) note.textContent = "Drag a box on the new picture.";
+          picked = null; showRect(null);
+          previewUrl = lastRenderUrl;
+        }
         var r = img.getBoundingClientRect();
         var b = box.getBoundingClientRect();
-        overlay.style.left = (r.left - b.left) + "px";
-        overlay.style.top = (r.top - b.top) + "px";
+        overlay.style.left = (r.left - b.left - box.clientLeft) + "px";
+        overlay.style.top = (r.top - b.top - box.clientTop) + "px";
         overlay.style.width = r.width + "px";
         overlay.style.height = r.height + "px";
         overlay.classList.add("on");
       }
 
-      overlay.addEventListener("mousedown", function (e) {
+      function corner(e) {
         var r = overlay.getBoundingClientRect();
-        dragStart = { x: e.clientX - r.left, y: e.clientY - r.top };
-        rectEl.style.display = "block";
-        rectEl.style.left = dragStart.x + "px";
-        rectEl.style.top = dragStart.y + "px";
-        rectEl.style.width = "0px";
-        rectEl.style.height = "0px";
+        return { x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
+                 y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)) };
+      }
+      function regionTo(e) {
+        var end = corner(e);
+        return { x: Math.min(end.x, dragStart.x), y: Math.min(end.y, dragStart.y),
+                 w: Math.abs(end.x - dragStart.x), h: Math.abs(end.y - dragStart.y), url: dragStart.url };
+      }
+      overlay.addEventListener("pointerdown", function (e) {
+        if (!editable() || !primaryPointer(e) || regionBusy || previewUrl !== lastRenderUrl || !img.complete || !img.naturalWidth) return;
+        overlay.setPointerCapture(e.pointerId);
+        dragStart = corner(e);
+        dragStart.id = e.pointerId; dragStart.url = lastRenderUrl;
+        picked = null;
+        showRect(regionTo(e));
         e.preventDefault();
       });
-      overlay.addEventListener("mousemove", function (e) {
-        if (!dragStart) return;
-        var r = overlay.getBoundingClientRect();
-        var x = Math.max(0, Math.min(r.width, e.clientX - r.left));
-        var y = Math.max(0, Math.min(r.height, e.clientY - r.top));
-        var x0 = Math.min(x, dragStart.x), y0 = Math.min(y, dragStart.y);
-        rectEl.style.left = x0 + "px"; rectEl.style.top = y0 + "px";
-        rectEl.style.width = Math.abs(x - dragStart.x) + "px";
-        rectEl.style.height = Math.abs(y - dragStart.y) + "px";
+      overlay.addEventListener("pointermove", function (e) {
+        if (dragStart && dragStart.id === e.pointerId && dragStart.url === lastRenderUrl) showRect(regionTo(e));
       });
-      overlay.addEventListener("mouseup", function (e) {
-        if (!dragStart) return;
-        var r = overlay.getBoundingClientRect();
-        var x = Math.max(0, Math.min(r.width, e.clientX - r.left));
-        var y = Math.max(0, Math.min(r.height, e.clientY - r.top));
-        picked = {
-          x: Math.min(x, dragStart.x), y: Math.min(y, dragStart.y),
-          w: Math.abs(x - dragStart.x), h: Math.abs(y - dragStart.y),
-          scaleX: img.naturalWidth / r.width, scaleY: img.naturalHeight / r.height,
-        };
+      overlay.addEventListener("pointerup", function (e) {
+        if (!dragStart || dragStart.id !== e.pointerId) return;
+        picked = dragStart.url === lastRenderUrl ? regionTo(e) : null;
         dragStart = null;
-        if (picked.w < 8 || picked.h < 8) { picked = null; note.textContent = "That box is too small — drag a wider area."; return; }
-        note.textContent = Math.round(picked.w) + "×" + Math.round(picked.h) + " selected. Describe the change.";
+        var r = overlay.getBoundingClientRect();
+        if (!picked || picked.w * r.width < 8 || picked.h * r.height < 8) {
+          picked = null; showRect(null); note.textContent = "That box is too small — drag a wider area."; return;
+        }
+        showRect(picked);
+        note.textContent = Math.round(picked.w * r.width) + "×" + Math.round(picked.h * r.height) + " selected. Describe the change.";
         input.focus();
       });
+      function cancelCrop(e) {
+        if (!dragStart || dragStart.id !== e.pointerId) return;
+        dragStart = null; showRect(null); note.textContent = "Drag a box on the picture first.";
+      }
+      overlay.addEventListener("pointercancel", cancelCrop);
+      overlay.addEventListener("lostpointercapture", cancelCrop);
 
       window.addEventListener("resize", syncOverlay);
       img.addEventListener("load", syncOverlay);
@@ -941,7 +976,7 @@
         var g = c.getContext("2d");
         g.fillStyle = "#000"; g.fillRect(0, 0, w, h);
         g.fillStyle = "#fff";
-        g.fillRect(picked.x * picked.scaleX, picked.y * picked.scaleY, picked.w * picked.scaleX, picked.h * picked.scaleY);
+        g.fillRect(picked.x * w, picked.y * h, picked.w * w, picked.h * h);
         return c.toDataURL("image/png");
       }
 
@@ -949,7 +984,9 @@
         if (!editable()) return;
         var instruction = (input.value || "").trim();
         if (!lastRenderUrl) { note.textContent = "Create a picture first, then change part of it."; return; }
-        if (!picked) { note.textContent = "Drag a box on the picture first."; return; }
+        if (!picked || picked.url !== lastRenderUrl || !img.complete || !img.naturalWidth) {
+          note.textContent = "Drag a box on the picture first."; return;
+        }
         if (!instruction) { input.focus(); note.textContent = "Say what should change inside the box."; return; }
         var imageId = Number(String(lastRenderUrl).split("/").pop());
         regionBusy = true;

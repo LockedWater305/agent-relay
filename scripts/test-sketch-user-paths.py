@@ -35,27 +35,38 @@ class Sketch(unittest.TestCase):
             def do_GET(self):
                 path = urlsplit(self.path).path
                 if path == "/buzzy/sketch": self.reply(HTML, "text/html; charset=utf-8")
-                elif path == "/api/buzzy/art": self.reply(dict(ok=True, board=cls.board, images=[]))
+                elif path == "/api/buzzy/art": self.reply(dict(ok=True, board=cls.board, images=cls.outputs))
                 elif path == "/api/buzzy/projects/test": self.reply(dict(project=dict(title="Fixture")))
                 elif path == "/assets/front.png": self.reply(GREEN, "image/png")
                 elif path == "/assets/rear-slow.png":
                     time.sleep(0.22)
                     self.reply(RED, "image/png")
                 elif path == "/assets/blue.png": self.reply(BLUE, "image/png")
+                elif path == "/assets/101": self.reply(BLUE, "image/png")
+                elif path == "/assets/102": self.reply(RED, "image/png")
+                elif path == "/assets/103": self.reply(GREEN, "image/png")
                 else: self.reply(b"", "text/plain", 404)
             def do_POST(self):
                 data=self.rfile.read(int(self.headers["Content-Length"])); req=json.loads(data)
-                if self.path != "/api/buzzy/art" or req["action"] != "save" or req["jobId"] != "test":
+                if self.path != "/api/buzzy/art" or req["jobId"] != "test":
                     self.reply({}, status=404); return
-                cls.board=req["board"]; cls.last_size=len(data); self.reply(dict(ok=True,saved=True))
+                if req["action"]=="save":
+                    cls.board=req["board"]; cls.last_size=len(data); self.reply(dict(ok=True,saved=True))
+                elif req["action"]=="render" and cls.outputs:
+                    self.reply(dict(image=dict(url="/assets/102"),ms=100))
+                elif req["action"]=="edit" and cls.outputs:
+                    cls.edits.append(req)
+                    self.reply(dict(image=dict(url="/assets/103"),ms=100))
+                else: self.reply({},status=404)
         cls.server=ThreadingHTTPServer(("127.0.0.1",0),Handler); cls.thread=Thread(target=cls.server.serve_forever,daemon=True); cls.thread.start()
         cls.pw=sync_playwright().start(); cls.browser=cls.pw.chromium.launch(executable_path=os.environ.get("SKETCH_BROWSER"),args=["--disable-dev-shm-usage"]); print("Chromium", cls.browser.version, flush=True)
     @classmethod
     def tearDownClass(cls):
         cls.browser.close(); cls.pw.stop(); cls.server.shutdown(); cls.server.server_close(); cls.thread.join()
-    def start(self, strokes, images=None):
+    def start(self, strokes, images=None, *, outputs=None, touch=False):
         type(self).board=dict(version=1,strokes=strokes,images=images or []); type(self).last_size=0
-        page=self.browser.new_page(viewport=dict(width=1050,height=770),device_scale_factor=1)
+        type(self).outputs=outputs or []; type(self).edits=[]
+        page=self.browser.new_page(viewport=dict(width=1050,height=770),device_scale_factor=1,has_touch=touch)
         self.addCleanup(page.context.close)
         page.goto("http://127.0.0.1:%d/buzzy/sketch?job=test"%self.server.server_port)
         page.wait_for_function("document.querySelector('#status').textContent.startsWith('Board loaded')")
@@ -184,4 +195,55 @@ class Sketch(unittest.TestCase):
         import base64
         count=p.evaluate("""async data=>{const i=new Image();i.src='data:image/png;base64,'+data;await i.decode();const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);const a=x.getImageData(115,20,64,20).data;let n=0;for(let k=0;k<a.length;k+=4) if(a[k]>190 && a[k+1]<90 && a[k+2]<90)n++;return n}""",base64.b64encode(dl.value.path().read_bytes()).decode())
         self.assertGreater(count,10)
+    def test_legacy_saved_marks_can_be_selected_and_removed(self):
+        legacy={k:v for k,v in LINE.items() if k!="id"}
+        p=self.start([legacy]); self.hit(p,100,50); p.keyboard.press("Delete"); self.save(p)
+        self.assertEqual(self.board["strokes"],[])
+        p.click("#undo"); self.save(p); self.assertEqual(self.board["strokes"],[legacy])
+    def test_duplicate_ids_delete_only_clicked_stroke(self):
+        lower=dict(LINE,y1=120,y2=120)
+        p=self.start([LINE.copy(),lower]); self.hit(p,100,120); p.keyboard.press("Delete"); self.save(p)
+        self.assertEqual(self.board["strokes"],[LINE])
+    def test_selecting_identical_overlap_picks_visible_front_stroke(self):
+        front=dict(LINE,id="front",color="#cc00cc")
+        p=self.start([LINE.copy(),front]); self.hit(p,100,50); p.keyboard.press("Delete"); self.save(p)
+        self.assertEqual(self.board["strokes"],[LINE])
+    def test_secondary_mouse_button_does_not_add_a_brush_mark(self):
+        p=self.start([LINE.copy()]); p.click('[data-tool="pen"]'); r=p.locator("#board").bounding_box()
+        p.mouse.click(r["x"]+100,r["y"]+100,button="right"); self.save(p)
+        self.assertEqual(self.board["strokes"],[LINE])
+    def test_system_cancel_neither_saves_an_incomplete_stroke_nor_drops_redo(self):
+        p=self.start([],touch=True); p.click('[data-tool="pen"]'); r=p.locator("#board").bounding_box()
+        p.touchscreen.tap(r["x"]+65,r["y"]+65); self.save(p); prior=self.board["strokes"]
+        self.assertEqual(len(prior),1)
+        p.click("#undo"); self.save(p); self.assertEqual(self.board["strokes"],[])
+        c=p.context.new_cdp_session(p)
+        c.send("Input.dispatchTouchEvent",dict(type="touchStart",touchPoints=[dict(x=r["x"]+100,y=r["y"]+100)]))
+        c.send("Input.dispatchTouchEvent",dict(type="touchMove",touchPoints=[dict(x=r["x"]+130,y=r["y"]+140)]))
+        c.send("Input.dispatchTouchEvent",dict(type="touchCancel",touchPoints=[]))
+        self.save(p); self.assertEqual(self.board["strokes"],[])
+        p.click("#redo"); self.save(p); self.assertEqual(self.board["strokes"],prior)
+    def crop_box(self,p, outside=False):
+        overlay=p.locator("#regionOverlay")
+        overlay.wait_for(state="visible")
+        r=overlay.bounding_box(); x=r["x"]; y=r["y"]
+        p.mouse.move(x+30,y+40); p.mouse.down()
+        p.mouse.move(x+r["width"]+(20 if outside else -45),y+130,steps=8); p.mouse.up()
+    def test_crop_release_outside_preview_clamps_and_selects_edge(self):
+        p=self.start([],outputs=[dict(url="/assets/101")]); self.crop_box(p,outside=True)
+        self.assertIn("selected",p.inner_text("#regionStatus"))
+        p.fill("#regionPrompt","Change just this area."); p.click("#regionApply")
+        p.wait_for_function("document.querySelector('#regionStatus').textContent.includes('saved to this project')")
+        self.assertEqual(len(self.edits),1); self.assertEqual(self.edits[0]["imageId"],101)
+        mask=base64.b64decode(self.edits[0]["mask"].split(',')[1])
+        self.assertEqual(self.pixel(p,mask,7,3),[255,255,255,255])
+        self.assertEqual(self.pixel(p,mask,4,0),[0,0,0,255])
+    def test_new_render_cannot_reuse_previous_render_crop(self):
+        p=self.start([],outputs=[dict(url="/assets/101")]); self.crop_box(p)
+        self.assertIn("selected",p.inner_text("#regionStatus")); p.fill("#regionPrompt","Old rectangle.")
+        p.fill("#prompt","Create a second picture."); p.click("#create")
+        p.wait_for_function("document.querySelector('#resultImg').src.endsWith('/assets/102') && document.querySelector('#resultImg').complete")
+        p.click("#regionApply"); p.wait_for_timeout(200)
+        self.assertEqual(self.edits,[], "Old crop must not be applied to the newly generated picture")
+        self.assertIn("Drag a box",p.inner_text("#regionStatus"))
 if __name__=="__main__": unittest.main(verbosity=2)
