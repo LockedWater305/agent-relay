@@ -585,6 +585,24 @@ class Sketch(unittest.TestCase):
         self.assertEqual(self.board["strokes"],before)
         p.keyboard.press("Control+z"); self.save(p)
         self.assertEqual(self.board["strokes"],before[:1])
+    def test_selected_reference_resize_handle_remains_reachable_over_another_image(self):
+        rear=ref("blue")
+        front=ref("front",x=145,y=120)
+        p=self.start([],[rear,front])
+        p.wait_for_function("Array.from(document.querySelectorAll('#layers img')).every(i => i.naturalWidth === 8)")
+        self.hit(p,90,100)
+        self.assertEqual(p.locator('.img-wrap.selected[data-id="blue"]').count(),1)
+
+        # The lower-right grip of the selected rear reference is over the front
+        # reference. Raising the entire selected image would obscure the front.
+        self.assertEqual(self.screenshot_pixel(p,175,145),[20,210,40])
+        self.drag(p,200,170,230,186); self.save(p)
+        self.assertEqual(self.board["images"],[dict(rear,w=180,h=116),front])
+        self.assertEqual(self.screenshot_pixel(p,175,145),[20,210,40])
+
+        p.click('[data-tool="line"]'); self.drag(p,230,186,270,204); self.save(p)
+        self.assertEqual([s["tool"] for s in self.board["strokes"]],["line"])
+        self.assertEqual(self.board["images"],[dict(rear,w=180,h=116),front])
     def test_pending_autosave_does_not_persist_a_reference_move_still_in_progress(self):
         image,p,point,send,x=self.touch_image_setup()
         p.click('[data-tool="line"]'); self.drag(p,360,170,470,170)

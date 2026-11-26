@@ -483,6 +483,11 @@ async function cmdKey(argv) {
 
 async function cmdRecipe(argv) {
   const sub = argv[0] ?? "list";
+  // Only the explicit add verb may reach the import branch below.
+  if (!["list", "catalog", "fetch", "verify", "add"].includes(sub)) {
+    console.error("usage: beezilla recipe <list|catalog|fetch|verify|add> [argument]");
+    return 2;
+  }
   const rt = await ensureServer();
 
   const post = async (path, bodyObj) => {

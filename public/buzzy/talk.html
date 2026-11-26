@@ -6314,6 +6314,14 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       chatState.paper = null;
       renderPaper(null);
       resetDraftGate();
+      // The recent-work landing has no active conversation. Clear the old
+      // view as well as its state, without touching text still in the composer.
+      document.getElementById("chatMessages").textContent = "";
+      var notice = document.getElementById("chatError");
+      notice.textContent = "";
+      notice.classList.add("hidden");
+      setBackVisible(false);
+      resetContextMeter();
       try { history.replaceState(null, "", window.location.pathname); } catch (_) {}
       updateChrome();
       showRecentWork();
