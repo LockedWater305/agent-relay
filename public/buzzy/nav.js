@@ -1078,6 +1078,47 @@
   // come from our own record, never from location.href.
   var currentKey = keyOf(location.href);
 
+  // History's native restore runs against the outgoing DOM while a soft page
+  // is fetching. Save the viewport under the browser's entry key; the same
+  // URL can occur twice with different offsets. This only observes Navigation
+  // events; routing and native restoration stay untouched where unavailable.
+  var viewportNav = window.navigation;
+  var viewports = new Map();
+  var mountedViewport = viewportKey();
+  function viewportKey() {
+    var entry = viewportNav && viewportNav.currentEntry;
+    return entry ? entry.key : null;
+  }
+  function rememberViewport() {
+    var entry = viewportKey();
+    if (!currentReady || !entry || mountedViewport !== entry || !Number.isFinite(window.scrollY)) return;
+    viewports.delete(entry); // touched entries remain recent
+    viewports.set(entry, { key: currentKey, y: window.scrollY });
+    if (viewports.size > 100) viewports.delete(viewports.keys().next().value);
+  }
+  function previousViewport(key) {
+    var saved = viewports.get(viewportKey());
+    return saved && saved.key === key ? saved.y : undefined;
+  }
+  function settleViewport(y) {
+    if (y === undefined || !window.requestAnimationFrame) return;
+    var epoch = navigationId, entry = mountedViewport;
+    // Mounting a new shell changes layout before Chromium applies scroll
+    // anchoring. Reapply the same offset on the freshly laid-out history entry.
+    window.requestAnimationFrame(function () {
+      window.requestAnimationFrame(function () {
+        if (epoch !== navigationId || entry !== viewportKey()) return;
+        window.scrollTo(0, y);
+      });
+    });
+  }
+  if (viewportNav && typeof viewportNav.addEventListener === "function") {
+    viewportNav.addEventListener("navigate", function (e) {
+      if (e.destination.sameDocument && e.navigationType === "traverse") rememberViewport();
+    });
+  }
+
+
   // A hard load ships the page's own <style> tags with NO data-bz-style, so the
   // "only the active page's CSS is enabled" switch never saw them: after soft
   // navigating off Capabilities its `body{padding:0 1.1rem}` stayed live on every
@@ -1261,7 +1302,7 @@
     return page;
   }
 
-  function finish(key, title, scrollY, navFocus) {
+  function finish(key, title, scrollY, navFocus, historyScroll) {
     // Talk consumes ?job / ?expert with replaceState during bootstrap. Adopt
     // that same-page canonical URL, or Back later misses its live DOM cache.
     var canonicalKey = keyOf(location.href);
@@ -1282,6 +1323,7 @@
     }
     currentKey = key;
     currentReady = true;
+    mountedViewport = viewportKey();
     adoptStyles(null, key);
     setTitle(title);
     if (window.BeeZillaChrome) window.BeeZillaChrome.boot();
@@ -1289,6 +1331,7 @@
     // soft navigation; a synthetic event keeps their boot code honest.
     try { document.dispatchEvent(new Event("DOMContentLoaded")); } catch (e) {}
     try { window.scrollTo(0, scrollY || 0); } catch (e) {}
+    if (historyScroll) settleViewport(scrollY);
     // The first soft hop may replace the original page's header. Keep the
     // departing link's keyboard focus unless the new page set focus itself.
     if (navFocus && document.activeElement === document.body) {
@@ -1335,13 +1378,13 @@
     }
   }
 
-  function restore(key, navFocus) {
+  function restore(key, navFocus, scrollY) {
     var entry = cache[key];
     var page = entry.el;
     document.getElementById("bzPageCache").removeChild(page);
     page.id = "bzPage";
     document.body.insertBefore(page, document.getElementById("bzPageCache"));
-    finish(key, entry.title, entry.scrollY, navFocus);
+    finish(key, entry.title, scrollY === undefined ? entry.scrollY : scrollY, navFocus);
   }
 
   // Resolves true only for a completed/current page, false if superseded or
@@ -1364,11 +1407,22 @@
     if (atUrl && pendingNavigation && pendingNavigation.key === key) return pendingNavigation.promise;
     // popstate has already changed location. Compare with the mounted page,
     // not just the address, and never drop a newer request because we are busy.
-    if (atUrl && key === currentKey && currentReady && !busy) return Promise.resolve(true);
+    function restoreViewport() {
+      mountedViewport = viewportKey();
+      var scrollY = opts.push === false ? previousViewport(key) : undefined;
+      if (scrollY !== undefined) window.scrollTo(0, scrollY);
+    }
+    if (atUrl && key === currentKey && currentReady && !busy) {
+      if (opts.push === false) restoreViewport();
+      return Promise.resolve(true);
+    }
     var id = ++navigationId;
     busy = true;
     // Default is to push; only popstate passes push:false (history already moved).
-    if (opts.push !== false && !atUrl) history.pushState({ bzShell: key }, "", url.pathname + url.search);
+    if (opts.push !== false && !atUrl) {
+      rememberViewport();
+      history.pushState({ bzShell: key }, "", url.pathname + url.search);
+    }
 
     // Keep the current DOM alive until the latest destination is ready. A stale
     // fetch cannot mount, run scripts, overwrite the Talk cache, or redirect us.
@@ -1383,7 +1437,11 @@
       .then(function (html) {
         if (id !== navigationId) return;
         var commit = commitQueue.then(function () {
-          if (id !== navigationId || (key === currentKey && currentReady)) return;
+          if (id !== navigationId) return;
+          if (key === currentKey && currentReady) {
+            if (opts.push === false) restoreViewport();
+            return;
+          }
           var focused = document.activeElement;
           var navFocus = focused && focused.matches("#bzNav a[data-nav]") && keyOf(focused.href) === key
             ? focused.getAttribute("data-nav") : null;
@@ -1408,12 +1466,16 @@
                 // restoring the current page appends it after that destination.
                 if (opts.push === false) history.pushState({ bzShell: currentKey }, "", currentKey);
                 else history.replaceState({ bzShell: currentKey }, "", currentKey);
+                mountedViewport = viewportKey();
               }
               if (owner && typeof owner.bzResume === "function") owner.bzResume();
               return;
             }
             stashCurrent();
-            if (cache[key]) { restore(key, navFocus); return; }
+            if (cache[key]) {
+              restore(key, navFocus, opts.push === false ? previousViewport(key) : undefined);
+              return;
+            }
             var doc = new DOMParser().parseFromString(html, "text/html");
             var page = buildFromDoc(doc, key);
             document.body.insertBefore(page, document.getElementById("bzPageCache"));
@@ -1422,7 +1484,8 @@
             adoptStyles(doc, key);
             return runScripts(page, function () { return id === navigationId; }).then(function () {
               if (id !== navigationId) return;
-              finish(key, doc.title, 0, navFocus);
+              var historyScroll = opts.push === false ? previousViewport(key) : undefined;
+              finish(key, doc.title, historyScroll, navFocus, historyScroll !== undefined);
             });
           });
         });
