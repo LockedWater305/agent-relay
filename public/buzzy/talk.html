@@ -1178,6 +1178,7 @@
   gap: 0.5rem;
   margin: 0.45rem 0 0;
 }
+.ctx-meter.hidden { display: none; }
 .ctx-bar {
   flex: 1;
   height: 4px;
@@ -5128,7 +5129,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var text = document.getElementById("ctxText");
       if (fill) fill.style.width = "0%";
       if (text) text.textContent = "Context 0%";
-      if (meter) { meter.classList.remove("warn", "hot"); }
+      if (meter) {
+        // A new conversation has no measured context yet; it is not at 0%.
+        meter.classList.remove("warn", "hot");
+        meter.classList.add("hidden");
+      }
     }
 
     // A turn that produced no audio. Never substitutes the browser's voice.
@@ -7490,24 +7495,40 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           return;
         }
         list.innerHTML = "";
-        sessions.forEach(function (s) {
+        sessions.forEach(function (s, index) {
           const card = document.createElement("div");
-          card.className = "session-card" + (s.id === chatState.sessionId ? " active" : "");
-          const title = s.title || "Untitled session";
-          const summary = s.summary || "No summary yet.";
+          const active = s.id === chatState.sessionId;
+          card.className = "session-card" + (active ? " active" : "");
+          if (active) card.setAttribute("aria-current", "true");
           const mc = (s.messageCount != null ? s.messageCount : 0) + " message" + (s.messageCount === 1 ? "" : "s");
           card.innerHTML =
-            '<p class="sc-title">' + title.replace(/</g, "&lt;") + "</p>" +
-            '<p class="sc-summary">' + summary.replace(/</g, "&lt;") + "</p>" +
-            '<p class="sc-meta">' + mc + "</p>" +
+            '<p class="sc-title"></p>' +
+            '<p class="sc-summary"></p>' +
+            '<p class="sc-meta"></p>' +
             '<div class="sc-actions">' +
             '<button type="button" class="sc-open">Open</button>' +
             '<button type="button" class="sc-rename">Rename</button>' +
             '<button type="button" class="sc-summarize" title="Uses only a local model when Local Only is on">Summarize</button>' +
             "</div>";
+          const title = card.querySelector(".sc-title");
+          title.id = "session-card-title-" + index;
+          title.textContent = s.title || "Untitled session";
+          card.setAttribute("role", "group");
+          card.setAttribute("aria-labelledby", title.id);
+          card.querySelector(".sc-summary").textContent = s.summary || "No summary yet.";
+          card.querySelector(".sc-meta").textContent = mc + (active ? " · Current conversation" : "");
+          const summarize = card.querySelector(".sc-summarize");
+          const summaryHint = document.createElement("span");
+          summaryHint.id = "session-card-summary-hint-" + index;
+          summaryHint.hidden = true;
+          summaryHint.textContent = summarize.title;
+          card.appendChild(summaryHint);
+          card.querySelectorAll(".sc-actions button").forEach(function (button) {
+            button.setAttribute("aria-describedby", title.id + (button === summarize ? " " + summaryHint.id : ""));
+          });
           card.querySelector(".sc-open").addEventListener("click", function () { openSession(s); });
           card.querySelector(".sc-rename").addEventListener("click", function () { renameSession(s, card); });
-          card.querySelector(".sc-summarize").addEventListener("click", function () { summarizeSession(s); });
+          summarize.addEventListener("click", function () { summarizeSession(s); });
           list.appendChild(card);
         });
       } catch (e) {
@@ -7718,7 +7739,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var d = data.digest;
       if (!d.turns && !d.draftsCreated) return; // quiet empty state
       var bits = [];
-      bits.push(d.turns + " conversation" + (d.turns === 1 ? "" : "s"));
+      // A turn is one assistant response, not a distinct conversation.
+      bits.push(d.turns + " BeeZilla " + (d.turns === 1 ? "reply" : "replies"));
       if (d.draftsCreated > 0) {
         bits.push(d.draftsCreated + " draft" + (d.draftsCreated === 1 ? "" : "s") +
           (d.draftsApproved > 0 ? " (" + d.draftsApproved + " approved)" : " ready for you"));
@@ -7736,6 +7758,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 <script>
 /* ── Plan + remaining quota ────────────────────────────────────────────── */
 (function () {
+  var refreshGeneration = 0;
   function render(d) {
     var chip = document.getElementById("planChip");
     if (!chip || !d || !d.ok) return;
@@ -7743,16 +7766,26 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     var bits = [name.charAt(0).toUpperCase() + name.slice(1) + " plan"];
     var left = d.remaining || {};
     bits.push(Number(left.inference || 0).toLocaleString() + " chats left");
-    var musicLeft = Number(left.musicSeconds || 0);
-    bits.push(musicLeft > 0 ? Math.floor(musicLeft / 60) + " min music left" : "no music on this plan");
+    var musicLeft = Math.max(0, Math.floor(Number(left.musicSeconds) || 0));
+    if (musicLeft > 0) {
+      var minutes = Math.floor(musicLeft / 60);
+      var seconds = musicLeft % 60;
+      var timeLeft = minutes ? minutes + " min" + (seconds ? " " + seconds + " sec" : "") : seconds + " sec";
+      bits.push(timeLeft + " of music left");
+    } else {
+      var includesMusic = d.limits && d.limits.musicSecondsPerDay != null
+        ? Number(d.limits.musicSecondsPerDay) > 0 : name !== "free";
+      bits.push(includesMusic ? "no music time left" : "no music on this plan");
+    }
     if (name === "free") bits.push("upgrade for music");
     chip.textContent = bits.join(" · ");
     chip.classList.remove("hidden");
   }
   function refresh() {
+    var generation = ++refreshGeneration;
     fetch("/api/buzzy/entitlement", { credentials: "include" })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(render)
+      .then(function (d) { if (generation === refreshGeneration) render(d); })
       .catch(function () { /* a plan chip is not worth an error toast */ });
   }
   refresh();
