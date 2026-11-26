@@ -236,6 +236,8 @@
       var state = document.getElementById("state");
       var count = document.getElementById("count");
 
+      function ownsShelf() { return shelf.isConnected && document.getElementById("shelf") === shelf; }
+
       function fmtDate(iso) {
         if (!iso) return "—";
         var d = new Date(iso);
@@ -261,17 +263,13 @@
         })
           .then(function (res) { return res.json().then(function (j) { return { s: res.status, j: j }; }); })
           .then(function (out) {
-            if (out.s === 200 && out.j.ok) {
-              btn.textContent = "Opened ✓";
-              btn.style.background = "#2F6F4F";
-              btn.style.color = "#E8F7EE";
-              if (window.BZ_HONEY) window.BZ_HONEY.refresh();
-            } else if (out.j.code === "free_recipe") {
-              btn.textContent = "Claimed ✓";
-              btn.style.background = "#2F6F4F";
-            } else if (out.j.code === "already_owned") {
-              btn.textContent = "Already yours";
-              btn.disabled = true;
+            if ((out.s === 200 && out.j.ok) ||
+                (out.s === 409 && (out.j.code === "free_recipe" || out.j.code === "already_owned"))) {
+              // All three replies confirm entitlement (a free claim records it
+              // without a debit). Refresh the shelf itself, not only the balance.
+              OWNED.add(r.hash);
+              if (ownsShelf()) paint();
+              if (out.s === 200 && window.BZ_HONEY) window.BZ_HONEY.refresh();
             } else if (out.s === 402) {
               btn.textContent = "Not enough Drops";
               btn.disabled = false;
@@ -295,9 +293,7 @@
         box.appendChild(el("h2", null, "Buy this recipe?"));
         box.appendChild(el("p", "sub", r.title || r.id));
 
-        var balanceNow = null;
         function render(balance) {
-          balanceNow = balance;
           var after = Math.max(0, balance - price);
           box.querySelectorAll(".line, .warn").forEach(function (n) { n.remove(); });
           box.appendChild(line("Price", price.toLocaleString() + " Honey Drops"));
@@ -327,16 +323,24 @@
         actions.appendChild(cancel); actions.appendChild(confirm);
         box.appendChild(actions);
         backdrop.appendChild(box);
-        document.body.appendChild(backdrop);
+        // Let the navigation shell dispose the dialog and its document listener
+        // together with this page (also applies to browser Back/Forward).
+        shelf.parentNode.appendChild(backdrop);
+        backdrop.setAttribute("data-bz-before-remove", "");
         confirm.disabled = true;
-        render(0);
+        var pendingBalance = el("p", "warn", "Checking your balance…");
+        box.appendChild(pendingBalance);
 
         fetch("/api/wallet", { credentials: "same-origin" })
           .then(function (res) { return res.ok ? res.json() : null; })
-          .then(function (w) { render(w && typeof w.balance === "number" ? w.balance : 0); })
-          .catch(function () { render(0); });
+          .then(function (w) {
+            if (!w || !Number.isFinite(w.balance)) throw new Error("Balance unavailable");
+            render(w.balance);
+          })
+          .catch(function () { pendingBalance.textContent = "Could not check your balance. Close and try again."; });
 
         function close() { backdrop.remove(); document.removeEventListener("keydown", onKey); }
+        backdrop.addEventListener("bz:before-remove", close, { once: true });
         function onKey(e) { if (e.key === "Escape") close(); }
         document.addEventListener("keydown", onKey);
         cancel.addEventListener("click", close);
@@ -368,9 +372,13 @@
         actions.appendChild(close); actions.appendChild(run);
         box.appendChild(actions);
         backdrop.appendChild(box);
-        document.body.appendChild(backdrop);
+        // Let the navigation shell dispose the dialog and its document listener
+        // together with this page (also applies to browser Back/Forward).
+        shelf.parentNode.appendChild(backdrop);
+        backdrop.setAttribute("data-bz-before-remove", "");
 
         function dismiss() { backdrop.remove(); document.removeEventListener("keydown", onKey); }
+        backdrop.addEventListener("bz:before-remove", dismiss, { once: true });
         function onKey(e) { if (e.key === "Escape") dismiss(); }
         document.addEventListener("keydown", onKey);
         close.addEventListener("click", dismiss);
@@ -500,11 +508,13 @@
       }
 
       function json(url) {
-        return fetch(url, { credentials: "same-origin" })
-          .then(function (r) { return r.ok ? r.json() : null; })
-          .catch(function () { return null; });
+        return fetch(url, { credentials: "same-origin" }).then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.json();
+        });
       }
 
+      var shelfReady = false;
       var ALL = [], OWNED = new Set(), ME = null, TAB = "community";
 
       function visible() {
@@ -514,6 +524,7 @@
       }
 
       function paint() {
+        if (!shelfReady || !ownsShelf()) return;
         shelf.textContent = "";
         var rows = visible();
         document.getElementById("n-mine").textContent = ALL.filter(function (r) { return r.author && r.author.id === ME; }).length;
@@ -543,9 +554,11 @@
       // One load, three views: the shelf, what this account owns, and who it is.
       Promise.all([json("/api/recipes"), json("/api/wallet/owned"), json("/api/auth/get-session")])
         .then(function (out) {
-          var recipes = (out[0] && out[0].recipes) || [];
+          if (!out[0] || !Array.isArray(out[0].recipes)) throw new Error("Invalid recipe list");
+          var recipes = out[0].recipes;
           var owned = (out[1] && out[1].hashes) || [];
           var session = out[2] && out[2].user ? out[2].user : null;
+          shelfReady = true;
           ALL = recipes;
           OWNED = new Set(owned);
           ME = session ? session.id : null;
