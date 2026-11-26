@@ -103,9 +103,12 @@ function entryExists(file) {
 }
 
 function regularFile(file) {
-  try { return fs.lstatSync(file).isFile(); }
+  try {
+    const info = fs.lstatSync(file);
+    return info.isFile() ? info : null;
+  }
   catch (error) {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return false;
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
     throw error;
   }
 }
@@ -118,10 +121,14 @@ export function ensurePgliteAssets(app) {
     const target = join(libraries, name);
     if (!entryExists(target)) {
       const input = join(source, name);
-      if (!regularFile(input)) throw new Error(`missing required PGlite payload: ${name}`);
+      const sourceInfo = regularFile(input);
+      if (!sourceInfo) throw new Error(`missing required PGlite payload: ${name}`);
+      if (sourceInfo.size === 0) throw new Error(`source PGlite payload is empty: ${name}`);
       fs.mkdirSync(libraries, { recursive: true });
       fs.copyFileSync(input, target);
     }
-    if (!regularFile(target)) throw new Error(`PGlite payload is not a regular file: ${name}`);
+    const outputInfo = regularFile(target);
+    if (!outputInfo) throw new Error(`PGlite payload is not a regular file: ${name}`);
+    if (outputInfo.size === 0) throw new Error(`staged PGlite payload is empty: ${name}`);
   }
 }
