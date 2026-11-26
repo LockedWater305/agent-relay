@@ -515,20 +515,22 @@
     }
 
     var selectedStroke = null;
-    function selectStroke(e) {
-      var hit = hitTest(pt(e));
+    function selectStroke(hit) {
       selectedStroke = hit;
+      if (selected) {
+        selected = null;
+        renderImages();
+      }
       redraw();
-      return Boolean(hit);
     }
     function primaryPointer(e) { return (e.button === 0 || e.button === undefined) && e.isPrimary !== false; }
     stage.addEventListener("pointerdown", function (e) {
-      if (e.target === stage && tool === "select" && editable() && primaryPointer(e)) selectStroke(e);
+      if (e.target === stage && tool === "select" && !drag && editable() && primaryPointer(e)) selectStroke(hitTest(pt(e)));
     });
     canvas.addEventListener("pointerdown", function (e) {
       if (!editable() || !primaryPointer(e) || draft) return;
       if (tool === "select") {
-        selectStroke(e);
+        if (!drag) selectStroke(hitTest(pt(e)));
         return;
       }
       var p = pt(e);
@@ -643,8 +645,12 @@
         wrap.addEventListener("pointerdown", function (e) {
           if (tool !== "select" || !editable() || drag || !primaryPointer(e) || !wrap.isConnected || images.indexOf(im) < 0) return;
           e.stopPropagation();
-          // A visible mark can be selected over a picture. Handles still resize.
-          if (e.target !== handle && selectStroke(e)) return;
+          // A visible mark can be selected over a picture. Handles still resize,
+          // but only the thing selected now should remain a keyboard target.
+          var hit = e.target === handle ? null : hitTest(pt(e));
+          if (hit) { selectStroke(hit); return; }
+          selectedStroke = null;
+          redraw();
           selected = im;
           drag = { image: im, pointerId: e.pointerId, mode: e.target === handle ? "resize" : "move", sx: e.clientX, sy: e.clientY, ox: im.x, oy: im.y, ow: im.w, oh: im.h };
           // Wrappers are rebuilt as geometry changes. The stable stage owns

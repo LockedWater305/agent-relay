@@ -1388,7 +1388,7 @@
               <span class="vt-icon" aria-hidden="true">&#128266;</span><span class="vt-label">Voice</span>
             </button>
             <button id="newSessionBtn" class="secondary sessions-toggle" type="button" title="Start a clean conversation">New session</button>
-            <button id="sessionsToggle" class="secondary sessions-toggle" type="button">History</button>
+            <button id="sessionsToggle" class="secondary sessions-toggle" type="button" aria-haspopup="dialog" aria-controls="sessionsDrawer" aria-expanded="false">History</button>
           </div>
           <p id="chatCompany" class="muted" style="margin:0.15rem 0 0.6rem;font-size:0.9rem"></p>
 
@@ -1497,7 +1497,7 @@
 
     <!-- Sessions drawer -->
     <div id="sessionsOverlay" class="sessions-overlay hidden" aria-hidden="true"></div>
-    <aside id="sessionsDrawer" aria-label="History" aria-hidden="true">
+    <aside id="sessionsDrawer" role="dialog" aria-modal="true" aria-label="History" aria-hidden="true" inert>
       <div class="drawer-header">
         <h3>History</h3>
         <button id="sessionsClose" class="drawer-close" type="button">Close</button>
@@ -7540,12 +7540,22 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       const overlay = document.getElementById("sessionsOverlay");
       overlay.classList.remove("hidden");
       drawer.classList.add("open");
+      drawer.inert = false;
       drawer.setAttribute("aria-hidden", "false");
+      document.getElementById("sessionsToggle")?.setAttribute("aria-expanded", "true");
+      document.getElementById("sessionsClose")?.focus?.({ preventScroll: true });
       loadSessions();
     }
     function closeSessionsDrawer() {
       const drawer = document.getElementById("sessionsDrawer");
       const overlay = document.getElementById("sessionsOverlay");
+      const toggle = document.getElementById("sessionsToggle");
+      const active = document.activeElement;
+      toggle?.setAttribute("aria-expanded", "false");
+      if (drawer.classList.contains("open") && active && (active === document.body || drawer.contains(active))) {
+        toggle?.focus?.({ preventScroll: true });
+      }
+      drawer.inert = true;
       drawer.classList.remove("open");
       drawer.setAttribute("aria-hidden", "true");
       clearTimeout(sessionsCloseTimer);
@@ -7752,6 +7762,25 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     document.getElementById("sessionsToggle").onclick = () => { openSessionsDrawer(); };
     document.getElementById("backToRecent").onclick = goBackToRecent;
     document.getElementById("sessionsClose").onclick = () => { closeSessionsDrawer(); };
+    document.getElementById("sessionsDrawer").addEventListener("keydown", function (event) {
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || !this.classList.contains("open")) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSessionsDrawer();
+        return;
+      }
+      if (event.key !== "Tab" || event.altKey || event.ctrlKey || event.metaKey) return;
+      const buttons = Array.from(this.querySelectorAll("button:not(:disabled)")).filter(function (button) {
+        return button.tabIndex >= 0 && button.getClientRects().length > 0;
+      });
+      const first = buttons[0];
+      const last = buttons[buttons.length - 1];
+      if (event.shiftKey ? event.target === first : event.target === last) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
+    });
     document.getElementById("drawerNewChat").onclick = () => { startNewChat(); };
     document.getElementById("sessionsOverlay").addEventListener("click", function () {
       closeSessionsDrawer();

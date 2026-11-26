@@ -574,6 +574,7 @@ const verbs = {
 const fn = verbs[verb];
 if (!fn) {
   console.log(`beezilla <command>\n\n  serve [--port N]   start the runtime\n  status             is it running\n  stop               graceful shutdown\n  doctor             diagnose this install\n  run "<message>"    one chat turn [--job id] [--work]\n  export [file]      full local data as ZIP\n  key set|show|clear inference credentials (BYOK, or ours via device token)\n  key search set|show|clear  web search credentials (Brave; ours or BYOK)`);
-  process.exit(verb ? 2 : 0);
+  const requestedHelp = !verb || ["--help", "-h", "help"].includes(verb);
+  process.exit(requestedHelp ? 0 : 2);
 }
 process.exit(await fn(rest));

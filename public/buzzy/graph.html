@@ -24,7 +24,8 @@
     .panel h2 { font-size:0.7rem; letter-spacing:.12em; text-transform:uppercase; color:#8A8A8A; margin:0 0 0.6rem; }
     #canvas { position:relative; min-height:520px; background:
         radial-gradient(circle at 1px 1px, #1C1C1C 1px, transparent 0) 0 0/22px 22px, #101010;
-      border:1px solid #242424; border-radius:7px; overflow:hidden; }
+      border:1px solid #242424; border-radius:7px; overflow:auto; }
+    #canvas:focus-visible { outline:2px solid var(--bz-yellow); outline-offset:2px; }
     .node { position:absolute; width:172px; background:#191919; border:1px solid #3A3A3A; border-radius:6px; padding:0.5rem 0.6rem; cursor:grab; user-select:none; }
     .node.sel { border-color: var(--bz-yellow); box-shadow:0 0 0 1px var(--bz-yellow-dim); }
     .node .k { font-size:0.62rem; letter-spacing:.1em; text-transform:uppercase; color:#8A8A8A; }
@@ -38,7 +39,7 @@
     .node.model { border-left:3px solid #A98BFF; }
     .node.review { border-left:3px solid #FF8A80; }
     .node.gate { border-left:3px solid #67D99B; }
-    svg#edges { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+    svg#edges { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
     .gl { display:block; font-size:0.8rem; padding:0.35rem 0.4rem; border-radius:4px; color:#C9CDD2; text-decoration:none; }
     .gl:hover { background:#1E1E1E; color:#fff; }
     .gl.sel { background:#1E1E1E; color: var(--bz-yellow); }
@@ -116,7 +117,7 @@
           <button id="linkBtn">Link →</button>
           <span class="hint" id="linkHint"></span>
         </div>
-        <div id="canvas">
+        <div id="canvas" tabindex="0" role="region" aria-label="Workflow canvas">
           <svg id="edges"></svg>
         </div>
       </div>

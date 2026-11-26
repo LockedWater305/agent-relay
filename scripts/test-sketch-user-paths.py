@@ -563,4 +563,14 @@ class Sketch(unittest.TestCase):
         line=self.board["strokes"][0]
         self.assertAlmostEqual(line["x2"],242,delta=1)
         self.assertAlmostEqual(line["y2"],234,delta=1)
+    def test_using_reference_resize_handle_does_not_leave_unrelated_stroke_selected(self):
+        image=ref("blue"); p=self.start([LINE.copy()],[image])
+        self.hit(p,100,50)  # Select the line, then target the image's lower-right resize handle.
+        self.drag(p,200,170,225,185)
+        self.assertEqual(p.locator(".img-wrap.selected").count(),1)
+        p.keyboard.press("Delete"); self.save(p)
+        self.assertEqual(self.board["strokes"],[LINE])
+        self.assertEqual(self.board["images"],[dict(image,w=175,h=115)])
+        self.hit(p,320,270)
+        self.assertEqual(p.locator(".img-wrap.selected").count(),0)
 if __name__=="__main__": unittest.main(verbosity=2)
