@@ -273,3 +273,34 @@ test("uncertain process cleanup fails and retains only its temporary data", asyn
   t.after(() => rmSync(root, { recursive: true, force: true }));
   assert.equal(existsSync(join(root, "data")), true);
 });
+
+for (const [marker, line] of [
+  ["supervisor", "[supervisor] local runtime launcher exited unexpectedly (signal SIGTERM)"],
+  ["Settings", "[desktop] could not open settings: Error: ERR_FAILED"],
+]) {
+  test(`new ${marker} diagnostics fail launch despite otherwise positive markers`, () => {
+    const status = desktopLaunchStatus(result({ out: goodOutput() + line + "\n" }));
+    assert.equal(status.ok, false, line);
+    assert.match(status.detail, /desktop reported a launch\/runtime failure/);
+  });
+}
+
+test("desktop diagnostics preserve split UTF-8 bytes independently on both output streams", async () => {
+  const stdout = "diagnostic ☃ Québec\n";
+  const stderr = "from the other stream: 資料\n";
+  const out = Buffer.from(stdout), err=Buffer.from(stderr);
+  const fake = fakeLaunch((child) => {
+    const a=out.indexOf(Buffer.from("☃"))+1, b=err.indexOf(Buffer.from("資"))+1;
+    // A shared decoder would also corrupt this output: the streams interleave
+    // between bytes of separate code points.
+    child.stdout.emit("data",out.subarray(0,a));
+    child.stderr.emit("data",err.subarray(0,b));
+    child.stdout.emit("data",out.subarray(a));
+    child.stderr.emit("data",err.subarray(b));
+    child.emit("close",0,null);
+  });
+  const actual = await runDesktopLaunch(plan(),fake.options);
+  assert.equal(actual.stdout,stdout);
+  assert.equal(actual.stderr,stderr);
+  assert.equal(actual.out,stdout+stderr);
+});
