@@ -7,6 +7,7 @@
  * window. Anything Electron-specific lives in main.mjs.
  */
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { connect } from "node:net";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -151,10 +152,13 @@ export class RuntimeSupervisor {
       }
     });
     child.on("close", () => { launch.closed = true; });
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       if (this.child !== child) return;
       this.captureOwnedRuntime(child);
-      if (!this.stopping) this.onLog(`[supervisor] runtime exited unexpectedly (code ${code})`);
+      if (!this.stopping) {
+        const result = signal ? `signal ${signal}` : `code ${code}`;
+        this.onLog(`[supervisor] local runtime launcher exited unexpectedly (${result})`);
+      }
       const serverPid = launch.serverPid ?? this.ownedRuntime?.pid;
       if (!launch.serverExited && serverPid !== child.pid) this.exitingPid = serverPid ?? this.exitingPid;
       this.runtime = null;
@@ -168,6 +172,14 @@ export class RuntimeSupervisor {
     // an antivirus, or a Wine loopback limitation all look like from here. Collect
     // the facts while waiting instead of guessing at the end.
     const deadline = Date.now() + timeoutMs;
+    try {
+      // A missing PID immediately after spawn() may mean an asynchronous OS
+      // error. Wait for the real event rather than reporting a null exit code.
+      await once(child, "spawn", { signal });
+    } catch (error) {
+      if (signal.aborted) throw new Error("Local runtime startup canceled.");
+      throw new Error(`Could not start the local runtime: ${error.message}`, { cause: error });
+    }
     let lastProbe = { ok: false, error: "not attempted", code: null, ms: 0, rt: null };
     let sawRuntimeFile = false;
     while (Date.now() < deadline) {
@@ -190,14 +202,18 @@ export class RuntimeSupervisor {
     }
 
     const running = alive(child);
-    const where = lastProbe.rt ? `http://${lastProbe.rt.host}:${lastProbe.rt.port}` : "(no runtime.json written)";
-    const hint = running
-      ? "The runtime process is still running, so this is a reachability problem, not a crash: " +
-        "something is blocking this app's connection to its own loopback port (firewall, antivirus, " +
-        "VPN/proxy, or a Wine/VM network stack). Allow BeeZilla in the firewall, or set " +
-        "BZ_SKIP_READY_PROBE=1 to open the window anyway and let the UI report what it can reach."
-      : "The runtime process exited before answering, so this is a start-up failure: read the lines above " +
-        "it for the reason (a missing data directory, a port already in use, or a module that failed to load).";
+    const where = lastProbe.rt ? runtimeOrigin(lastProbe.rt)
+      : sawRuntimeFile ? "(no health probe attempted)" : "(no runtime.json written)";
+    let hint;
+    if (!running) {
+      hint = "The launcher exited before the runtime became ready. Check the preceding launch log for the reason.";
+    } else if (!sawRuntimeFile) {
+      hint = "The launcher is still running but has not announced an endpoint. Check the preceding startup log.";
+    } else if (/^[1-5]\d\d$/.test(lastProbe.code ?? "")) {
+      hint = "The runtime responded over HTTP but did not report healthy. Check the preceding runtime log.";
+    } else {
+      hint = "The launcher is still running, but the readiness probe has not succeeded. Check the preceding startup log and the probe error before changing any local network settings.";
+    }
     const message =
       `local runtime did not answer within ${timeoutMs}ms. ` +
       `Probe: ${where} · ${lastProbe.error}${lastProbe.code ? ` (${lastProbe.code})` : ""} · ` +
