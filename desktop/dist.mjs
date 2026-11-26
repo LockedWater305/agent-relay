@@ -18,9 +18,10 @@
  *   <install>/resources/app.asar        main.mjs, supervisor.mjs
  *   <install>/resources/app/            .output/ scripts/ bin/ package.json node_modules/
  */
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, posix, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeCspManifest } from "../scripts/build-desktop-csp.mjs";
 import { productionDependencyClosure, copyProductionDependency, ensurePgliteAssets } from "./stage-inputs.mjs";
@@ -341,16 +342,41 @@ function packDir(builder) {
   const flag = { darwin: "--mac", win32: "--win", linux: "--linux" }[process.platform];
   if (!flag) throw new Error(`no electron-builder target for ${process.platform}`);
   log(`running electron-builder ${flag} dir (unpacked, no installer, no publish)…`);
-  runCli(DESKTOP, builder, [flag, "dir", "--publish", "never"]);
+  // Windows/Linux must validate what this invocation packed, not the first
+  // plausible directory left by an earlier build. Keep this local receipt out
+  // of resources/app and all release/publisher flows.
+  const localBinding = process.platform === "win32" || process.platform === "linux";
+  const token = localBinding ? randomUUID() : null;
+  const env = token ? { ...process.env, BZ_LOCAL_DIR_BUILD_TOKEN: token } : process.env;
+  runCli(DESKTOP, builder, [flag, "dir", "--publish", "never"], env);
   // The production node_modules is added by the afterPack hook (after-pack.cjs)
   // for every target, because extraResources drops a top-level node_modules.
   // Check it really landed: without it the packaged runtime cannot start.
-  const resources = unpackedResources();
+  const resources = token ? boundLocalResources(token) : unpackedResources();
   if (!existsSync(join(resources, "node_modules", "@electric-sql", "pglite"))) {
     throw new Error(`packaged runtime has no node_modules under ${resources} — the afterPack hook did not run`);
   }
   localTestBanner();
   log("unpacked app written under dist-desktop/");
+}
+
+/** This receipt binds the directory path only; it does not attest binary
+ * architecture or native behavior. Native acceptance remains separate. */
+function boundLocalResources(token) {
+  const receiptPath = join(STAGE, "unpacked-local-receipt.json");
+  if (!existsSync(receiptPath)) throw new Error("afterPack receipt missing for this local build");
+  const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+  if (receipt.token !== token || receipt.platform !== process.platform) {
+    throw new Error("afterPack receipt does not match this local build");
+  }
+  const label = process.platform === "win32" ? "win" : "linux";
+  const suffix = process.arch === "x64" ? "" : `-${process.arch}`;
+  const expected = join(OUT, `${label}${suffix}-unpacked`, "resources", "app");
+  if (typeof receipt.app !== "string" || !isAbsolute(receipt.app) || relative(expected, receipt.app) !== "" ||
+      !existsSync(join(expected, "package.json"))) {
+    throw new Error(`afterPack wrote to the wrong local output or it disappeared: expected ${expected}`);
+  }
+  return expected;
 }
 
 /** The resources/app folder electron-builder wrote for this platform. */

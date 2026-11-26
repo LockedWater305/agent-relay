@@ -16,7 +16,7 @@
  */
 "use strict";
 
-const { cpSync, existsSync, readdirSync } = require("node:fs");
+const { cpSync, existsSync, lstatSync, readdirSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
 
 /** Where resources/ lives inside the unpacked app for this platform. */
@@ -39,7 +39,24 @@ exports.default = async function afterPack(context) {
   }
   // Force the JS traversal: native recursive copy can retain absolute .bin
   // symlinks despite dereference:true, leaving the package tied to the builder.
-  cpSync(src, join(app, "node_modules"), { recursive: true, dereference: true, filter: () => true });
+  const dest = join(app, "node_modules");
+  const existing = lstatSync(dest, { throwIfNoEntry: false });
+  if (existing && (!existing.isDirectory() || readdirSync(dest).length)) {
+    // cpSync merges directories and leaves removed packages/files behind. A
+    // pre-populated target is acceptable only if the entire closure matches.
+    // Do not delete an old output or partially mix it with this build.
+    const { copyProductionDependency } = await import("./stage-inputs.mjs");
+    try { copyProductionDependency(src, dest); }
+    catch (error) { throw new Error(`afterPack: dependency destination differs from stage; use a fresh output: ${dest}`, { cause: error }); }
+  } else {
+    cpSync(src, dest, { recursive: true, dereference: true, filter: () => true });
+  }
+  const token = process.env.BZ_LOCAL_DIR_BUILD_TOKEN;
+  if (token && (context.electronPlatformName === "win32" || context.electronPlatformName === "linux")) {
+    // The destination is fixed outside stage/app: never copy the receipt into the product.
+    writeFileSync(join(__dirname, "stage", "unpacked-local-receipt.json"),
+      JSON.stringify({ token, app, platform: context.electronPlatformName }));
+  }
   console.log(`  • afterPack: production node_modules added under ${app}`);
 };
 

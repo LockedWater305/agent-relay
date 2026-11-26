@@ -36,6 +36,7 @@ function fixture(t, platform = "win32") {
   mkdirSync(dirname(hookPath), { recursive: true });
   // Copy the real hook unchanged so its __dirname-relative stage is isolated.
   copyFileSync(hookSource, hookPath);
+  copyFileSync(join(desktopDir, "stage-inputs.mjs"), join(dirname(hookPath), "stage-inputs.mjs"));
   assert.deepEqual(readFileSync(hookPath), readFileSync(hookSource));
   const hook = require(hookPath);
   const context = {
@@ -166,5 +167,29 @@ for (const boundary of ["stage", "afterPack"]) {
     // The copy is independently usable after its input disappears.
     rmSync(f.stagedDependencies, { recursive: true });
     assert.deepEqual(readFileSync(copied), bytes);
+  });
+}
+
+test("afterPack refuses to merge obsolete runtime dependencies into the current closure", async t => {
+  const f = fixture(t);
+  writeFile(join(f.app,"package.json"), runtimeManifest);
+  writeFile(join(f.stagedDependencies,"wanted/index.js"),"current bytes");
+  const old = join(f.app,"node_modules/old-tool/index.js");
+  writeFile(old,"obsolete bytes");
+  await assert.rejects(f.hook.default(f.context), /destination|does not match/);
+  assert.equal(readFileSync(old,"utf8"),"obsolete bytes", "refusal leaves old output untouched");
+  assert.equal(existsSync(join(f.app,"node_modules/wanted/index.js")),false, "must not partially merge");
+});
+
+for (const state of ["empty","identical"]) {
+  test(`afterPack accepts a preexisting ${state} destination`, async t => {
+    const f=fixture(t);
+    writeFile(join(f.app,"package.json"),runtimeManifest);
+    writeFile(join(f.stagedDependencies,"wanted/index.js"),"current bytes");
+    const dest=join(f.app,"node_modules");
+    mkdirSync(dest,{recursive:true});
+    if (state==="identical") writeFile(join(dest,"wanted/index.js"),"current bytes");
+    await f.hook.default(f.context);
+    assert.equal(readFileSync(join(dest,"wanted/index.js"),"utf8"),"current bytes");
   });
 }
