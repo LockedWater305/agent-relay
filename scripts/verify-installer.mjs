@@ -14,8 +14,8 @@
  * Requires a previous `node desktop/dist.mjs all` (or `stage`).
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,6 +23,27 @@ const OUT = join(ROOT, "dist-desktop");
 const UNPACKED = join(OUT, "win-unpacked", "resources");
 const ASAR = join(UNPACKED, "app.asar");
 const APP = join(UNPACKED, "app");
+
+// Only invoke the reader installed by the desktop lockfile. In particular,
+// do not let npx resolve an unrelated asar binary or try to install it.
+function shellInventory() {
+  const desktop = join(realpathSync(ROOT), "desktop"), name = "@electron/asar", bin = "bin/asar.js";
+  const pin = JSON.parse(readFileSync(join(desktop, "package-lock.json"), "utf8")).packages?.[`node_modules/${name}`];
+  if (!pin?.version || !pin.integrity || pin.bin?.asar !== bin) throw new Error("missing desktop ASAR lock entry");
+  const root = join(desktop, "node_modules", name), manifest = join(root, "package.json"), entry = join(root, bin);
+  for (const file of [manifest, entry]) {
+    if (!statSync(file).isFile() || relative(file, realpathSync(file)) !== "") {
+      throw new Error("ASAR reader is not installed at its locked desktop path");
+    }
+  }
+  const installed = JSON.parse(readFileSync(manifest, "utf8"));
+  const declared = typeof installed.bin === "string" ? installed.bin : installed.bin?.asar;
+  if (installed.name !== name || installed.version !== pin.version || typeof declared !== "string" || declared.replace(/^\.\//, "") !== bin) {
+    throw new Error("installed ASAR reader differs from the desktop lock");
+  }
+  const listing = execFileSync(process.execPath, [entry, "list", ASAR], { encoding: "utf8", cwd: ROOT, shell: false });
+  return new Set(listing.split(/\r?\n/).map((line) => line.replace(/\\/g, "/")));
+}
 
 const allowZeroPins = process.argv.includes("--allow-zero-pins");
 let failures = 0;
@@ -42,17 +63,25 @@ check("an installer was produced", Boolean(exe), exe ?? "none");
 if (exe) {
   const size = statSync(join(OUT, exe)).size;
   check("the installer is not a stub", size > 50 * 1024 * 1024, `${(size / 1024 / 1024).toFixed(0)} MB`);
-  const kind = execFileSync("file", ["-b", join(OUT, exe)], { encoding: "utf8" }).trim();
-  check("the installer is a PE executable", /PE32/.test(kind), kind.slice(0, 60));
+  try {
+    const kind = execFileSync("file", ["-b", join(OUT, exe)], { encoding: "utf8" }).trim();
+    check("the installer is a PE executable", /PE32/.test(kind), kind.slice(0, 60));
+  } catch (error) {
+    check("the installer is a PE executable", false, `could not classify it: ${error.code ?? error.message}`);
+  }
 }
 
 // ── the app shell inside the asar ───────────────────────────────────────────
 if (!existsSync(ASAR)) {
   check("app.asar exists", false, "missing");
 } else {
-  const listing = execFileSync("npx", ["asar", "list", ASAR], { encoding: "utf8", cwd: ROOT });
-  for (const file of ["main.mjs", "preload.cjs", "settings.mjs", "supervisor.mjs", "connect.mjs"]) {
-    check(`the shell ships ${file}`, listing.split("\n").includes(`/${file}`), file);
+  try {
+    const listing = shellInventory();
+    for (const file of ["main.mjs", "preload.cjs", "settings.mjs", "supervisor.mjs", "connect.mjs"]) {
+      check(`the shell ships ${file}`, listing.has(`/${file}`), file);
+    }
+  } catch (error) {
+    check("the ASAR inventory can be read from the locked desktop tool", false, error.message);
   }
   // The connect flow is the only thing that can obtain OUR credentials, so a stage
   // that ships it without the search half would silently ship BYOK-only behaviour.
@@ -111,10 +140,12 @@ if (!existsSync(APP)) {
     (f) => existsSync(join(libs, f)) || existsSync(join(pkgDist, f)),
   );
   check("PGLite assets are available to the launcher", assets.length === 3, `${assets.length}/3`);
-  check(
-    "the launcher restores them at boot",
-    readFileSync(join(APP, "scripts", "beezilla-local.mjs"), "utf8").includes("ensurePgliteAssets"),
-  );
+  const launcher = join(APP, "scripts", "beezilla-local.mjs");
+  try {
+    check("the launcher restores them at boot", readFileSync(launcher, "utf8").includes("ensurePgliteAssets"));
+  } catch (error) {
+    check("the launcher restores them at boot", false, `cannot read launcher: ${error.code ?? error.message}`);
+  }
 
   const settingsPage = join(APP, "public", "buzzy", "settings.html");
   const page = existsSync(settingsPage) ? readFileSync(settingsPage, "utf8") : "";
