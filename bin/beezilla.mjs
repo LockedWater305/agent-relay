@@ -319,16 +319,25 @@ async function cmdDoctor() {
 async function cmdRun(argv) {
   const usage = () => {
     console.error('usage: beezilla run "<what you want>" [--job <id>] [--work]');
+    console.error('       beezilla run [--job <id>] [--work] -- <literal message>');
     return 2;
   };
   let jobId;
+  let mode = "chat";
   const parts = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    if (arg === "--") {
+      // Everything after the separator is the user's message, not CLI options.
+      parts.push(...argv.slice(i + 1));
+      break;
+    }
     if (arg === "--job") {
       const value = argv[++i];
       if (!value?.trim() || value.startsWith("--")) return usage();
       jobId ??= value;
+    } else if (arg === "--work") {
+      mode = "work";
     } else if (!arg.startsWith("--")) {
       parts.push(arg);
     }
@@ -344,8 +353,6 @@ async function cmdRun(argv) {
     );
     return 2;
   }
-
-  const mode = argv.includes("--work") ? "work" : "chat";
 
   const rt = await ensureServer();
   const { status, body } = await api(rt, "/api/buzzy/chat", {

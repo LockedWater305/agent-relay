@@ -66,12 +66,13 @@
     h.style.marginLeft = (-padL) + "px";
     h.style.marginRight = (-padR) + "px";
   }
-  function revealActiveLink(nav) {
+  function revealNavLink(nav, keepKeyboardFocus) {
     if (!nav) return;
     var bar = nav.closest(".bz-navbar");
-    var active = nav.querySelector('a[aria-current="page"]');
-    if (!active || !bar || bar.scrollWidth <= bar.clientWidth) return;
-    var frame = bar.getBoundingClientRect(), ink = active.getBoundingClientRect();
+    var focused = keepKeyboardFocus && nav.querySelector("a[data-nav]:focus-visible");
+    var target = focused || nav.querySelector('a[aria-current="page"]');
+    if (!target || !bar || bar.scrollWidth <= bar.clientWidth) return;
+    var frame = bar.getBoundingClientRect(), ink = target.getBoundingClientRect();
     // Scroll only the links, not the whole page or the panel the reader is using.
     if (ink.left < frame.left + 5) bar.scrollLeft += ink.left - frame.left - 5;
     else if (ink.right > frame.right - 5) bar.scrollLeft += ink.right - frame.right + 5;
@@ -82,7 +83,8 @@
     // A taller/shorter viewport does not invalidate the user's horizontal pan.
     if (window.innerWidth === chromeWidth) return;
     chromeWidth = window.innerWidth;
-    revealActiveLink(document.getElementById("bzNav"));
+    // A resize must not pan the keyboard cursor out of view.
+    revealNavLink(document.getElementById("bzNav"), true);
   });
 
   function style() {
@@ -786,7 +788,7 @@
       showAskOn(mountedChrome);
       // Re-derive the body-padding bleed for the page that is active NOW.
       applyBleed();
-      revealActiveLink(nav);
+      revealNavLink(nav);
       return;
     }
     var header = nav.closest("header") || document.querySelector("header") || document.body;
@@ -848,7 +850,7 @@
 
     header.appendChild(brandRow);
     header.appendChild(bar);
-    revealActiveLink(nav);
+    revealNavLink(nav);
     // The header owns the two chrome rows and NOTHING else. Page toolbars used to be
     // appended into it, so the header measured 132px on Talk, 155 on Sketch and 219 on
     // Capabilities and the chrome read as a different component per page (BZ-11, frodo's

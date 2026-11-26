@@ -650,6 +650,27 @@ class Sketch(unittest.TestCase):
         p.click('[data-tool="line"]'); self.drag(p,230,186,270,204); self.save(p)
         self.assertEqual([s["tool"] for s in self.board["strokes"]],["line"])
         self.assertEqual(self.board["images"],[dict(rear,w=180,h=116),front])
+    def test_reference_move_and_resize_finish_at_the_pointer_release(self):
+        for mode,x,y in (("move",105,111),("resize",200,170)):
+            with self.subTest(mode=mode):
+                image=ref("blue")
+                p=self.start([],[image]); box=p.locator("#board").bounding_box()
+                c=p.context.new_cdp_session(p)
+                def mouse(kind,dx,dy,**params):
+                    c.send("Input.dispatchMouseEvent",dict(type=kind,x=box["x"]+x+dx,y=box["y"]+y+dy,**params))
+                mouse("mouseMoved",0,0,buttons=0)
+                mouse("mousePressed",0,0,button="left",buttons=1,clickCount=1)
+                mouse("mouseMoved",11,8,buttons=1)
+                # The operating system can deliver this position on release
+                # without a separate final pointermove. This is not touchCancel.
+                mouse("mouseReleased",41,33,button="left",buttons=0,clickCount=1)
+                self.save(p)
+                target=dict(image,x=91,y=103) if mode=="move" else dict(image,w=191,h=133)
+                self.assertEqual(self.board["images"],[target])
+                p.click("#undo"); self.save(p)
+                self.assertEqual(self.board["images"],[image])
+                p.click("#undo")
+                self.assertEqual(p.inner_text("#status"),"Nothing to undo.")
     def test_pending_autosave_does_not_persist_a_reference_move_still_in_progress(self):
         image,p,point,send,x=self.touch_image_setup()
         p.click('[data-tool="line"]'); self.drag(p,360,170,470,170)

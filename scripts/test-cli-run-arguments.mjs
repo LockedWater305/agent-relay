@@ -47,6 +47,10 @@ for (const [label, args, body] of [
   ["job after message", ["Fixture message", "--job", "job_A"], { message: "Fixture message", mode: "chat", jobId: "job_A" }],
   ["job before several message arguments", ["--job", "job_A", "Fixture", "message", "--work"], { message: "Fixture message", mode: "work", jobId: "job_A" }],
   ["repeated job option", ["Fixture", "--job", "job_A", "--job", "job_B", "message"], { message: "Fixture message", mode: "chat", jobId: "job_A" }],
+  ["literal flag-looking sentence", ["--", "--version reports an unexpected value"], { message: "--version reports an unexpected value", mode: "chat" }],
+  ["literal work flag", ["--", "--work"], { message: "--work", mode: "chat" }],
+  ["job and Work before the literal boundary", ["--job", "job_A", "--work", "--", "--job", "looks-like-a-job"], { message: "--job looks-like-a-job", mode: "work", jobId: "job_A" }],
+  ["literal option within a question", ["--", "What does", "--work", "mean?"], { message: "What does --work mean?", mode: "chat" }],
   ["plain message", ["Fixture", "message"], { message: "Fixture message", mode: "chat" }],
   ["ordinary work mode", ["Fixture message", "--work"], { message: "Fixture message", mode: "work" }],
 ]) {
@@ -65,6 +69,7 @@ for (const [label, args] of [
   ["no message", ["--job", "job_A"]],
   ["no job value", ["Fixture message", "--job"]],
   ["another option as the job value", ["Fixture message", "--job", "--work"]],
+  ["empty literal message", ["--"]],
   ["no arguments", []],
 ]) {
   test(`run rejects ${label} without probing for a runtime`, (t) => {

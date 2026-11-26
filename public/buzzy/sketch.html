@@ -688,16 +688,19 @@
     function ownsImagePointer(e) {
       return drag && (e.pointerId === undefined || e.pointerId === drag.pointerId);
     }
-    window.addEventListener("pointermove", function (e) {
-      if (!ownsImagePointer(e) || !editable()) return;
+    function sampleImageDrag(e) {
+      if (!ownsImagePointer(e) || !editable() || !Number.isFinite(e.clientX) || !Number.isFinite(e.clientY)) return;
       var im = drag.image;
       if (images.indexOf(im) < 0) return;
       var dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+      var beforeX = im.x, beforeY = im.y, beforeW = im.w, beforeH = im.h;
       if (drag.mode === "move") { im.x = drag.ox + dx; im.y = drag.oy + dy; }
       else { im.w = Math.max(40, drag.ow + dx); im.h = Math.max(40, drag.oh + dy); }
+      if (beforeX === im.x && beforeY === im.y && beforeW === im.w && beforeH === im.h) return;
       drag.changed = true;
       renderImages();
-    });
+    }
+    window.addEventListener("pointermove", sampleImageDrag);
     function imageBeforeDrag(im) {
       if (!drag || im !== drag.image) return im;
       return Object.assign({}, im, { x: drag.ox, y: drag.oy, w: drag.ow, h: drag.oh });
@@ -715,7 +718,10 @@
       drag = null;
     }
     window.addEventListener("pointerup", function (e) {
-      if (ownsImagePointer(e)) finishImageDrag();
+      if (!ownsImagePointer(e)) return;
+      // The final location may only arrive on release, not a separate move.
+      sampleImageDrag(e);
+      finishImageDrag();
     });
     function cancelImageDrag(e) {
       if (!ownsImagePointer(e)) return;
