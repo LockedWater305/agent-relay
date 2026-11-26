@@ -217,7 +217,7 @@
       );
 
       document.getElementById("save").onclick = saveProfile;
-      document.getElementById("skip").onclick = () => { if (window.BeeZillaShell) window.BeeZillaShell.go("/buzzy/"); };
+      document.getElementById("skip").onclick = () => { if (window.BeeZillaShell) window.BeeZillaShell.go("/buzzy/talk"); else location.assign("/buzzy/talk"); };
       document.getElementById("reuse").onclick = reuseIntoJob;
     }
 
