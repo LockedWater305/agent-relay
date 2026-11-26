@@ -247,6 +247,44 @@ class Sketch(unittest.TestCase):
         mask=base64.b64decode(self.edits[0]["mask"].split(',')[1])
         self.assertEqual(self.pixel(p,mask,7,3),[255,255,255,255])
         self.assertEqual(self.pixel(p,mask,4,0),[0,0,0,255])
+    def test_incomplete_replacement_crop_keeps_the_last_selected_area(self):
+        p=self.start([],outputs=[dict(url="/assets/101")],touch=True)
+        overlay=p.locator("#regionOverlay"); overlay.wait_for(state="visible")
+        box=overlay.bounding_box()
+        p.mouse.click(box["x"]+12,box["y"]+12)
+        self.assertFalse(p.locator("#regionRect").is_visible())
+        self.assertIn("too small",p.inner_text("#regionStatus"))
+
+        self.crop_box(p); rect=p.locator("#regionRect"); original=rect.get_attribute("style")
+        p.fill("#regionPrompt","Keep this instruction.")
+        box=overlay.bounding_box()
+        p.mouse.click(box["x"]+12,box["y"]+12)
+        with self.subTest(replacement="too small"):
+            self.assertTrue(rect.is_visible(),"A stray click erased the already selected area.")
+            self.assertEqual(rect.get_attribute("style"),original)
+            self.assertIn("previous",p.inner_text("#regionStatus").lower())
+        if not rect.is_visible():
+            self.crop_box(p)
+        box=overlay.bounding_box()
+        c=p.context.new_cdp_session(p)
+        def touch(kind, dx=None, dy=None):
+            points=[] if dx is None else [dict(x=box["x"]+dx,y=box["y"]+dy)]
+            c.send("Input.dispatchTouchEvent",dict(type=kind,touchPoints=points))
+        touch("touchStart",18,20); touch("touchMove",90,70)
+        self.assertNotEqual(rect.get_attribute("style"),original)
+        touch("touchCancel")
+        with self.subTest(replacement="system canceled"):
+            self.assertTrue(rect.is_visible(),"Canceling removed the previously selected area.")
+            self.assertEqual(rect.get_attribute("style"),original)
+            self.assertIn("previous",p.inner_text("#regionStatus").lower())
+        self.assertEqual(p.input_value("#regionPrompt"),"Keep this instruction.")
+
+        p.mouse.move(box["x"]+45,box["y"]+60); p.mouse.down()
+        p.mouse.move(box["x"]+135,box["y"]+145,steps=4); p.mouse.up()
+        self.assertNotEqual(rect.get_attribute("style"),original)
+        self.assertIn("selected",p.inner_text("#regionStatus"))
+        self.assertEqual(type(self).edits,[])
+        self.assertEqual(type(self).last_size,0)
     def test_new_render_cannot_reuse_previous_render_crop(self):
         p=self.start([],outputs=[dict(url="/assets/101")]); self.crop_box(p)
         self.assertIn("selected",p.inner_text("#regionStatus")); p.fill("#regionPrompt","Old rectangle.")

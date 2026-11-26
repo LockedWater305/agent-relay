@@ -2582,14 +2582,20 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // Newest first, but each exchange still reads question-then-answer:
       // [u2, a2, u1, a1]. Your words and the reply stay at the top; older
       // turns and the work history drop below. No scroll games.
-      const ordered = (function oldestToNewestPairs(msgs) {
+      const ordered = (function newestExchangesFirst(msgs) {
         var out = [];
-        for (var i = msgs.length - 1; i >= 0; i--) out.push(msgs[i]);
-        for (var j = 0; j < out.length - 1; j++) {
-          if (out[j].role === "assistant" && out[j + 1].role === "user") {
-            var t = out[j]; out[j] = out[j + 1]; out[j + 1] = t;
-            j++;
+        for (var end = msgs.length; end > 0;) {
+          var start = end - 1;
+          while (start > 0 && msgs[start].role !== "user") start--;
+          if (msgs[start].role === "user") {
+            // A question may have several assistant replies or local status
+            // messages. Preserve their order within this newest-first exchange.
+            for (var i = start; i < end; i++) out.push(msgs[i]);
+          } else {
+            // Standalone opening messages have no question to group under.
+            for (var j = end - 1; j >= start; j--) out.push(msgs[j]);
           }
+          end = start;
         }
         return out;
       })(chatState.messages);

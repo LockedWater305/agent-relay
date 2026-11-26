@@ -1085,6 +1085,9 @@
         overlay.setPointerCapture(e.pointerId);
         dragStart = corner(e);
         dragStart.id = e.pointerId; dragStart.url = lastRenderUrl;
+        // Keep a committed area in reserve until its replacement is valid.
+        // While dragging, no committed selection is available to Apply.
+        dragStart.previous = picked;
         picked = null;
         showRect(regionTo(e));
         e.preventDefault();
@@ -1092,21 +1095,30 @@
       overlay.addEventListener("pointermove", function (e) {
         if (dragStart && dragStart.id === e.pointerId && dragStart.url === lastRenderUrl) showRect(regionTo(e));
       });
+      function restoreCrop(withPrevious, withoutPrevious) {
+        var previous = dragStart.previous;
+        picked = previous && previous.url === lastRenderUrl ? previous : null;
+        dragStart = null;
+        showRect(picked);
+        note.textContent = picked ? withPrevious : withoutPrevious;
+      }
       overlay.addEventListener("pointerup", function (e) {
         if (!dragStart || dragStart.id !== e.pointerId) return;
-        picked = dragStart.url === lastRenderUrl ? regionTo(e) : null;
-        dragStart = null;
+        var next = dragStart.url === lastRenderUrl ? regionTo(e) : null;
         var r = overlay.getBoundingClientRect();
-        if (!picked || picked.w * r.width < 8 || picked.h * r.height < 8) {
-          picked = null; showRect(null); note.textContent = "That box is too small — drag a wider area."; return;
+        if (!next || next.w * r.width < 8 || next.h * r.height < 8) {
+          restoreCrop("That box is too small. Previous area kept.", "That box is too small — drag a wider area.");
+          return;
         }
+        picked = next;
+        dragStart = null;
         showRect(picked);
         note.textContent = Math.round(picked.w * r.width) + "×" + Math.round(picked.h * r.height) + " selected. Describe the change.";
         input.focus();
       });
       function cancelCrop(e) {
         if (!dragStart || dragStart.id !== e.pointerId) return;
-        dragStart = null; showRect(null); note.textContent = "Drag a box on the picture first.";
+        restoreCrop("Selection canceled. Previous area kept.", "Drag a box on the picture first.");
       }
       overlay.addEventListener("pointercancel", cancelCrop);
       overlay.addEventListener("lostpointercapture", cancelCrop);

@@ -504,6 +504,16 @@
         if (a.contains(e.target) || menu.contains(e.target)) return;
         menu.style.display = "none";
       });
+      chrome.addEventListener("keydown", function (e) {
+        if (e.key !== "Escape" || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        var menu = chrome.querySelector(".account-menu");
+        if (!menu || menu.style.display === "none") return;
+        var fromMenu = menu.contains(e.target);
+        if (!fromMenu && !a.contains(e.target)) return;
+        e.preventDefault();
+        if (fromMenu) a.focus({ preventScroll: true });
+        menu.style.display = "none";
+      });
     }
 
     // The page may build its menu after us (Talk does, on every re-execution of its

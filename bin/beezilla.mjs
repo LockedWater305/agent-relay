@@ -317,11 +317,24 @@ async function cmdDoctor() {
 }
 
 async function cmdRun(argv) {
-  const message = argv.filter((a) => !a.startsWith("--")).join(" ").trim();
-  if (!message) {
+  const usage = () => {
     console.error('usage: beezilla run "<what you want>" [--job <id>] [--work]');
     return 2;
+  };
+  let jobId;
+  const parts = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--job") {
+      const value = argv[++i];
+      if (!value?.trim() || value.startsWith("--")) return usage();
+      jobId ??= value;
+    } else if (!arg.startsWith("--")) {
+      parts.push(arg);
+    }
   }
+  const message = parts.join(" ").trim();
+  if (!message) return usage();
   // An expired managed token is a session problem, not a bad key. Spending a
   // request to learn that gives the user a confusing 401; say it up front.
   const cred = resolveInference(DATA);
@@ -332,8 +345,6 @@ async function cmdRun(argv) {
     return 2;
   }
 
-  const jobIdx = argv.indexOf("--job");
-  const jobId = jobIdx !== -1 ? argv[jobIdx + 1] : undefined;
   const mode = argv.includes("--work") ? "work" : "chat";
 
   const rt = await ensureServer();
