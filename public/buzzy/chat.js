@@ -45,7 +45,7 @@
       ".bzc-a{background:#101010;border:1px solid #242424;align-self:flex-start}",
       ".bzc-stage{color:#8d8d8d;font-size:.78rem}",
       ".bzc-row{display:flex;gap:.4rem}",
-      ".bzc-in{flex:1;background:#101010;border:1px solid #242424;color:#f2f2f2;border-radius:9px;padding:.45rem .6rem;font:inherit}",
+      ".bzc-in{flex:1;min-width:0;resize:vertical;background:#101010;border:1px solid #242424;color:#f2f2f2;border-radius:9px;padding:.45rem .6rem;font:inherit}",
       ".bzc-btn{background:#ffd40d;color:#111;border:0;border-radius:9px;padding:.45rem .8rem;font-weight:600;cursor:pointer}",
       ".bzc-btn:disabled{opacity:.5;cursor:default}",
       ".bzc-card{display:flex;gap:.5rem;align-items:center;background:#0c0c0c;border:1px solid #242424;border-radius:10px;padding:.4rem .5rem}",
@@ -75,8 +75,8 @@
     var log = el("div", "bzc-log");
     var stage = el("div", "bzc-stage");
     var row = el("div", "bzc-row");
-    var input = el("input", "bzc-in");
-    input.type = "text";
+    var input = el("textarea", "bzc-in");
+    input.rows = 1;
     input.placeholder = opts.placeholder || "Ask BeeZilla…";
     var sendBtn = el("button", "bzc-btn", "Send");
     row.appendChild(input);
@@ -316,7 +316,7 @@
     sendBtn.addEventListener("click", send);
     input.addEventListener("keydown", function (e) {
       if (e.isComposing || e.keyCode === 229 || e.defaultPrevented) return;
-      if (e.key === "Enter") { e.preventDefault(); send(); }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
     });
 
     return {
