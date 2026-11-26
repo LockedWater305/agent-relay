@@ -799,11 +799,16 @@ async function createWindow() {
     (probePath ? `${base}${probePath}` : null) ||
     (probe && testPageUrl ? testPageUrl : `${base}/buzzy/talk`);
   if (typeof target !== "string" || (!isAppPage(target, base) && target !== testPageUrl)) throw new Error("The desktop entry point must be a local BeeZilla app page.");
-  const loaded = await Promise.race([
-    mainWindow.loadURL(target).then(() => true),
-    new Promise((r) => setTimeout(() => r(false), 30_000)),
-  ]);
-  console.log(`[desktop] loadURL ${loaded ? "resolved" : "TIMED OUT"} ${target}`);
+  let deadline;
+  try {
+    const timeout = new Promise((_, reject) => {
+      deadline = setTimeout(() => reject(new Error("The main window did not finish loading in 30 seconds.")), 30_000);
+    });
+    await Promise.race([mainWindow.loadURL(target), timeout]);
+  } finally {
+    clearTimeout(deadline);
+  }
+  console.log(`[desktop] loadURL resolved ${target}`);
 
   // Headless smoke hook: render, capture what the user would see, exit. Lets CI
   // prove the window actually paints instead of only proving the process boots.
@@ -1011,7 +1016,13 @@ app.whenReady().then(async () => {
   }
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+    if (BrowserWindow.getAllWindows().length !== 0) return;
+    void createWindow().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[desktop] failed to start: window reopen failed:", error instanceof Error ? error.stack || message : message);
+      const { file } = logPaths();
+      dialog.showErrorBox("BeeZilla could not reopen the window", `${message}\n\nLog file:\n${file ?? "(logging unavailable)"}`);
+    });
   });
 });
 
