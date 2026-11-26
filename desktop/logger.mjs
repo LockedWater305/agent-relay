@@ -17,10 +17,10 @@
  *     same userData root as `%APPDATA%\BeeZilla\data`. Override with BZ_LOG_DIR.
  *     Never the install folder: it sits under Program Files for an all-user
  *     install, where writing needs elevation.
- *   - **Rotation, not growth.** 2 MB then `main.1.log`; a log nobody can open
+ *   - **Rotation, not growth.** 2 MB then `main.log.1`; a log nobody can open
  *     is not a log.
  */
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -46,11 +46,12 @@ export function resolveLogDir() {
 
 function rotate() {
   try {
-    if (!existsSync(file) || statSync(file).size < MAX_BYTES) return;
+    const current = statSync(file, { throwIfNoEntry: false });
+    if (!current?.isFile() || current.size < MAX_BYTES) return;
     for (let i = KEEP - 1; i >= 1; i--) {
-      const from = i === 1 ? file : `${file}.${i}`;
+      const from = `${file}.${i}`;
       const to = `${file}.${i + 1}`;
-      if (existsSync(from)) renameSync(from, to);
+      if (statSync(from, { throwIfNoEntry: false })?.isFile()) renameSync(from, to);
     }
     renameSync(file, `${file}.1`);
   } catch {
@@ -66,6 +67,7 @@ export function logLine(level, args) {
   const line = `${new Date().toISOString()} ${String(level).toUpperCase().padEnd(5)} ${text}\n`;
   if (!file) return line;
   try {
+    rotate();
     appendFileSync(file, line);
   } catch {
     // Disk full / permissions: keep the app running, keep printing to stdout.
@@ -77,7 +79,8 @@ const safeJson = (v) => {
   try {
     return JSON.stringify(v);
   } catch {
-    return String(v);
+    try { return String(v); }
+    catch { return "[unprintable diagnostic value]"; }
   }
 };
 
@@ -95,8 +98,11 @@ export function installLogging(opts = {}) {
   if (!installed) {
     try {
       mkdirSync(dir, { recursive: true });
-      rotate();
-      if (!existsSync(file)) writeFileSync(file, "");
+      const destination = statSync(file, { throwIfNoEntry: false });
+      if (destination && !destination.isFile()) throw new Error("Log destination is not a regular file");
+      // Test the path even if it already exists, so the error dialog does not
+      // direct the user to a file this session could not open for writing.
+      appendFileSync(file, "");
     } catch {
       file = null; // logging degrades to stdout; it must never block a launch
     }

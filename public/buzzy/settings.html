@@ -59,7 +59,7 @@
       .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
       details { margin-top: 12px; }
       summary { cursor: pointer; color: var(--muted); font-size: 13px; }
-      .row { display: flex; gap: 10px; align-items: center; margin-top: 16px; }
+      .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 16px; }
       button {
         font: inherit;
         padding: 9px 16px;
@@ -71,11 +71,14 @@
       }
       button.secondary { background: #fff; border-color: var(--line); color: var(--ink); }
       button:disabled { opacity: 0.55; cursor: default; }
-      .status { margin-top: 14px; font-size: 13px; min-height: 18px; }
+      .status { font-size: 13px; min-height: 18px; min-width: 0; overflow-wrap: anywhere; }
+      .status:not(:empty) { flex: 1 1 10rem; }
+      .status:empty { position: absolute; }
       .status.ok { color: var(--accent); }
       .status.warn { color: var(--warn); }
       .status.err { color: var(--err); }
-      .current { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+      .current { font-size: 13px; color: var(--muted); margin: 6px 0 0; overflow-wrap: anywhere; }
+      #retry-settings { margin-top: 8px; }
       code { background: #eef1f5; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
       .nobridge {
         display: none;
@@ -100,7 +103,7 @@
       <h1>Settings</h1>
       <p class="sub">Choose how BeeZilla thinks and searches. Cloud models and online search send requests to their providers. Choose a local model to run inference on this machine.</p>
 
-      <div class="nobridge" id="nobridge">
+      <div class="nobridge" id="nobridge" role="status">
         This page manages app credentials, so it only works inside the BeeZilla window.
         Open BeeZilla, then choose <strong>BeeZilla → Settings</strong>.
       </div>
@@ -154,9 +157,10 @@
         <div class="row">
           <button id="save-inference">Save intelligence</button>
           <button id="clear-inference" class="secondary">Remove key</button>
-          <span class="status" id="inference-status"></span>
+          <span class="status" id="inference-status" role="status"></span>
         </div>
-        <p class="current" id="inference-current"></p>
+        <p class="current" id="inference-current" tabindex="-1"></p>
+        <button id="retry-settings" class="secondary" type="button" hidden>Retry reading settings</button>
       </section>
 
       <!-- ── search ────────────────────────────────────────────────── -->
@@ -170,7 +174,7 @@
         <div class="row">
           <button id="save-search">Save search</button>
           <button id="clear-search" class="secondary">Remove key</button>
-          <span class="status" id="search-status"></span>
+          <span class="status" id="search-status" role="status"></span>
         </div>
         <p class="current" id="search-current"></p>
       </section>
@@ -193,7 +197,7 @@
         <div class="row">
           <button id="save-music">Save music key</button>
           <button id="clear-music" class="secondary">Remove key</button>
-          <span class="status" id="music-status"></span>
+          <span class="status" id="music-status" role="status"></span>
         </div>
         <p class="current" id="music-current"></p>
       </section>
@@ -217,13 +221,13 @@
         <div class="row">
           <button id="mic-allow" class="secondary">Allow microphone</button>
           <button id="mic-test">Record 3 s &amp; transcribe</button>
-          <span class="status" id="mic-status"></span>
+          <span class="status" id="mic-status" role="status"></span>
         </div>
         <div id="mic-meter" class="mic-meter" hidden><span id="mic-fill"></span></div>
         <p class="current" id="mic-result">Not tested yet.</p>
         <div class="row">
           <button id="mic-copy" class="secondary">Copy diagnostics</button>
-          <span class="status" id="mic-copy-status"></span>
+          <span class="status" id="mic-copy-status" role="status"></span>
         </div>
       </section>
 
@@ -239,9 +243,9 @@
         </p>
         <div class="row">
           <button id="open-logs" class="secondary">Open logs folder</button>
-          <span class="status" id="logs-status"></span>
+          <span class="status" id="logs-status" role="status"></span>
         </div>
-        <p class="current" id="logs-path"></p>
+        <p class="current" id="logs-path" role="status"></p>
       </section>
 
       <p class="sub" style="margin-top: 26px">
@@ -516,14 +520,26 @@
       if (!bridge) {
         $("nobridge").style.display = "block";
         $("connect-hint").textContent = "Account connection is available only inside the BeeZilla desktop app.";
-        document.querySelectorAll("button").forEach((b) => (b.disabled = true));
+        document.querySelectorAll("button, input, select").forEach((control) => (control.disabled = true));
       } else {
-        refresh().then((res) => {
-          if (!res?.ok) throw new Error("Settings unavailable");
-        }).catch(() => {
-          $("connect-hint").textContent = "Account connection is unavailable until settings can be read. Reopen Settings to try again.";
-          say($("inference-status"), "Could not read current settings.", "err");
-        });
+        const retry = $("retry-settings");
+        async function readSettingsStatus() {
+          const restoreFocus = document.activeElement === retry;
+          retry.hidden = true;
+          say($("inference-status"), "", "");
+          try {
+            const res = await refresh();
+            if (!res?.ok) throw new Error("Settings unavailable");
+            if (restoreFocus && document.activeElement === document.body) $("inference-current").focus();
+          } catch {
+            $("connect-hint").textContent = "Account connection is unavailable until settings can be read.";
+            say($("inference-status"), "Could not read current settings.", "err");
+            retry.hidden = false;
+            if (restoreFocus && document.activeElement === document.body) retry.focus();
+          }
+        }
+        retry.addEventListener("click", readSettingsStatus);
+        void readSettingsStatus();
       }
 
       // Diagnostics — desktop only. `window.beezilla.app` exists only under the
@@ -531,12 +547,17 @@
       const appBridge = window.beezilla?.app;
       if (appBridge?.logs) {
         $("diagnostics").hidden = false;
-        appBridge
-          .logs()
+        const logsPath = $("logs-path");
+        logsPath.textContent = "Reading log file path…";
+        Promise.resolve()
+          .then(() => appBridge.logs())
           .then((res) => {
-            if (res?.ok && res.data?.file) $("logs-path").textContent = `Log: ${res.data.file}`;
+            if (!res?.ok || !res.data?.file) throw new Error("Log path unavailable");
+            if (logsPath.isConnected) logsPath.textContent = `Log: ${res.data.file}`;
           })
-          .catch(() => {});
+          .catch(() => {
+            if (logsPath.isConnected) logsPath.textContent = "Could not read the log file path.";
+          });
         $("open-logs").addEventListener("click", async () => {
           const status = $("logs-status");
           try {

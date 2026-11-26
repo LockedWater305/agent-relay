@@ -6375,6 +6375,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     var rwSearchQuery = "";
     var rwViewRevision = 0;
 
+    function readWorkList(path) {
+      return fetch(path, { credentials: "same-origin", signal: AbortSignal.timeout(8000) });
+    }
+
     // The search field belongs to the user while the list underneath changes.
     // Reuse it across list renders: keep focus/caret only if it had focus.
     function paintWorkList(container, markup) {
@@ -6452,7 +6456,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       function current() {
         return revision === rwViewRevision && container.querySelector("#rwSearchStatus") === statusNode;
       }
-      fetch("/api/buzzy/search?q=" + encodeURIComponent(q), { credentials: "same-origin" })
+      readWorkList("/api/buzzy/search?q=" + encodeURIComponent(q))
         .then(function (r) {
           if (r.status === 401) { window.location.href = "/buzzy/landing"; return null; }
           return r.ok ? r.json() : null;
@@ -6470,14 +6474,16 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           var items = [];
           jobs.forEach(function (j) {
             items.push({
-              kind: "job", job: j, title: j.title || "Untitled job", company: j.companyName || "No company",
+              kind: "job", job: j, title: j.title || "Untitled job",
+              company: j.companyName || "", companyId: j.companyId || "",
               sub: (j.status || "Discovering") + (j.updatedAt ? " · updated " + timeAgo(j.updatedAt) : "") +
                 (j.snippet ? " · " + j.snippet : ""),
             });
           });
           sessions.forEach(function (s) {
             items.push({
-              kind: "session", session: s, title: s.title || "Untitled chat", company: s.companyName || "No company",
+              kind: "session", session: s, title: s.title || "Untitled chat",
+              company: s.companyName || "", companyId: s.companyId || "",
               sub: (s.messageCount != null ? s.messageCount + " message" + (s.messageCount === 1 ? "" : "s") : "chat") +
                 (s.updatedAt ? " · updated " + timeAgo(s.updatedAt) : "") + (s.snippet ? " · " + s.snippet : ""),
             });
@@ -6492,13 +6498,40 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           });
           var groups = new Map();
           items.forEach(function (it) {
-            var key = it.kind === "document" ? "documents" : "company:" + it.company;
-            if (!groups.has(key)) groups.set(key, { label: it.company, rows: [] });
+            var isDocument = it.kind === "document";
+            var isCompany = !isDocument && !!(it.companyId || it.company);
+            // Display names are not unique. A conversation and job with the
+            // same company ID share a group; a different ID never joins it.
+            var key = isDocument ? "documents" : it.companyId ? "id:" + it.companyId :
+              isCompany ? "name:" + it.company : "unfiled";
+            if (!groups.has(key)) groups.set(key, {
+              kind: isDocument ? "documents" : isCompany ? "company" : "unfiled",
+              label: isDocument ? "Documents" : isCompany ? it.company || "Company" : "No company",
+              companyId: it.companyId, rows: [],
+            });
             groups.get(key).rows.push(it);
           });
+          var counts = new Map();
+          groups.forEach(function (group) { counts.set(group.label, (counts.get(group.label) || 0) + 1); });
+          var numbers = new Map();
+          var metadata = window.BZCompanies && typeof window.BZCompanies.list === "function"
+            ? new Map(window.BZCompanies.list().map(function (company) { return [company.id, company]; })) : new Map();
           var html = "";
           groups.forEach(function (group) {
-            html += '<h4 class="rw-group">' + esc(group.label) + '</h4>';
+            var label = group.label;
+            if (counts.get(label) > 1) {
+              if (group.kind === "documents") label = "Matching documents";
+              else if (group.kind === "unfiled") label = "Unfiled work";
+              else {
+                var rank = (numbers.get(label) || 0) + 1;
+                numbers.set(label, rank);
+                var known = metadata.get(group.companyId);
+                var domain = "";
+                try { if (known && known.website) domain = new URL(known.website).hostname; } catch (_) {}
+                label += (domain ? " · " + domain : "") + " · company " + rank;
+              }
+            }
+            html += '<h4 class="rw-group">' + esc(label) + '</h4>';
             group.rows.forEach(function (it) {
               var idx = items.indexOf(it);
               html += '<div class="rw-item' + (it.kind === "session" ? " rw-session" : "") + '" data-idx="' + idx +
@@ -6545,9 +6578,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var revision = ++rwViewRevision;
       paintWorkList(container, '<div class="recent-work"><div class="rw-head-row"><h3 class="rw-head">Recent work</h3>' +
         workSearchBoxHtml() + '</div><p class="muted rw-lead">Loading your recent work…</p></div>');
-      var jobsP = fetch("/api/buzzy/jobs" + (co ? "?companyId=" + encodeURIComponent(co) : ""), { credentials: "same-origin" })
+      var jobsP = readWorkList("/api/buzzy/jobs" + (co ? "?companyId=" + encodeURIComponent(co) : ""))
         .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
-      var sessP = fetch(SESSIONS_BASE + (co ? "?companyId=" + encodeURIComponent(co) : ""), { credentials: "same-origin" })
+      var sessP = readWorkList(SESSIONS_BASE + (co ? "?companyId=" + encodeURIComponent(co) : ""))
         .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
       Promise.all([jobsP, sessP]).then(function (res) {
         if (revision !== rwViewRevision) return;
