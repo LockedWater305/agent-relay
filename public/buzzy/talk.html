@@ -5795,8 +5795,16 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var body = draftBodyEl(owner);
       if (body && !body.value) body.value = chatState.draftText;
       renderMoneyCheck(owner);
-      var csvBtn = view.getElementById("downloadCsvBtn");
-      if (csvBtn) csvBtn.classList.toggle("hidden", !mdTableToCsv(chatState.draftText || ""));
+      paintDraftCsv(owner);
+    }
+
+    // The export action reflects the editable text, not the original reply.
+    function paintDraftCsv(owner) {
+      var csvBtn = (owner || document).getElementById("downloadCsvBtn");
+      if (!csvBtn) return;
+      var body = draftBodyEl(owner);
+      var text = body ? body.value : (chatState.draftText || "");
+      csvBtn.classList.toggle("hidden", !mdTableToCsv(text));
     }
 
     function setDraftWarning(text, owner) {
@@ -5817,6 +5825,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (!body) return;
       var text = body.value;
       chatState.draftText = text;
+      paintDraftCsv();
       if (chatState.approvedText != null && text !== chatState.approvedText) {
         chatState.approvedText = null;
         chatState.outwardConfirmed = false;
@@ -6043,6 +6052,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       chatState.approvedText = null;
       chatState.previousDraft = null;
       paintDraftGate();
+      paintDraftCsv();
       var btn = document.getElementById("restorePrevious");
       if (btn) btn.classList.add("hidden");
     }

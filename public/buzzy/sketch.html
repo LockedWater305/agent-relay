@@ -317,6 +317,8 @@
     }
     function undo() {
       if (!editable()) return;
+      // Do not remove earlier marks while a new shape is still being drawn.
+      if (draft) { discardDraft(); setStatus("Draft canceled."); return; }
       if (!undoStack.length) { setStatus("Nothing to undo."); return; }
       redoStack.push(snapshotJson());
       applySnapshot(undoStack.pop());
@@ -438,8 +440,11 @@
 
     function drawStroke(s, isDraft, output, marks) {
       var c = output || ctx;
-      c.strokeStyle = s.color || color;
-      c.fillStyle = s.color || color;
+      // A legacy colorless mark keeps the original default ink; the picker
+      // selects the next mark, not the color of saved geometry.
+      var markColor = s.color || "#ffd40d";
+      c.strokeStyle = markColor;
+      c.fillStyle = markColor;
       c.lineWidth = s.width || 3;
       c.lineCap = "round";
       c.lineJoin = "round";
@@ -454,7 +459,7 @@
         else if (s.tool === "line" || s.tool === "arrow") { c.moveTo(s.x1, s.y1); c.lineTo(s.x2, s.y2); }
         c.stroke();
         c.lineWidth = s.width || 3;
-        c.strokeStyle = s.color || color;
+        c.strokeStyle = markColor;
       }
       if (s.tool === "pen") {
         if (!s.points.length) return;
@@ -578,10 +583,12 @@
       setStatus(strokes.length + " marks on the board");
     }
     canvas.addEventListener("pointerup", function (e) { if (ownsDraftPointer(e)) finishStroke(); });
-    function cancelStroke(e) {
-      if (!draft || !ownsDraftPointer(e)) return;
+    function discardDraft() {
       draft = null; draftPointerId = null;
       redraw();
+    }
+    function cancelStroke(e) {
+      if (draft && ownsDraftPointer(e)) discardDraft();
     }
     canvas.addEventListener("pointercancel", cancelStroke);
     canvas.addEventListener("lostpointercapture", cancelStroke);
@@ -919,7 +926,7 @@
       // Reference images decode asynchronously. Keep the local download's ink
       // and note anchors at the click, not later edits to the live board.
       // Committed pen points never mutate; the record holds mutable note anchors.
-      var marks = strokes.map(function (st) { return Object.assign({}, st, { color: st.color || color }); });
+      var marks = strokes.map(function (st) { return Object.assign({}, st); });
       flatten(getComputedStyle(stage).backgroundColor, downloadFrame(true, marks), marks).then(function (url) {
         var a = document.createElement("a");
         a.href = url; a.download = "sketch-" + Date.now() + ".png"; a.click();

@@ -291,14 +291,16 @@
           '<p class="muted">Pick an area to see what BeeZilla excels at there.</p>' +
           '<div class="experts-grid">' + cards + '</div>';
         root.querySelectorAll(".expert-card").forEach(function (c) {
-          function open() { renderDetail(c.getAttribute("data-expert")); }
+          function open() { renderDetail(c.getAttribute("data-expert"), c); }
           c.addEventListener("click", open);
           c.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); } });
         });
       }
-      function renderDetail(id) {
+      function renderDetail(id, card) {
         var e = EXPERTS.find(function (x) { return x.id === id; });
         if (!e) return;
+        var sourceTop = card.getBoundingClientRect().top;
+        var listWidth = window.innerWidth, listHeight = window.innerHeight;
         var skills = e.skills.map(function (s) { return "<li>" + esc(s) + "</li>"; }).join("");
         root.innerHTML =
           '<button type="button" class="back-link" id="backExperts">&larr; All experts</button>' +
@@ -313,7 +315,15 @@
         back.addEventListener("click", function () {
           renderList();
           var previous = root.querySelector('[data-expert="' + id + '"]');
-          if (previous) previous.focus();
+          if (!previous) return;
+          previous.focus({ preventScroll: true });
+          var box = previous.getBoundingClientRect(), targetTop = sourceTop;
+          // Browser focus alone centers the card and loses the reader's place.
+          // If the grid reflowed, bring the card within the new viewport.
+          if (window.innerWidth !== listWidth || window.innerHeight !== listHeight) {
+            targetTop = Math.max(0, Math.min(sourceTop, window.innerHeight - box.height));
+          }
+          window.scrollBy(0, box.top - targetTop);
         });
         back.focus();
       }

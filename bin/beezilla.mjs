@@ -44,12 +44,23 @@ function dataDir() {
 const DATA = dataDir();
 const RUNTIME_FILE = join(DATA, "runtime.json");
 
-function readRuntime() {
+function readRuntimeRecord() {
+  let text;
   try {
-    return JSON.parse(readFileSync(RUNTIME_FILE, "utf8"));
-  } catch {
-    return null;
+    text = readFileSync(RUNTIME_FILE, "utf8");
+  } catch (error) {
+    return { runtime: null, state: error.code === "ENOENT" ? "missing" : "unreadable" };
   }
+  try {
+    return { runtime: JSON.parse(text), state: "read" };
+  } catch {
+    return { runtime: null, state: "invalid" };
+  }
+}
+
+// Other commands keep their existing absent/unreadable fallback behavior.
+function readRuntime() {
+  return readRuntimeRecord().runtime;
 }
 
 async function healthy(rt) {
@@ -119,10 +130,22 @@ async function cmdServe(argv) {
 }
 
 async function cmdStatus() {
-  const rt = readRuntime();
-  if (!rt) {
+  const { runtime: rt, state } = readRuntimeRecord();
+  if (state === "missing") {
     console.log("not running");
     return 0;
+  }
+  if (state === "unreadable" || state === "invalid") {
+    console.log(`runtime status unknown: runtime.json ${state === "invalid" ? "contains invalid JSON" : "could not be read"}`);
+    return 1;
+  }
+  if (!rt || typeof rt.host !== "string" || !rt.host.trim() ||
+      !Number.isInteger(rt.port) || rt.port < 1 || rt.port > 65535 ||
+      !Number.isInteger(rt.pid) || rt.pid < 1 ||
+      typeof rt.startedAt !== "string" || !Number.isFinite(Date.parse(rt.startedAt)) ||
+      typeof rt.dataDir !== "string" || !rt.dataDir.trim()) {
+    console.log("runtime status unknown: runtime.json has missing or invalid process details");
+    return 1;
   }
   const up = await healthy(rt);
   if (!up) {

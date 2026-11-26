@@ -509,4 +509,28 @@ class Sketch(unittest.TestCase):
         self.assertEqual(self.board["images"],[image])
         self.assertAlmostEqual(x(),image["x"],delta=1)
         p.click("#undo"); self.assertEqual(p.inner_text("#status"),"Nothing to undo.")
+    def test_changing_brush_color_does_not_repaint_colorless_saved_geometry(self):
+        legacy={k:v for k,v in LINE.items() if k!="color"}
+        p=self.start([legacy])
+        p.locator("#color").fill("#00aaee"); p.click('[data-tool="line"]')
+        self.drag(p,310,186,430,186); self.save(p)
+        self.assertEqual(self.board["strokes"][0],legacy)
+        self.assertEqual(self.board["strokes"][1]["color"],"#00aaee")
+        self.assertEqual(self.screenshot_pixel(p,100,50),[255,212,13])
+        self.assertEqual(self.screenshot_pixel(p,370,186),[0,170,238])
+        png=self.png(p); self.assertEqual(self.pixel(p,png,100,50),[255,212,13,255])
+        self.assertEqual(self.pixel(p,png,370,186),[0,170,238,255])
+        self.assertEqual([line.get("stroke") for line in self.svg(p).findall("{*}line")],["#ffd40d","#00aaee"])
+    def test_undo_while_drawing_cancels_draft_instead_of_removing_unrelated_finished_mark(self):
+        p=self.start([]); p.click('[data-tool="line"]')
+        self.drag(p,80,80,180,80); self.drag(p,100,110,210,110); self.save(p)
+        before=self.board["strokes"]
+        self.assertEqual(len(before),2)
+        board=p.locator("#board").bounding_box()
+        p.mouse.move(board["x"]+150,board["y"]+180); p.mouse.down()
+        p.mouse.move(board["x"]+210,board["y"]+240,steps=4)
+        p.keyboard.press("Control+z"); p.mouse.up(); self.save(p)
+        self.assertEqual(self.board["strokes"],before)
+        p.keyboard.press("Control+z"); self.save(p)
+        self.assertEqual(self.board["strokes"],before[:1])
 if __name__=="__main__": unittest.main(verbosity=2)
