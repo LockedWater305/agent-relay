@@ -233,6 +233,22 @@ class Sketch(unittest.TestCase):
         front=dict(LINE,id="front",color="#cc00cc")
         p=self.start([LINE.copy(),front]); self.hit(p,100,50); p.keyboard.press("Delete"); self.save(p)
         self.assertEqual(self.board["strokes"],[LINE])
+    def test_clicking_painted_ink_selects_it_over_a_closer_hidden_centerline(self):
+        # Neither case is a distance tie: the red stroke's centerline is
+        # directly underneath the click but its pixels are covered by green.
+        for kind,rear_y,front_y,x in (("line",125,124,150),("arrow",107,110,214)):
+            with self.subTest(front=kind):
+                p=self.start([])
+                p.locator("#color").fill("#ff0000"); p.click('[data-tool="line"]')
+                self.drag(p,80,rear_y,240,rear_y)
+                p.locator("#color").fill("#00aa44"); p.click('[data-tool="%s"]'%kind)
+                self.drag(p,60,front_y,225,front_y)
+                self.save(p)
+                self.assertEqual(self.screenshot_pixel(p,x,rear_y),[0,170,68])
+                p.click('[data-tool="select"]'); self.hit(p,x,rear_y)
+                p.keyboard.press("Delete"); self.save(p)
+                self.assertEqual([st["color"] for st in self.board["strokes"]],["#ff0000"])
+                self.assertEqual(self.screenshot_pixel(p,x,rear_y),[255,0,0])
     def test_secondary_mouse_button_does_not_add_a_brush_mark(self):
         p=self.start([LINE.copy()]); p.click('[data-tool="pen"]'); r=p.locator("#board").bounding_box()
         p.mouse.click(r["x"]+100,r["y"]+100,button="right"); self.save(p)

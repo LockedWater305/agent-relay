@@ -1035,6 +1035,9 @@
       margin-top: 0.5rem;
     }
 
+    #sessionsOpenError { padding: 0 1rem; }
+    #sessionsOpenError:empty { padding: 0; margin: 0; }
+
     /* ── Explicit skip on decisions ────────────────────────── */
     .slot-skip {
       cursor: pointer;
@@ -1507,6 +1510,7 @@
         <button id="drawerNewChat" class="secondary" type="button">Start a new chat</button>
       </div>
       <p class="drawer-note">Pick a past chat to reopen it, rename it, or get a quick summary.</p>
+      <div id="sessionsOpenError" class="sessions-error" role="alert" aria-atomic="true"></div>
       <div id="sessionsList"></div>
     </aside>
   </main>
@@ -7620,6 +7624,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var company = activeCompanyId() || null;
       function current() { return historyRequest === chatNavigation.history && company === (activeCompanyId() || null); }
       const list = document.getElementById("sessionsList");
+      document.getElementById("sessionsOpenError").textContent = "";
       list.innerHTML = '<p class="sessions-empty">Loading…</p>';
       try {
         var sessionsCo = window.BZCompanies && BZCompanies.ready && BZCompanies.ready() ? BZCompanies.activeId() : null;
@@ -7684,6 +7689,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var pending = chatNavigation.pending;
       if (pending && pending.kind === "history" && pending.key === session.id && chatNavigationCurrent(pending)) return pending.promise;
       var request = beginChatNavigation("history", session.id);
+      var openError = document.getElementById("sessionsOpenError");
+      if (openError) openError.textContent = "";
       request.promise = fetch("/api/buzzy/transcript?sessionId=" + encodeURIComponent(session.id), {
         credentials: "same-origin", signal: AbortSignal.timeout(8000),
       }).then(function (r) {
@@ -7706,7 +7713,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         showChatScreen();
         return data.session;
       }).catch(function () {
-        if (chatNavigationCurrent(request)) sessionsError("Couldn't open that session. Your current conversation is unchanged. Try again in a moment.");
+        // A single transcript failure doesn't invalidate the History list.
+        // Keep its Open buttons (and keyboard focus) available for a retry.
+        if (chatNavigationCurrent(request) && openError) {
+          openError.textContent = "Couldn't open that session. Your current conversation is unchanged. Try opening it again or choose another.";
+        }
         return null;
       }).finally(function () { finishChatNavigation(request); });
       return request.promise;

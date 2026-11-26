@@ -384,10 +384,15 @@
 
     // Which mark is under the cursor? Cheap segment distance is enough for selecting.
     function hitTest(p, shapesOnly) {
-      var best = null, bestD = 9;
-      // The most recently drawn mark is painted on top. In a distance tie,
-      // pick it rather than an otherwise invisible mark underneath.
+      var best = null, bestD = 9, painted = null;
+      function consider(st, distance) {
+        if (!painted && distance <= (st.width || 3) / 2) painted = st;
+        if (distance < bestD) { bestD = distance; best = st; }
+      }
+      // Prefer the topmost ink actually at the click. Proximity is only a
+      // fallback when clicking next to a mark, not through painted layers.
       strokes.slice().reverse().forEach(function (st) {
+        if (painted) return;
         if (st.tool === "text") {
           if (shapesOnly) return;
           var at = (st.anchor && anchorPoint(st.anchor)) || { x: st.x1, y: st.y1 };
@@ -398,34 +403,39 @@
           var left = at.x - (st.anchor ? 9 : 2);
           if (p.x >= left && p.x <= at.x + metrics.width + 2 &&
               p.y >= at.y - Math.max(10, metrics.actualBoundingBoxAscent || 0) - 2 &&
-              p.y <= at.y + Math.max(2, metrics.actualBoundingBoxDescent || 0) + 2 &&
-              bestD > 0) { best = st; bestD = 0; }
+              p.y <= at.y + Math.max(2, metrics.actualBoundingBoxDescent || 0) + 2) consider(st, 0);
           return;
         }
         if (st.tool === "pen" && st.points) {
           if (st.points.length === 1) {
-            var dotDistance = segDist(p, st.points[0], st.points[0]);
-            if (dotDistance < bestD) { bestD = dotDistance; best = st; }
+            consider(st, segDist(p, st.points[0], st.points[0]));
           }
           for (var i = 1; i < st.points.length; i++) {
-            var d = segDist(p, st.points[i - 1], st.points[i]);
-            if (d < bestD) { bestD = d; best = st; }
+            consider(st, segDist(p, st.points[i - 1], st.points[i]));
           }
         } else {
           if (st.tool === "rect") {
             var corners = [[st.x1, st.y1, st.x2, st.y1], [st.x2, st.y1, st.x2, st.y2],
                            [st.x2, st.y2, st.x1, st.y2], [st.x1, st.y2, st.x1, st.y1]];
             corners.forEach(function (c) {
-              var dd = segDist(p, { x: c[0], y: c[1] }, { x: c[2], y: c[3] });
-              if (dd < bestD) { bestD = dd; best = st; }
+              consider(st, segDist(p, { x: c[0], y: c[1] }, { x: c[2], y: c[3] }));
             });
           } else {
             var d2 = segDist(p, { x: st.x1, y: st.y1 }, { x: st.x2, y: st.y2 });
-            if (d2 < bestD) { bestD = d2; best = st; }
+            if (st.tool === "arrow") {
+              // The filled arrowhead is wider than the shaft. Use the same
+              // 12px, ±0.4rad triangle as the renderer.
+              var theta = Math.atan2(st.y2 - st.y1, st.x2 - st.x1);
+              var ux = Math.cos(theta), uy = Math.sin(theta);
+              var dx = p.x - st.x2, dy = p.y - st.y2;
+              var back = -dx * ux - dy * uy, side = Math.abs(dy * ux - dx * uy);
+              if (back >= 0 && back <= 12 * Math.cos(0.4) && side <= back * Math.tan(0.4)) d2 = 0;
+            }
+            consider(st, d2);
           }
         }
       });
-      return best;
+      return painted || best;
     }
     function segDist(p, a, b) {
       var vx = b.x - a.x, vy = b.y - a.y;

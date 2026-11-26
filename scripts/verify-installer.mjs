@@ -93,32 +93,23 @@ if (!existsSync(ASAR)) {
   } catch (error) {
     check("the ASAR inventory can be read from the locked desktop tool", false, error.message);
   }
-  // The connect flow is the only thing that can obtain OUR credentials, so a stage
-  // that ships it without the search half would silently ship BYOK-only behaviour.
-  // asar stores file bodies uncompressed, so the bytes of connect.mjs are searchable
-  // in the archive itself — no extraction, no temp files, no cwd surprises.
+  // Keep the shell and its separately packaged runtime sources independent:
+  // reading one of the latter should not be reported as an archive failure.
   try {
+    // asar stores file bodies uncompressed, so no extraction is needed here.
     const archive = readFileSync(ASAR, "latin1");
     check("the connect flow also asks for a search token", archive.includes("api/search-token"));
-    // s9g: without a baked default the Connect item is dead on every real install.
     check("the app knows the BeeZilla address without env", /https:\/\/beezilla[a-z0-9.-]*\.(railway\.app|beezilla\.ai)/.test(archive));
-    // These two live OUTSIDE app.asar (scripts/ and .output/ are staged as real files
-    // in resources/app), so searching the archive finds nothing and lies about a good
-    // build — the same mistake as the earlier PGLite check.
-    const launcherText = existsSync(join(APP, "scripts", "beezilla-local.mjs"))
-      ? readFileSync(join(APP, "scripts", "beezilla-local.mjs"), "utf8")
-      : "";
-    const serverText = existsSync(join(APP, ".output", "server", "index.mjs"))
-      ? readFileSync(join(APP, ".output", "server", "index.mjs"), "utf8")
-      : "";
-    // s9i: the shipped shell must degrade honestly when our cloud is unreachable.
     check("the app says so when BeeZilla is unreachable", archive.includes("could not reach BeeZilla at"));
-    // s9f: the shipped launcher must be able to say "expired", not "off".
-    check("the launcher can distinguish an expired session", launcherText.includes("BZ_SEARCH_EXPIRED"));
-    check("the runtime API reports needsReconnect", serverText.includes("needsReconnect"));
   } catch (err) {
     check("the connect flow also asks for a search token", false, `could not read the asar: ${err instanceof Error ? err.message : err}`);
   }
+
+  // These files are staged as regular files under resources/app, not app.asar.
+  const launcher = readRuntimeText(join(APP, "scripts", "beezilla-local.mjs"));
+  const server = readRuntimeText(join(APP, ".output", "server", "index.mjs"));
+  check("the launcher can distinguish an expired session", launcher.text?.includes("BZ_SEARCH_EXPIRED") === true, launcher.error ?? "");
+  check("the runtime API reports needsReconnect", server.text?.includes("needsReconnect") === true, server.error ?? "");
 }
 
 // ── the runtime tree inside the asar's extraResources ───────────────────────

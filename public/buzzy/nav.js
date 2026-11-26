@@ -137,7 +137,9 @@
       // identity cluster owns the right, so a left-hugging link row reads as a mistake.
       // 'safe center' falls back to start the moment the row is wider than the bar, so
       // centring can never clip the first link on a narrow window.
-      ".bz-navbar{display:flex;align-items:center;justify-content:safe center;gap:.9rem;height:48px;min-height:48px;border-bottom:1px solid #242424;background:#0d0d0d;overflow-x:auto;scrollbar-width:thin;scrollbar-color:#676767 #171717;padding:0 8px}",
+      // Keep the normal 48px strip, but let larger browser fonts expand it.
+      // Leave room for the keyboard focus outline and subpixel rounding.
+      ".bz-navbar{display:flex;align-items:center;justify-content:safe center;gap:.9rem;min-height:48px;box-sizing:border-box;border-bottom:1px solid #242424;background:#0d0d0d;overflow-x:auto;scrollbar-width:thin;scrollbar-color:#676767 #171717;padding:6px 8px}",
       // The chrome must style itself: /buzzy/landing has no nav CSS of its own, so
       // links fell back to the browser default (blue, underlined) on the one page
       // every visitor sees first. Page styles that are more specific still win.
