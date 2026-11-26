@@ -19,7 +19,7 @@
  *   <install>/resources/app/            .output/ scripts/ bin/ package.json node_modules/
  */
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeCspManifest } from "../scripts/build-desktop-csp.mjs";
@@ -89,6 +89,11 @@ async function stage() {
     log(`copying ${dir}`);
     cpSync(join(ROOT, dir), join(APP, dir), { recursive: true });
   }
+  const serverEntry = join(APP, ".output", "server", "index.mjs");
+  const serverStat = lstatSync(serverEntry, { throwIfNoEntry: false });
+  if (!serverStat?.isFile() || serverStat.size === 0) {
+    throw new Error(`staged runtime has no non-empty server entry: ${serverEntry}`);
+  }
   // `scripts/` used to be copied wholesale: 89 files of test probes, seeds and
   // TypeScript sources rode along with the launcher, so every installer shipped
   // the recipe-seal sources, the check corpus and the internal test harness in
@@ -142,18 +147,21 @@ async function stage() {
   // cannot do, and a read-only install must not need to write to start.
   ensurePgliteAssets(APP);
   const migrations = existsSync(join(APP, "migrations"))
-    ? readdirSync(join(APP, "migrations")).filter((f) => f.endsWith(".sql")).length
-    : 0;
-  if (migrations === 0) {
+    ? readdirSync(join(APP, "migrations"), { withFileTypes: true }).filter((f) => f.name.endsWith(".sql"))
+    : [];
+  for (const entry of migrations) {
+    if (!entry.isFile()) throw new Error(`staged migration is not a regular file: ${entry.name}`);
+  }
+  if (migrations.length === 0) {
     throw new Error("staged tree has no migrations/*.sql — the runtime would boot with an empty schema");
   }
-  log(`${migrations} migrations staged`);
+  log(`${migrations.length} migrations staged`);
 
   // The gate that would have caught 0.2.0. See assertPackagedImports for what it
   // checks and why the failure is invisible in a dev run.
   assertPackagedImports();
 
-  const size = du(APP);
+  const size = fileBytes(APP);
   writeFileSync(join(STAGE, "MANIFEST.json"), JSON.stringify({
     stagedAt: new Date().toISOString(),
     version: JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version,
@@ -181,6 +189,9 @@ const RUNTIME_SCRIPT_ENTRIES = [
   "scripts/beezilla-local.mjs",
   "scripts/migrate.mjs",
   "bin/beezilla.mjs",
+  // CLI imports this unconditionally at startup. An incomplete checkout must not
+  // produce a "successful" stage whose CLI cannot even show its help.
+  "scripts/lib/pins.mjs",
   "scripts/lib/parent-watchdog.cjs",
   // Loaded at call time through runtimeLib() from the shell, never imported.
   "scripts/lib/inference.mjs",
@@ -301,13 +312,15 @@ function assertPackagedImports() {
   log(`packaged imports: ok (${asarFiles.length} shell files, ${REQUIRED_RUNTIME_FILES.length} runtime libs)`);
 }
 
-function du(dir) {
-  try {
-    // -k is accepted by both GNU and BSD/macOS du; -b is GNU-only and made macOS report 0 MB.
-    return Number(execFileSync("du", ["-sk", dir], { encoding: "utf8" }).split("\t")[0]) * 1024;
-  } catch {
-    return 0;
+// Logical regular-file bytes, independent of host block allocation and tools.
+function fileBytes(dir) {
+  let bytes = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const file = join(dir, entry.name);
+    if (entry.isDirectory()) bytes += fileBytes(file);
+    else if (entry.isFile()) bytes += statSync(file).size;
   }
+  return bytes;
 }
 
 const LOCAL_TEST = "LOCAL TEST BUILD — not a release, unsigned, no publisher pins";
@@ -354,6 +367,9 @@ function unpackedResources() {
 }
 
 const mode = process.argv[2] ?? "stage";
+if (!["stage", "all", "dir"].includes(mode)) {
+  throw new Error(`unknown packaging target "${mode}"; expected stage, all or dir`);
+}
 if (mode === "dir") localTestBanner();
 const builder = mode === "all" || mode === "dir"
   ? lockedCli(DESKTOP, "electron-builder", "cli.js")
