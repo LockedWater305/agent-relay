@@ -952,7 +952,8 @@
             '" fill="none" stroke="' + c + '" stroke-width="' + w + '"/>');
         } else if (st.tool === "text") {
           var at = (st.anchor && anchorPoint(st.anchor)) || { x: st.x1, y: st.y1 };
-          parts.push('<text x="' + at.x + '" y="' + at.y + '" fill="' + c +
+          // The canvas displays the exact spacing the person typed.
+          parts.push('<text xml:space="preserve" x="' + at.x + '" y="' + at.y + '" fill="' + c +
             '" font-family="Inter, Segoe UI, sans-serif" font-size="15" font-weight="600">' +
             esc(st.text || "") + "</text>");
         }

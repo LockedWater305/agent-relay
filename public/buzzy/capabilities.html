@@ -23,6 +23,8 @@
     padding: 0 1.1rem 4rem;
   }
   header.top { max-width: 860px; margin: 0 auto; padding: 1.2rem 0 0.4rem; }
+  /* Match the generated shell header after a direct load, too. */
+  header.top:has(> .bz-brandrow) { position: sticky; top: 0; z-index: 800; }
   #bzNav { display: flex; flex-wrap: wrap; gap: 0.9rem; padding: 0 0 1rem; }
   #bzNav a { color: var(--bz-muted); text-decoration: none; font-size: 0.86rem; }
   #bzNav a[aria-current="page"], #bzNav a[data-nav="capabilities"] { color: var(--bz-yellow); }

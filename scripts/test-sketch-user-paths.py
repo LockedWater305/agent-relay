@@ -233,6 +233,28 @@ class Sketch(unittest.TestCase):
         front=dict(LINE,id="front",color="#cc00cc")
         p=self.start([LINE.copy(),front]); self.hit(p,100,50); p.keyboard.press("Delete"); self.save(p)
         self.assertEqual(self.board["strokes"],[LINE])
+    def test_svg_export_renders_note_spacing_as_it_appears_on_the_board(self):
+        p=self.start([])
+        caption="A        B"
+        p.click('[data-tool="text"]')
+        p.once("dialog",lambda d:d.accept(caption))
+        self.hit(p,160,140); self.save(p)
+        self.assertEqual(self.board["strokes"][0]["text"],caption)
+        with p.expect_download() as dl: p.click("#svg")
+        original=base64.b64encode(dl.value.path().read_bytes()).decode()
+        rendered=self.browser.new_page(); self.addCleanup(rendered.context.close)
+        # Render the original as a standalone SVG, not just serialized XML.
+        rendered.goto("data:image/svg+xml;base64,"+original)
+        actual,expected,characters=rendered.locator("svg text").evaluate("""note => {
+          const style = getComputedStyle(note);
+          const canvas = document.createElementNS('http://www.w3.org/1999/xhtml','canvas').getContext('2d');
+          canvas.font = style.fontWeight + ' ' + style.fontSize + ' ' + style.fontFamily;
+          return [note.getComputedTextLength(), canvas.measureText(note.textContent).width, note.getNumberOfChars()];
+        }""")
+        # The SVG and canvas font metrics can differ by a fraction of a pixel.
+        # Losing even one of these spaces changes the width by over four px.
+        self.assertAlmostEqual(actual,expected,delta=1)
+        self.assertEqual(characters,len(caption))
     def test_clicking_painted_ink_selects_it_over_a_closer_hidden_centerline(self):
         # Neither case is a distance tie: the red stroke's centerline is
         # directly underneath the click but its pixels are covered by green.

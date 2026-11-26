@@ -399,6 +399,21 @@ function hasExportZipFraming(bytes) {
 async function cmdExport(argv) {
   const target =
     argv[0] || join(process.cwd(), `beezilla-export-${new Date().toISOString().slice(0, 10)}.zip`);
+  const parent = dirname(target);
+  try {
+    const parentStat = statSync(parent, { throwIfNoEntry: false });
+    if (!parentStat?.isDirectory()) {
+      console.error(`export destination folder ${parent} ${parentStat ? "is not a directory" : "does not exist"}`);
+      return 1;
+    }
+    if (statSync(target, { throwIfNoEntry: false })?.isDirectory()) {
+      console.error(`export destination ${target} is a directory; choose a file name`);
+      return 1;
+    }
+  } catch (error) {
+    console.error(`could not access export destination ${target} (${error.code ?? "filesystem error"})`);
+    return 1;
+  }
   const rt = await ensureServer();
   // The export endpoint returns a ZIP of the owner's whole workspace, not JSON.
   // Read it as bytes — treating it as text produces a file that opens as mojibake.
@@ -415,7 +430,12 @@ async function cmdExport(argv) {
     console.error("export did not return a complete ZIP archive");
     return 1;
   }
-  writeFileSync(target, bytes);
+  try {
+    writeFileSync(target, bytes);
+  } catch (error) {
+    console.error(`could not write export to ${target} (${error.code ?? "filesystem error"})`);
+    return 1;
+  }
   console.log(`wrote ${target} (${bytes.length} bytes)`);
   return 0;
 }

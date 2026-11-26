@@ -724,6 +724,8 @@
     /* ── Decisions: value as headline ───────────────────────── */
     .slot-value-headline {
       display: block;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
       font-size: 0.88rem;
       font-weight: 600;
       color: #E8E8E8;
@@ -3061,7 +3063,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             '<span class="slot-value-headline">Skipped</span>' +
             '</span></div>';
         }
-        const escapedValue = String(value).replace(/</g, "&lt;");
+        const escapedValue = esc(value);
         return '<div class="slot-item filled" data-brief="' + id + '" data-slot="' + id + '">' +
           '<span class="slot-check">✓</span>' +
           '<span class="slot-copy">' +
@@ -6279,7 +6281,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         var state = !v ? "open" : (v === "skipped" ? "skipped" : "filled");
         if (state === "filled") filled++;
         html += '<span class="' + state + '" data-dot="' + id + '" title="' +
-          SLOT_LABELS[id] + ": " + (state === "open" ? "still open" : state === "skipped" ? "skipped" : v) +
+          esc(SLOT_LABELS[id] + ": " + (state === "open" ? "still open" : state === "skipped" ? "skipped" : v)) +
           '"></span>';
       });
       if (count) count.textContent = filled + "/" + ids.length;
