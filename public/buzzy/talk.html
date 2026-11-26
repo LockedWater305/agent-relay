@@ -2592,6 +2592,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           ? '<div class="bz-what" role="status">Online lookup skipped because Local Only is on.</div>' : "";
         if (m.notSent === true) notice += '<div class="bz-what" role="status">Not sent for a chat reply.</div>';
         var bubble = notice + '<div class="' + cls + '">' + escaped + "</div>";
+        if (m.readbackUnavailable === true) {
+          bubble += '<div class="bz-what" role="status">This reply wasn\'t read aloud. It\'s available on screen.</div>';
+        }
         if (m.document && m.document.downloadUrl) {
           bubble += renderFileCard(m.document);
         }
@@ -5346,7 +5349,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (!el) return;
       if (!m) { el.textContent = ""; return; }
       var parts = [];
-      if (m.ttfaMs != null) parts.push("<strong>" + (m.ttfaMs / 1000).toFixed(2) + "s</strong> to talk");
+      if (m.spoken && m.ttfaMs != null) parts.push("<strong>" + (m.ttfaMs / 1000).toFixed(2) + "s</strong> to talk");
       // A voice turn's length is its speech: name the spoken seconds and the end
       // of the last word, so "3.64s turn" cannot be read as the whole reply.
       if (m.audioMs) parts.push((m.audioMs / 1000).toFixed(1) + "s spoken");
@@ -5357,7 +5360,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // "text" means it fell back — that difference is the whole diagnosis.
       // Report the lane that actually answered, not the one requested.
       var laneName = m.lane || (m.surface === "voice" ? "audio" : "text");
-      parts.push(laneName === "audio" ? "voice lane" : "text lane (read back)");
+      parts.push(laneName === "audio" ? "voice lane" : (m.spoken ? "text lane (read back)" : "text lane"));
       el.innerHTML = parts.join(" · ");
     }
 
@@ -7053,6 +7056,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           role: "assistant",
           content: data.reply,
           document: data.document || null,
+          // A screen reply is still useful when requested read-back didn't play.
+          // Keep that feedback with this reply instead of overwriting the voice stage.
+          readbackUnavailable: !replayed && useVoiceLane && (voice.mic || voice.replies) &&
+            !metrics.spoken && voice.cutTurn !== myTurn,
           // A track made this turn plays in the reply that announces it.
           asset: data.audio || data.asset || null,
           artifacts: data.artifacts || null,
