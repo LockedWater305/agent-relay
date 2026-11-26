@@ -322,6 +322,9 @@
     .shelf-sub { font-size: 0.72rem; color: var(--bz-muted, #8d8d8d); font-variant-numeric: tabular-nums; }
     .shelf-dl { font-size: 0.8rem; color: var(--bz-yellow, #ffd40d); text-decoration: none; }
     .docfolder {
+      display: block;
+      width: 100%;
+      text-align: left;
       border: 1px solid #2A2A2A;
       background: var(--bz-panel);
       border-radius: 6px;
@@ -330,8 +333,8 @@
       transition: border-color 0.15s, background 0.15s;
     }
     .docfolder:hover { border-color: var(--bz-yellow-dim, #6a5a10); background: rgba(255,193,7,0.04); }
-    .docfolder .df-name { font-weight: 600; color: #fff; font-size: 0.92rem; }
-    .docfolder .df-meta { font-size: 0.72rem; color: #777; margin-top: 0.3rem; }
+    .docfolder .df-name { display:block; font-weight: 600; color: #fff; font-size: 0.92rem; }
+    .docfolder .df-meta { display:block; font-size: 0.72rem; color: #777; margin-top: 0.3rem; }
     .doclist { margin-top: 1rem; }
     .docitem {
       display: flex;
@@ -344,7 +347,12 @@
       padding: 0.6rem 0.9rem;
       margin-bottom: 0.5rem;
     }
-    .docitem .di-name { color: #fff; font-size: 0.88rem; cursor: pointer; }
+    .docitem .di-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: #fff; font-size: 0.88rem; cursor: pointer; }
+    @media (max-width: 500px) {
+      .docitem { flex-wrap: wrap; }
+      .docitem .di-name { flex-basis: 100%; }
+    }
+    #docHeading { overflow-wrap: anywhere; }
     .docitem .di-name:hover { text-decoration: underline; }
     .docitem .di-meta { font-size: 0.7rem; color: #777; }
     .docitem .di-actions { display: flex; gap: 0.4rem; }
@@ -356,6 +364,7 @@
       padding: 1rem 1.2rem;
       margin-top: 0.8rem;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 0.8rem;
       color: #D8D8D8;
@@ -1339,25 +1348,44 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     // Word (.doc) export without a dependency: Word opens HTML saved with an
     // msword MIME. Markdown maps to a minimal heading/list/paragraph body.
     function mdToWordHtml(md) {
-      var lines = String(md || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").split(/\n+/);
-      var out = "";
-      var inList = false;
-      lines.forEach(function (line) {
-        var t = line.trim();
-        var h = t.match(/^(#{1,6})\s/);
-        if (h) {
-          if (inList) { out += "</ul>"; inList = false; }
-          var lvl = Math.min(h[1].length, 3);
-          out += "<h" + (lvl + 1) + ">" + t.replace(/^#+\s*/, "") + "</h" + (lvl + 1) + ">";
-        } else if (/^[-*]\s/.test(t)) {
-          if (!inList) { out += "<ul>"; inList = true; }
-          out += "<li>" + t.replace(/^[-*]\s*/, "") + "</li>";
-        } else if (t) {
-          if (inList) { out += "</ul>"; inList = false; }
-          out += "<p>" + t + "</p>";
+      const escape = (text) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      let out = "", listTag = "", fence = "", codeLines = [];
+      function closeList() {
+        if (listTag) { out += "</" + listTag + ">"; listTag = ""; }
+      }
+      function closeCode() {
+        out += "<pre><code>" + escape(codeLines.join("\n")) + "</code></pre>";
+        fence = ""; codeLines = [];
+      }
+      String(md || "").split(/\r?\n/).forEach(function (line) {
+        const t = line.trim();
+        const marker = t.match(/^(`{3,}|~{3,})(.*)$/);
+        if (fence) {
+          if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) closeCode();
+          else codeLines.push(line);
+          return;
         }
+        if (marker) { closeList(); fence = marker[1]; return; }
+        const numbered = t.match(/^(\d{1,9})[.)]\s+(.+)$/);
+        const bullet = t.match(/^[-*+]\s+(.+)$/);
+        if (numbered || bullet) {
+          const tag = numbered ? "ol" : "ul";
+          if (listTag !== tag) {
+            closeList(); listTag = tag;
+            out += numbered ? '<ol start="' + Number(numbered[1]) + '">' : "<ul>";
+          }
+          out += "<li>" + escape(numbered ? numbered[2] : bullet[1]) + "</li>";
+          return;
+        }
+        closeList();
+        const heading = t.match(/^(#{1,6})\s+(.+)$/);
+        if (heading) {
+          const lvl = Math.min(heading[1].length, 3) + 1;
+          out += "<h" + lvl + ">" + escape(heading[2]) + "</h" + lvl + ">";
+        } else if (t) out += "<p>" + escape(t) + "</p>";
       });
-      if (inList) out += "</ul>";
+      closeList();
+      if (fence) closeCode();
       return out;
     }
 
@@ -1402,12 +1430,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (!doc) { docsOpenDoc = null; return goDocs(); }
         app.innerHTML =
           "<div class='docs-back'><button id='docsBackList' class='secondary'>← " + escHtml(job ? jobTitle(job) : docsOpenFolder) + "</button></div>" +
-          "<h1>" + escHtml(doc.name) + "</h1>" +
+          "<h1 id='docHeading' tabindex='-1'>" + escHtml(doc.name) + "</h1>" +
           "<p class='muted'>Updated " + new Date(doc.updatedAt || doc.createdAt).toLocaleString() + "</p>" +
           "<div class='row'><button id='docDl'>Download .md</button><button id='docDlWord' class='secondary'>Download Word</button><button id='docDlPdf' class='secondary'>Download PDF</button><button id='docCopy' class='secondary'>Copy text</button></div>" +
+          "<p id='docCopyStatus' class='muted' role='status'></p>" +
           "<div class='docviewer'>" + escHtml(doc.md) + "</div>" + syncMarkup;
         paintLibrarySync();
-        document.getElementById("docsBackList").onclick = () => { docsOpenDoc = null; goDocs(); };
+        document.getElementById("docsBackList").onclick = () => {
+          const opened = docsOpenDoc;
+          docsOpenDoc = null;
+          goDocs();
+          Array.from(app.querySelectorAll("[data-open]")).find((el) => el.getAttribute("data-open") === opened)?.focus();
+        };
         document.getElementById("docDl").onclick = () => downloadText(doc.name, doc.md, "text/markdown");
         document.getElementById("docDlPdf").onclick = () => {
           try {
@@ -1423,10 +1457,18 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           }
         };
         document.getElementById("docDlWord").onclick = () => downloadWord(doc.name, doc.md);
-        document.getElementById("docCopy").onclick = (e) => {
-          navigator.clipboard && navigator.clipboard.writeText(doc.md);
-          e.target.textContent = "Copied";
-          setTimeout(() => { e.target.textContent = "Copy text"; }, 1200);
+        const copyStatus = document.getElementById("docCopyStatus");
+        document.getElementById("docCopy").onclick = async () => {
+          copyStatus.textContent = "";
+          try {
+            if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+              throw new Error("Clipboard unavailable");
+            }
+            await navigator.clipboard.writeText(doc.md);
+            copyStatus.textContent = "Copied to clipboard.";
+          } catch (_) {
+            copyStatus.textContent = "Could not copy. Select the preview text or download the Markdown file.";
+          }
         };
         return;
       }
@@ -1437,7 +1479,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         const job = catalog.jobs.find((x) => x.id === docsOpenFolder);
         app.innerHTML =
           "<div class='docs-back'><button id='docsBackFolders' class='secondary'>← All folders</button></div>" +
-          "<h1>" + escHtml(job ? jobTitle(job) : "Folder") + "</h1>" +
+          "<h1 id='docsFolderHeading' tabindex='-1'>" + escHtml(job ? jobTitle(job) : "Folder") + "</h1>" +
           "<p class='muted'>Markdown documents for this job. Open, download, or print to PDF.</p>" +
           "<div class='doclist'>" +
           (docs.length
@@ -1445,14 +1487,27 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
                 "<div class='docitem'>" +
                   "<span class='di-name' data-doc='" + escAttr(docRef(d)) + "'>" + escHtml(d.name) + "</span>" +
                   "<span class='di-meta'>updated " + new Date(d.updatedAt || d.createdAt).toLocaleDateString() + " · " + Math.max(1, Math.round(d.md.length / 100) / 10) + " KB</span>" +
-                  "<span class='di-actions'><button class='secondary' data-open='" + escAttr(docRef(d)) + "'>Open</button><button class='secondary' data-dl='" + escAttr(docRef(d)) + "'>Download</button></span>" +
+                  "<span class='di-actions'><button class='secondary' data-open='" + escAttr(docRef(d)) +
+                    "' aria-label='" + escAttr("Open " + d.name) + "'>Open</button><button class='secondary' data-dl='" + escAttr(docRef(d)) +
+                    "' aria-label='" + escAttr("Download " + d.name) + "'>Download</button></span>" +
                 "</div>").join("")
             : "<p class='muted'>No documents in this folder yet.</p>") +
           "</div>" + syncMarkup;
         paintLibrarySync();
-        document.getElementById("docsBackFolders").onclick = () => { docsOpenFolder = null; docsOpenFromLink = null; goDocs(); };
-        app.querySelectorAll("[data-open]").forEach((el) => { el.onclick = () => { docsOpenDoc = el.getAttribute("data-open"); goDocs(); }; });
-        app.querySelectorAll(".di-name").forEach((el) => { el.onclick = () => { docsOpenDoc = el.getAttribute("data-doc"); goDocs(); }; });
+        document.getElementById("docsBackFolders").onclick = () => {
+          const opened = docsOpenFolder;
+          docsOpenFolder = null;
+          docsOpenFromLink = null;
+          goDocs();
+          Array.from(app.querySelectorAll("[data-folder]")).find((el) => el.getAttribute("data-folder") === opened)?.focus();
+        };
+        const openPreview = (ref) => {
+          docsOpenDoc = ref;
+          goDocs();
+          document.getElementById("docHeading")?.focus();
+        };
+        app.querySelectorAll("[data-open]").forEach((el) => { el.onclick = () => openPreview(el.getAttribute("data-open")); });
+        app.querySelectorAll(".di-name").forEach((el) => { el.onclick = () => openPreview(el.getAttribute("data-doc")); });
         app.querySelectorAll("[data-dl]").forEach((el) => {
           el.onclick = () => {
             const doc = (all[docsOpenFolder] || []).find((d) => docRef(d) === el.getAttribute("data-dl"));
@@ -1493,16 +1548,20 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         "<div class='docs-folders'>" +
         (folders.length
           ? folders.map((f) =>
-              "<div class='docfolder' data-folder='" + escAttr(f.id) + "'>" +
-                "<div class='df-name'>📁 " + escHtml(f.job ? jobTitle(f.job) : f.id) + "</div>" +
-                "<div class='df-meta'>" + f.docs.length + " document" + (f.docs.length === 1 ? "" : "s") +
+              "<button type='button' class='docfolder' data-folder='" + escAttr(f.id) + "'>" +
+                "<span class='df-name'>📁 " + escHtml(f.job ? jobTitle(f.job) : f.id) + "</span>" +
+                "<span class='df-meta'>" + f.docs.length + " document" + (f.docs.length === 1 ? "" : "s") +
                   (f.job && jobComplete(f.job) ? " · approved draft" : "") +
-                  " · latest " + new Date(f.docs[0].updatedAt || f.docs[0].createdAt).toLocaleDateString() + "</div>" +
-              "</div>").join("")
+                  " · latest " + new Date(f.docs[0].updatedAt || f.docs[0].createdAt).toLocaleDateString() + "</span>" +
+              "</button>").join("")
           : "<p class='muted'>No documents yet. Documents appear here as your jobs produce drafts and deliverables.</p>") +
         "</div>";
       app.querySelectorAll(".docfolder[data-folder]").forEach((el) => {
-        el.onclick = () => { docsOpenFolder = el.getAttribute("data-folder"); goDocs(); };
+        el.onclick = () => {
+          docsOpenFolder = el.getAttribute("data-folder");
+          goDocs();
+          document.getElementById("docsFolderHeading")?.focus();
+        };
       });
       // Server-side deliverables belong in the Library too: a track made in chat
       // is a deliverable, and this page is where the owner looks for it.
@@ -1583,10 +1642,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
                 kind === "audio" ? "<audio controls preload='none' src='" + url + "'></audio>" :
                 kind === "image" ? "<img loading='lazy' src='" + url + "' alt='" + nameAttr + "' />" :
                 kind === "video" ? "<video controls preload='none' src='" + url + "'></video>" :
-                "<a class='shelf-dl' href='" + url + "' download>Download</a>";
+                "";
               return "<div class='shelf-card kind-" + kind + "'>" + body +
                 "<div class='shelf-name' title='" + nameAttr + "'>" + name + "</div>" +
                 "<div class='shelf-sub'>" + humanBytes(i.bytes) + (when ? " · " + when : "") + "</div>" +
+                "<a class='shelf-dl' href='" + url + "' download='" + nameAttr + "' aria-label='Download " + nameAttr + "'>Download</a>" +
                 "</div>";
             }).join("") +
             "</div>";

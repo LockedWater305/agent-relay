@@ -66,7 +66,7 @@
   </div>
 </header>
 
-<main>
+<main data-bz-before-remove>
   <section class="card">
     <h2>The track</h2>
     <div id="waveWrap">
@@ -144,6 +144,8 @@
     var state = null;
     var selection = null; // {fromMs,toMs}
     var audioCtx = null;
+    var previewId = null, decodeGeneration = 0, waveformPending = false;
+    var selectionTimer = null, refreshTimer = null;
 
     // The shell can mount another Studio while this page's requests are pending.
     // Capture this page's controls once, never resolve a late response by global ID.
@@ -170,13 +172,15 @@
         /^\/buzzy\/studio(?:\.html)?\/?$/.test(location.pathname) &&
         new URLSearchParams(location.search).get("job") === jobId;
     }
-    window.addEventListener("pagehide", function () { pageHidden = true; });
+    function hidePage() { pageHidden = true; }
+    window.addEventListener("pagehide", hidePage);
     function resumeLoad() {
       // Back can retain this DOM after the shell temporarily changed the URL.
       // Retry only its initial read; never replay cold-project creation POSTs.
       if (jobId && !state && currentPage()) load();
     }
-    window.addEventListener("pageshow", function () { pageHidden = false; resumeLoad(); });
+    function showPage() { pageHidden = false; resumeLoad(); }
+    window.addEventListener("pageshow", showPage);
     window.addEventListener("popstate", resumeLoad);
 
     function setStatus(text, kind) {
@@ -232,6 +236,7 @@
     function adoptState(next, submitted) {
       if (!next || next.jobId !== jobId || !validPlan(next.plan)) throw new Error("Invalid track response.");
       var changed = metadataOf(state) !== metadataOf(next);
+      if (submitted) { changed = changed || previewId !== null; previewId = null; }
       state = next;
       adoptPlan(next.plan, submitted);
       if (changed) renderRows();
@@ -274,7 +279,9 @@
       if (!peaks || !peaks.length) {
         c.fillStyle = "#3a3a3a";
         c.font = "12px Inter, sans-serif";
-        c.fillText("No track yet — create one from the brief on the right.", 12, 64);
+        var note = !player.getAttribute("src") ? "No track yet — create one from the brief on the right."
+          : waveformPending ? "Loading waveform…" : "Waveform unavailable. You can still use the audio player.";
+        c.fillText(note, 12, 64);
         return;
       }
       var mid = 60, n = peaks.length;
@@ -305,11 +312,17 @@
 
     var peaksCache = null;
     function decodePeaks(url) {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      var generation = ++decodeGeneration;
+      function ownsWave() { return generation === decodeGeneration && player.isConnected && player.getAttribute("src") === url; }
+      peaksCache = null; waveformPending = true;
+      drawWave(null);
+      try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (_) { waveformPending = false; drawWave(null); return Promise.resolve(null); }
       return fetch(url, { credentials: "same-origin" })
         .then(function (r) { return r.arrayBuffer(); })
         .then(function (buf) { return audioCtx.decodeAudioData(buf); })
         .then(function (audio) {
+          if (!ownsWave()) return null;
           var ch = audio.getChannelData(0);
           var buckets = 320, step = Math.floor(ch.length / buckets) || 1;
           var peaks = [];
@@ -321,11 +334,11 @@
             }
             peaks.push(Math.min(1, max * 1.8));
           }
-          peaksCache = peaks;
+          peaksCache = peaks; waveformPending = false;
           drawWave(peaks);
           return audio.duration;
         })
-        .catch(function () { drawWave(null); return null; });
+        .catch(function () { if (ownsWave()) { waveformPending = false; drawWave(null); } return null; });
     }
 
     // Drag to select a passage: pointer x → time, clamped and ordered.
@@ -351,27 +364,56 @@
       $("playSel").disabled = !selection;
       drawWave(peaksCache);
     });
-    wave.addEventListener("pointerup", function () { dragging = null; });
+    function endDrag() { dragging = null; }
+    wave.addEventListener("pointerup", endDrag);
+    wave.addEventListener("pointercancel", endDrag);
+    wave.addEventListener("lostpointercapture", endDrag);
 
-    $("clearSel").addEventListener("click", function () {
+    function stopSelectionTimer() {
+      if (selectionTimer !== null) clearInterval(selectionTimer);
+      selectionTimer = null;
+    }
+    function clearSelection() {
+      stopSelectionTimer();
+      dragging = null;
       selection = null;
       $("selLabel").textContent = "Drag on the waveform to select a passage.";
       $("editBtn").disabled = true;
       $("playSel").disabled = true;
       drawWave(peaksCache);
-    });
+    }
+    $("clearSel").addEventListener("click", clearSelection);
     $("playSel").addEventListener("click", function () {
       if (!selection) return;
+      stopSelectionTimer();
       player.currentTime = selection.fromMs / 1000;
-      player.play();
+      var playing = player.play();
       var stopAt = selection.toMs / 1000;
-      var tick = setInterval(function () {
-        if (player.paused || player.currentTime >= stopAt) { player.pause(); clearInterval(tick); }
+      var tick = selectionTimer = setInterval(function () {
+        if (player.paused || player.currentTime >= stopAt) { player.pause(); stopSelectionTimer(); }
       }, 60);
+      if (playing && typeof playing.catch === "function") playing.catch(function () {
+        if (selectionTimer === tick) { stopSelectionTimer(); setStatus("Could not play this selection.", "bad"); }
+      });
     });
     player.addEventListener("timeupdate", function () { drawWave(peaksCache); });
     player.addEventListener("loadedmetadata", function () { drawWave(peaksCache); });
-    window.addEventListener("resize", function () { drawWave(peaksCache); });
+    function resizeWave() { drawWave(peaksCache); }
+    window.addEventListener("resize", resizeWave);
+    // The shell keeps the document alive after removing this non-cached page.
+    // Release only this Studio's resources; a persisted browser page can resume.
+    $("wave").closest("main").addEventListener("bz:before-remove", function () {
+      pageHidden = true;
+      ++decodeGeneration;
+      stopSelectionTimer();
+      if (refreshTimer !== null) clearInterval(refreshTimer);
+      player.pause();
+      if (audioCtx && audioCtx.state !== "closed") audioCtx.close().catch(function () {});
+      window.removeEventListener("resize", resizeWave);
+      window.removeEventListener("pagehide", hidePage);
+      window.removeEventListener("pageshow", showPage);
+      window.removeEventListener("popstate", resumeLoad);
+    }, { once: true });
 
     // ── render ──────────────────────────────────────────────────────────
     function renderInstruments() {
@@ -396,6 +438,14 @@
       });
     }
 
+    function showVersion(version) {
+      if (!version || player.getAttribute("src") === version.url) return;
+      clearSelection(); // A passage refers to one recording, not the same offsets on another.
+      player.src = version.url;
+      player.load();
+      decodePeaks(version.url);
+    }
+
     function renderRows() {
       if (!state) return;
       $("title").textContent = state.title || "Studio";
@@ -403,15 +453,17 @@
 
       var versions = $("versions");
       versions.innerHTML = "";
+      var preview = previewId && (state.versions || []).find(function (v) { return v.id === previewId; });
+      if (!preview) previewId = null;
+      var showing = preview || state.asset;
       (state.versions || []).slice().reverse().forEach(function (v) {
         var b = document.createElement("button");
         b.textContent = fmt(0) + " " + v.label + " · " + Math.round(v.bytes / 1024) + " KB";
         b.textContent = v.label + " · " + Math.round(v.bytes / 1024) + " KB";
-        if (state.asset && state.asset.id === v.id) b.classList.add("on");
+        if (showing && showing.id === v.id) b.classList.add("on");
         b.addEventListener("click", function () {
-          player.src = v.url;
-          player.load();
-          decodePeaks(v.url);
+          previewId = state.asset && state.asset.id === v.id ? null : v.id;
+          showVersion(v);
           Array.prototype.forEach.call(versions.children, function (c) { c.classList.remove("on"); });
           b.classList.add("on");
         });
@@ -448,12 +500,7 @@
         log.appendChild(row);
       });
 
-      if (state.asset) {
-        if (player.getAttribute("src") !== state.asset.url) {
-          player.src = state.asset.url;
-          decodePeaks(state.asset.url);
-        }
-      }
+      showVersion(showing);
     }
 
     function load() {
@@ -610,7 +657,7 @@
         placeholder: "e.g. make the second verse darker, or add a cello line",
       });
       // The agent edits the track server-side; refresh so its change shows up here.
-      var poll = setInterval(function () {
+      var poll = refreshTimer = setInterval(function () {
         if (!$("prompt").isConnected || document.getElementById("prompt") !== $("prompt")) { clearInterval(poll); return; }
         if (!currentPage()) return;
         if (pendingWrite || refreshing) return;

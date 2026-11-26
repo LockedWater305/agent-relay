@@ -34,6 +34,8 @@
                text-decoration: none; font-size: 0.84rem; }
   audio { width: 100%; margin-top: 0.5rem; }
   .empty-note { color: var(--bz-muted); font-size: 0.86rem; }
+  #activity { max-width: 100%; overflow-x: auto; }
+  .turn p, .dl-name, .card .sub { overflow-wrap: anywhere; }
   table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
   th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--bz-line); vertical-align: top; }
   th { color: var(--bz-muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -121,11 +123,29 @@
         return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
       });
     }
-    function kb(n) { return n ? Math.round(n / 1024) + " KB" : ""; }
+    function sizeLabel(value) {
+      if (value == null || value === "" || (typeof value !== "number" && typeof value !== "string")) return "";
+      var n = Number(value);
+      if (!Number.isSafeInteger(n) || n < 0) return "";
+      if (n < 1024) return n + (n === 1 ? " byte" : " bytes");
+      return (Math.round(n / 1024 * 10) / 10) + " KiB";
+    }
+    function localTime(value, compactToday) {
+      if (value == null || value === "") return "";
+      var d = new Date(value);
+      if (!Number.isFinite(d.getTime())) return "";
+      return compactToday && d.toDateString() === new Date().toDateString()
+        ? d.toLocaleTimeString() : d.toLocaleString();
+    }
+    function settlePanels(message) {
+      [srcBox, box, act, conv].forEach(function (panel) {
+        panel.innerHTML = '<p class="empty-note">' + esc(message) + '</p>';
+      });
+    }
     if (!jobId) {
       titleEl.textContent = "No project selected";
       metaEl.textContent = "Open a work item from Talk → Recent work.";
-      box.innerHTML = '<p class="empty-note">Nothing to show.</p>';
+      settlePanels("Select a work item to see its details.");
       return;
     }
     fetch("/api/buzzy/projects/" + encodeURIComponent(jobId), { credentials: "same-origin" })
@@ -136,6 +156,7 @@
           if (ownsUrl()) location.href = "/buzzy/landing";
           throw new Error("signed_out");
         }
+        if (r.status < 200 || r.status >= 300) throw new Error(r.status === 404 ? "This project was not found." : "Project details are unavailable. Try reloading.");
         return r.json();
       })
       .then(function (data) {
@@ -144,7 +165,8 @@
         var p = data.project;
         titleEl.textContent = p.title || "Untitled project";
         var chipClass = p.status === "Deliverable ready" ? "ready" : (p.status === "In progress" ? "prog" : "empty");
-        metaEl.innerHTML = esc(String(p.id)) + " · updated " + esc(new Date(p.updatedAt || p.updated_at || Date.now()).toLocaleString()) +
+        var updated = localTime(p.updatedAt != null ? p.updatedAt : p.updated_at, false);
+        metaEl.innerHTML = esc(String(p.id)) + (updated ? " · updated " + esc(updated) : " · update time unavailable") +
           '<span class="chip ' + chipClass + '">' + esc(p.status) + "</span>" +
           ' <a class="back" style="margin-left:.6rem" href="/buzzy/talk?job=' + encodeURIComponent(p.id) + '">Open conversation →</a>';
 
@@ -153,9 +175,9 @@
           ? sources.map(function (s) {
               var label = String(s.label || s.kind || "input");
               var where = s.url ? '<a href="' + s.url + '">open</a>' : "";
-              var size = s.bytes ? " · " + Math.max(1, Math.round(s.bytes / 1024)) + " KB" : "";
+              var size = sizeLabel(s.bytes);
               return '<div class="dl"><span class="dl-kind">' + (s.kind === "board" ? "board" : s.kind === "reference" ? "reference" : s.kind === "brief" ? "brief" : "input") +
-                '</span><span class="dl-name">' + label + '</span><span class="dl-sub">' + size + " " + where + "</span></div>";
+                '</span><span class="dl-name">' + esc(label) + '</span><span class="dl-sub">' + size + " " + where + "</span></div>";
             }).join("")
           : '<p class="empty-note">No inputs recorded yet — draw on the sketch board or fill in the brief and they appear here.</p>';
 
@@ -167,7 +189,7 @@
               ? '<audio controls preload="none" src="' + esc(d.url) + '"></audio>'
               : "";
             return '<div class="card"><h3>' + esc(d.name || d.kind) + "</h3>" +
-              '<div class="sub">' + esc(d.kind || "") + " · " + esc(d.type || "") + " · " + kb(d.bytes) + "</div>" +
+              '<div class="sub">' + [esc(d.kind), esc(d.type), sizeLabel(d.bytes)].filter(Boolean).join(" · ") + "</div>" +
               media + '<a class="dl" href="' + esc(d.url) + '" download>Download</a></div>';
           }).join("");
         }
@@ -179,7 +201,7 @@
             data.turns.map(function (t) {
               var stages = (t.stages || []).map(function (s) { return esc(s.label || s.phase) + " @" + s.atMs + "ms"; }).join("<br>");
               var tools = (t.tools || []).map(function (x) { return esc(x.name) + " " + esc(x.state) + (x.ms != null ? " " + x.ms + "ms" : ""); }).join("<br>");
-              return "<tr><td class='mono'>" + esc(new Date(t.created_at).toLocaleTimeString()) + "</td><td>" + esc(t.surface || "") +
+              return "<tr><td class='mono'>" + esc(localTime(t.created_at, true) || "—") + "</td><td>" + esc(t.surface || "") +
                 "</td><td class='mono'>" + esc(t.latency_ms == null ? "" : t.latency_ms) + "</td><td class='mono'>" + (stages || "—") +
                 "</td><td class='mono'>" + (tools || "—") + "</td></tr>";
             }).join("") + "</tbody></table>";
@@ -188,9 +210,9 @@
         if (!data.messages || !data.messages.length) {
           conv.innerHTML = '<p class="empty-note">No transcript linked to this project.</p>';
         } else {
-          conv.innerHTML = "<details open><summary>" + data.messages.length + " messages</summary>" +
+          conv.innerHTML = "<details open><summary>" + data.messages.length + (data.messages.length === 1 ? " message" : " messages") + "</summary>" +
             data.messages.map(function (m) {
-              return '<div class="turn"><div class="who">' + esc(m.role) + " · " + esc(new Date(m.created_at).toLocaleTimeString()) +
+              return '<div class="turn"><div class="who">' + [esc(m.role), esc(localTime(m.created_at, true))].filter(Boolean).join(" · ") +
                 "</div><p>" + esc(m.content) + "</p></div>";
             }).join("") + "</details>";
         }
@@ -199,6 +221,7 @@
         if (!ownsPage()) return;
         titleEl.textContent = "Could not load project";
         metaEl.textContent = e.message;
+        settlePanels("Project details could not be loaded.");
       });
   })();
 </script>

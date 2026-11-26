@@ -36,7 +36,8 @@ function section(startText, endText) {
 }
 const addHandlers = section('    document.querySelectorAll("[data-add]")', '    // ── drag');
 const linkHandlers = section('    var linkMode = false;', '    // ── inspector');
-const saveNewHandlers = section('    document.getElementById("save").addEventListener', '    // ── run');
+const saveNewHandlers = section('    // ── save / load', '    // ── run');
+const ownerBindings = section('    var saveButton =', '    function say(');
 const deleteStart = html.indexOf('      document.getElementById("del").addEventListener');
 const deleteEnd = html.indexOf('\n      });', deleteStart) + '\n      });'.length;
 assert.ok(deleteStart >= 0 && deleteEnd > deleteStart);
@@ -110,7 +111,7 @@ async function harness(t) {
   const elements = new Map();
   function element(id) {
     if (!elements.has(id)) elements.set(id, {
-      value: '', textContent: '', className: '', innerHTML: '', events: {},
+      value: '', textContent: '', className: '', innerHTML: '', events: {}, isConnected: true, disabled: false,
       classList: { toggle() {}, remove() {} },
       addEventListener(kind, fn) { this.events[kind] = fn; },
       fire(kind, event = {}) { this.events[kind]?.call(this, { preventDefault() {}, ...event }); },
@@ -168,7 +169,7 @@ async function harness(t) {
       return task;
     },
   });
-  vm.runInContext(initialState + '\n' + ['say', 'rid', 'byId', 'defaultConfig', 'addNode', 'open'].map(functionSource).join('\n')
+  vm.runInContext(initialState + '\n' + ownerBindings + '\n' + ['say', 'rid', 'byId', 'defaultConfig', 'addNode', 'open'].map(functionSource).join('\n')
     + '\n' + addHandlers + linkHandlers + saveNewHandlers, ui);
   async function settle() { for (let i = 0; i < 200; i++) await Promise.resolve(); }
   async function flush() {

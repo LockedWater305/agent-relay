@@ -45,7 +45,7 @@
       ".bzc-a{background:#101010;border:1px solid #242424;align-self:flex-start}",
       ".bzc-stage{color:#8d8d8d;font-size:.78rem}",
       ".bzc-row{display:flex;gap:.4rem}",
-      ".bzc-in{flex:1;background:#101010;border:1px solid #242424;color:#f2f2f2;border-radius:9px;padding:.45rem .6rem;font:inherit}",
+      ".bzc-in{flex:1;min-width:0;resize:vertical;background:#101010;border:1px solid #242424;color:#f2f2f2;border-radius:9px;padding:.45rem .6rem;font:inherit}",
       ".bzc-btn{background:#ffd40d;color:#111;border:0;border-radius:9px;padding:.45rem .8rem;font-weight:600;cursor:pointer}",
       ".bzc-btn:disabled{opacity:.5;cursor:default}",
       ".bzc-card{display:flex;gap:.5rem;align-items:center;background:#0c0c0c;border:1px solid #242424;border-radius:10px;padding:.4rem .5rem}",
@@ -75,8 +75,8 @@
     var log = el("div", "bzc-log");
     var stage = el("div", "bzc-stage");
     var row = el("div", "bzc-row");
-    var input = el("input", "bzc-in");
-    input.type = "text";
+    var input = el("textarea", "bzc-in");
+    input.rows = 1;
     input.placeholder = opts.placeholder || "Ask BeeZilla…";
     var sendBtn = el("button", "bzc-btn", "Send");
     row.appendChild(input);
@@ -94,7 +94,12 @@
       return b;
     }
 
+    function atLatest() {
+      return log.scrollHeight - log.clientHeight - log.scrollTop <= 3;
+    }
+
     function card(art) {
+      var follow = atLatest();
       var c = el("div", "bzc-card");
       if (art.kind === "image" && art.url) {
         var img = el("img");
@@ -112,7 +117,7 @@
       size.style.fontSize = ".78rem";
       c.appendChild(size);
       log.appendChild(c);
-      log.scrollTop = log.scrollHeight;
+      if (follow) log.scrollTop = log.scrollHeight;
     }
 
     var invalidJob = Object.prototype.hasOwnProperty.call(opts, "jobId") &&
@@ -128,10 +133,20 @@
       return !retired && host.bzChatOwner === owner && root.parentNode === host && root.isConnected;
     }
     function current(op) { return mounted() && !hidden && pageKey() === route && turn === op; }
+    // A silent resolver or stalled response must not lock the entire composer
+    // indefinitely. Active long streams get a fresh inactivity budget per chunk.
+    function deadline(op, ms) {
+      window.clearTimeout(op.timer);
+      op.timer = window.setTimeout(function () {
+        op.timedOut = true;
+        op.controller.abort();
+      }, ms);
+    }
     function cancel() {
       var old = turn;
       turn = null;
       if (old) {
+        window.clearTimeout(old.timer);
         old.controller.abort();
         if (old.reader) Promise.resolve(old.reader.cancel()).catch(function () {});
       }
@@ -179,7 +194,8 @@
       if (!text || turn || !mounted() || hidden || pageKey() !== route) return;
       if (invalidJob) { stage.textContent = "Could not identify this project. Reopen it before sending."; return; }
       // Claim ownership BEFORE the first await. Enter and click share this turn.
-      var op = { controller: new AbortController(), reader: null };
+      var op = { controller: new AbortController(), reader: null,
+        restoreFocus: document.activeElement === input || document.activeElement === sendBtn };
       turn = op;
       input.disabled = true;
       sendBtn.disabled = true;
@@ -191,6 +207,7 @@
         // Never pair a URL's job with bz_session_id. The authenticated resolver
         // owner-checks the requested item and resumes only its company/job scope.
         // Resolve again each turn so a removed/reassigned item cannot use a cache.
+        deadline(op, 8000);
         var resolved = await fetch("/api/buzzy/sessions", {
           method: "POST", credentials: "same-origin", headers: headers,
           body: JSON.stringify(requestedJob ? { jobId: requestedJob } : {}),
@@ -212,6 +229,7 @@
         stage.textContent = "Working…";
         var body = { message: text, stream: true, sessionId: session.id };
         if (selectedJob) body.jobId = selectedJob;
+        deadline(op, 120000);
         var res = await fetch(CHAT, {
           method: "POST", credentials: "same-origin", headers: headers,
           body: JSON.stringify(body), signal: op.controller.signal,
@@ -229,10 +247,13 @@
               (res.status === 400 && data.code === "bad_chat_scope") ||
               (res.status === 404 && data.code === "chat_scope_unavailable") ||
               (res.status === 409 && data.code === "chat_scope_mismatch") ||
-              (res.status === 401 && data.code === "signed_out"));
+              (res.status === 401 && data.code === "signed_out") ||
+              (res.status === 503 && data.ok === false && data.notSent === true &&
+                (data.code === "no_inference_config" || data.code === "managed_expired")));
             throw refusal;
           }
         } else {
+          deadline(op, 120000);
           op.reader = res.body.getReader();
           var dec = new TextDecoder(), buf = "", finalData = null;
           function frame(f) {
@@ -245,7 +266,12 @@
             var p;
             try { p = JSON.parse(lines.join("\n")); } catch (_) { return; }
             if (!p || typeof p !== "object") return;
-            if (ev === "text") { liveText += p.t || ""; live.textContent = liveText; log.scrollTop = log.scrollHeight; }
+            if (ev === "text") {
+              var follow = atLatest();
+              liveText += p.t || "";
+              live.textContent = liveText;
+              if (follow) log.scrollTop = log.scrollHeight;
+            }
             else if (ev === "stage") { stage.textContent = p.label || p.phase || "Working…"; }
             else if (ev === "tool") { stage.textContent = p.state === "running" ? "Working — " + String(p.name || "a tool").replace(/_/g, " ") + "…" : "Writing the reply…"; }
             else if (ev === "done") finalData = p;
@@ -255,6 +281,7 @@
             var r = await op.reader.read();
             if (!current(op)) return;
             if (r.done) break;
+            deadline(op, 120000);
             buf += dec.decode(r.value, { stream: true });
             var i;
             while ((i = buf.indexOf("\n\n")) !== -1) { frame(buf.slice(0, i)); buf = buf.slice(i + 2); }
@@ -274,13 +301,21 @@
         // mount and happens only after the entire matching reply has completed.
         jobId = selectedJob || (typeof data.jobId === "string" && data.jobId ? data.jobId : null);
         stage.textContent = Math.round(performance.now() - started) / 1000 + "s";
+        var follow = atLatest();
         if (data.reply) live.textContent = data.reply;
         else if (!liveText) live.textContent = "(no reply)";
+        if (follow) log.scrollTop = log.scrollHeight;
         (data.artifacts || []).forEach(card);
         if (data.audio && data.audio.url) card({ kind: "audio", url: data.audio.url, name: data.audio.name, bytes: data.audio.bytes });
       } catch (e) {
         if (!current(op)) return;
-        if (live && e.notSent) {
+        if (op.timedOut && live) {
+          stage.textContent = "";
+          live.textContent = (liveText ? liveText + "\n\n" : "") +
+            "The reply timed out. Your question may already have been received; check the conversation before retrying.";
+        } else if (op.timedOut) {
+          stage.textContent = "Opening the conversation timed out. Your question is still here; try again.";
+        } else if (live && e.notSent) {
           if (!input.value || input.value === draft) {
             input.value = draft;
             if (sent && sent.parentNode === log) log.removeChild(sent);
@@ -295,16 +330,27 @@
         } else if (live) { stage.textContent = ""; live.textContent = "That turn failed: " + e.message; }
         else stage.textContent = "Conversation not opened: " + e.message + " Your question is kept; try again.";
       } finally {
+        window.clearTimeout(op.timer);
         if (op.reader) Promise.resolve(op.reader.cancel()).catch(function () {});
         if (turn === op) {
           turn = null;
-          if (mounted()) { input.disabled = false; sendBtn.disabled = false; }
+          if (mounted()) {
+            input.disabled = false;
+            sendBtn.disabled = false;
+            // Disabling a focused composer moves keyboard focus to the body.
+            // Return it only if the user has not moved on to another control.
+            if (op.restoreFocus && document.activeElement === document.body &&
+                !hidden && pageKey() === route && document.hasFocus()) input.focus();
+          }
         }
       }
     }
 
     sendBtn.addEventListener("click", send);
-    input.addEventListener("keydown", function (e) { if (e.key === "Enter") send(); });
+    input.addEventListener("keydown", function (e) {
+      if (e.isComposing || e.keyCode === 229 || e.defaultPrevented) return;
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    });
 
     return {
       root: root,

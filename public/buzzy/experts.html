@@ -308,7 +308,13 @@
             '<ul class="skill-library">' + skills + '</ul>' +
             '<p class="disclaimer">AI assistant with curated domain knowledge &mdash; not a licensed professional.</p>' +
           '</div>';
-        document.getElementById("backExperts").addEventListener("click", renderList);
+        var back = document.getElementById("backExperts");
+        back.addEventListener("click", function () {
+          renderList();
+          var previous = root.querySelector('[data-expert="' + id + '"]');
+          if (previous) previous.focus();
+        });
+        back.focus();
       }
       renderList();
     })();

@@ -115,6 +115,12 @@
   <script src="/buzzy/wallet-chip.js"></script>
   <script>
     (function () {
+      // A soft navigation can leave these requests in flight, even across a
+      // second visit to Wallet. Only the page that started them may update UI.
+      var balanceNode = document.getElementById("balance");
+      function ownsWallet() {
+        return balanceNode && balanceNode.isConnected && document.getElementById("balance") === balanceNode;
+      }
       function money(n) { return Number(n || 0).toLocaleString(); }
       function el(t, c, x) { var e = document.createElement(t); if (c) e.className = c; if (x != null) e.textContent = x; return e; }
 
@@ -191,18 +197,23 @@
       fetch("/api/wallet", { credentials: "same-origin" })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
         .then(function (d) {
-          document.getElementById("balance").textContent = money(d.balance);
+          if (!ownsWallet()) return;
+          balanceNode.textContent = money(d.balance);
           document.getElementById("earned").textContent = money(d.earned);
           document.getElementById("spent").textContent = money(d.spent);
           document.getElementById("owned").textContent = money(d.owned_count);
           renderLedger(d.entries || []);
         })
-        .catch(function () { document.getElementById("ledger").textContent = "Could not load your wallet."; });
+        .catch(function () { if (ownsWallet()) document.getElementById("ledger").textContent = "Could not load your wallet."; });
 
       fetch("/api/wallet/sales", { credentials: "same-origin" })
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(renderSales)
-        .catch(function () { document.getElementById("sales").textContent = "Could not load sales."; });
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
+        .then(function (sales) { if (ownsWallet()) renderSales(sales); })
+        .catch(function () {
+          if (!ownsWallet()) return;
+          document.getElementById("sales").textContent = "Could not load sales.";
+          document.getElementById("salesledger").textContent = "Could not load sales transactions.";
+        });
 
       var link = document.querySelector(".account-link");
       if (link) {
@@ -213,6 +224,7 @@
             return r.json();
           })
           .then(function (s) {
+            if (!ownsWallet() || !/^\/buzzy\/wallet(?:\.html)?\/?$/.test(location.pathname)) return;
             var u = s && s.user;
             if (!u) { window.location.replace("/buzzy/landing"); return; }
             link.textContent = u.name || u.email || "Account";

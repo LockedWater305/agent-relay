@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { StringDecoder } from "node:string_decoder";
 
 const INHERITED_ENV = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ"];
 const DIRECTORY_NAMES = ["home", "tmp", "data", "userData", "sessionData", "logs", "crashDumps", "config", "cache", "state"];
@@ -132,6 +133,9 @@ export async function runDesktopLaunch(plan, {
 } = {}) {
   let child, timer, stopping;
   let stdout = "", stderr = "", bytes = 0, timedOut = false, outputLimit = false;
+  // Pipe chunks are byte bounds, not text bounds. Keep the streams independent
+  // so interleaved reads cannot corrupt a split UTF-8 character.
+  const decoders = { stdout: new StringDecoder("utf8"), stderr: new StringDecoder("utf8") };
   const stop = () => stopping ??= Number.isInteger(child?.pid) && child.pid > 0
     ? Promise.resolve().then(() => stopGroup(child.pid)) : Promise.resolve();
   try {
@@ -140,20 +144,25 @@ export async function runDesktopLaunch(plan, {
       const finish = (code, signal, error = null) => {
         if (finished) return;
         finished = true;
+        stdout += decoders.stdout.end();
+        stderr += decoders.stderr.end();
         done({ code, signal, error, timedOut, outputLimit, stdout, stderr, out: stdout + stderr });
       };
       const stopAndFinish = () => {
         void stop().then(() => finish(null, null), reject);
       };
       const capture = (stream) => (chunk) => {
+        if (finished) return;
         bytes += Buffer.byteLength(chunk);
         if (bytes > maxOutputBytes) {
           outputLimit = true;
           stopAndFinish();
           return;
         }
-        if (stream === "stdout") stdout += String(chunk);
-        else stderr += String(chunk);
+        const d = decoders[stream];
+        const text = typeof chunk === "string" ? d.end() + chunk : d.write(chunk);
+        if (stream === "stdout") stdout += text;
+        else stderr += text;
       };
       try {
         child = spawnImpl(plan.command, plan.args, {
@@ -199,7 +208,7 @@ export function desktopLaunchStatus(result, page = "/buzzy/talk") {
     } catch { return false; }
   });
   if (!loaded) reasons.push(`no loaded ${page} evidence`);
-  if (/\[desktop\] (?:failed to start:|load failed |loadURL TIMED OUT)|\[desktop-test\] (?:load failed |renderer failed )|\[supervisor\] runtime exited unexpectedly|uncaughtException|unhandledRejection/.test(result.out)) {
+  if (/\[desktop\] (?:failed to start:|could not open settings:|load failed |loadURL TIMED OUT)|\[desktop-test\] (?:load failed |renderer failed )|\[supervisor\] (?:local runtime launcher|runtime) exited unexpectedly|uncaughtException|unhandledRejection/.test(result.out)) {
     reasons.push("desktop reported a launch/runtime failure");
   }
   return { ok: reasons.length === 0, detail: reasons.join("; ") || "clean exit, runtime ready, page loaded" };

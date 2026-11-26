@@ -404,6 +404,10 @@
       color: #D8D8D8;
       font-size: 0.9rem;
     }
+    .chat-messages .message-copy, .chat-messages .bubble.streaming {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     .bubble.me {
       background: var(--bz-col);
       border-color: var(--bz-yellow-dim);
@@ -2580,8 +2584,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         return out;
       })(chatState.messages);
       const html = ordered.map((m) => {
-        const cls = m.role === "user" ? "bubble me" : "bubble";
-        const escaped = String(m.content).replace(/</g, "&lt;").replace(/\n/g, "<br>");
+        const cls = m.role === "user" ? "bubble me message-copy" : "bubble message-copy";
+        const escaped = String(m.content).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>");
         var notice = m.onlineLookupSkipped === true
           ? '<div class="bz-what" role="status">Online lookup skipped because Local Only is on.</div>' : "";
         if (m.notSent === true) notice += '<div class="bz-what" role="status">Not sent for a chat reply.</div>';
@@ -5525,7 +5529,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
               liveBubble = document.createElement("div");
               liveBubble.className = "bubble streaming";
               var c = owner ? owner.messages : document.getElementById("chatMessages");
-              if (c) c.insertBefore(liveBubble, c.firstChild);
+              if (c) {
+                const question = c.firstElementChild && c.querySelector(".bubble.me");
+                c.insertBefore(liveBubble, question ? question.nextSibling : c.firstChild);
+              }
             }
             liveBubble.textContent = liveText;
           } else if (ev === "done") {
@@ -6684,8 +6691,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     // The composer's "Do it" control. A pressed button is a clearer instruction
     // than any phrasing the regexes have to guess at, so it sets execute: true and
     // the server skips the interview and plan-then-confirm entirely.
-    var pendingExecute = false;
-    async function sendChatMessage(event, speechRequest) {
+    async function sendChatMessage(event, speechRequest, explicitExecute) {
       if (speechRequest && !speechRequestCurrent(speechRequest)) return;
       // The clicked/typed path belongs to the composer bound by this Talk visit,
       // not whichever other cached page's identical IDs are currently visible.
@@ -6708,6 +6714,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       const send = owner ? owner.send : document.getElementById("chatSend");
       const notice = owner ? owner.notice : document.getElementById("chatError");
       if (!speechRequest && (input.disabled || chatNavigation.sendClaim || chatNavigation.turn)) return;
+      const activeAtSend = document.activeElement;
+      const restoreComposerFocus = !speechRequest && (activeAtSend === input || activeAtSend === send ||
+        (activeAtSend && activeAtSend.id === "chatDoIt"));
       const originalDraft = input.value;
       const originalRevision = chatNavigation.composerRevision;
       const text = originalDraft.trim();
@@ -6755,8 +6764,6 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
       // Session verification can await while the owner edits the composer.
       if (input.value === originalDraft && chatNavigation.composerRevision === originalRevision) input.value = "";
-      const sentExecute = pendingExecute === true;
-      pendingExecute = false;
       setChatMascot("08-thinking");
 
       // Add user message
@@ -6806,8 +6813,12 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         '<span class="thinking-elapsed" id="thinkingElapsed"></span>' +
         '<div class="stage-line"><span class="stage-label" id="bzStageLabel"></span>' +
         '<span class="stage-bar" id="bzStageBar"><i></i></span></div>';
-      messagesContainer.appendChild(thinkingEl);
-      messagesContainer.scrollTop = messagesContainer.scrollHeight;
+      // The transcript is newest-first. Keep progress with this question, not
+      // at the bottom below all the previous exchanges.
+      const question = messagesContainer.firstElementChild && messagesContainer.querySelector(".bubble.me");
+      if (question) messagesContainer.insertBefore(thinkingEl, question.nextSibling);
+      else messagesContainer.appendChild(thinkingEl);
+      messagesContainer.scrollTop = 0;
       var elapsedTimer = setInterval(function () {
         if (!canPaint()) return;
         var el = document.getElementById("thinkingElapsed");
@@ -6846,7 +6857,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           model: selectedModel(),
           jobContext: chatState.jobContext || undefined,
           mode: chatState.mode || "chat",
-          execute: pendingExecute === true,
+          execute: explicitExecute === true,
           attemptId: attemptId,
         };
         // Abort after 60s so a slow LLM turn fails cleanly instead of reading
@@ -7074,7 +7085,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             if (canPaint() && voice.mic && !voice.speaking && !voice.sending && !voice.rec) startListening();
           }, 600);
           paintChatInputAvailability(owner);
-          if (canPaint() && !input.disabled) input.focus();
+          if (canPaint() && !input.disabled && restoreComposerFocus &&
+              document.activeElement === document.body && document.hasFocus()) input.focus();
         }
       }
     }
@@ -7147,8 +7159,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         doIt.onclick = function () {
           if (!owner.mounted() || doIt.disabled || send.disabled) return;
           if (!input.value.trim()) { input.focus(); return; }
-          pendingExecute = true;
-          return sendChatMessage();
+          return sendChatMessage(undefined, undefined, true);
         };
         // The cached controls may settle while another Talk is visible. Mirror
         // this exact Send, never re-resolve the current pane's matching IDs.
@@ -7336,6 +7347,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       chatNavigation.composerRevision = (chatNavigation.composerRevision || 0) + 1;
     });
     document.getElementById("chatInput").addEventListener("keydown", (e) => {
+      // Enter confirms an in-progress IME candidate; it is not a Send.
+      if (e.isComposing || e.keyCode === 229 || e.defaultPrevented) return;
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         sendChatMessage();

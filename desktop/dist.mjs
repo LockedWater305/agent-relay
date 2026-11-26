@@ -18,9 +18,10 @@
  *   <install>/resources/app.asar        main.mjs, supervisor.mjs
  *   <install>/resources/app/            .output/ scripts/ bin/ package.json node_modules/
  */
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, posix, relative, resolve } from "node:path";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeCspManifest } from "../scripts/build-desktop-csp.mjs";
 import { productionDependencyClosure, copyProductionDependency, ensurePgliteAssets } from "./stage-inputs.mjs";
@@ -89,6 +90,11 @@ async function stage() {
     log(`copying ${dir}`);
     cpSync(join(ROOT, dir), join(APP, dir), { recursive: true });
   }
+  const serverEntry = join(APP, ".output", "server", "index.mjs");
+  const serverStat = lstatSync(serverEntry, { throwIfNoEntry: false });
+  if (!serverStat?.isFile() || serverStat.size === 0) {
+    throw new Error(`staged runtime has no non-empty server entry: ${serverEntry}`);
+  }
   // `scripts/` used to be copied wholesale: 89 files of test probes, seeds and
   // TypeScript sources rode along with the launcher, so every installer shipped
   // the recipe-seal sources, the check corpus and the internal test harness in
@@ -142,18 +148,21 @@ async function stage() {
   // cannot do, and a read-only install must not need to write to start.
   ensurePgliteAssets(APP);
   const migrations = existsSync(join(APP, "migrations"))
-    ? readdirSync(join(APP, "migrations")).filter((f) => f.endsWith(".sql")).length
-    : 0;
-  if (migrations === 0) {
+    ? readdirSync(join(APP, "migrations"), { withFileTypes: true }).filter((f) => f.name.endsWith(".sql"))
+    : [];
+  for (const entry of migrations) {
+    if (!entry.isFile()) throw new Error(`staged migration is not a regular file: ${entry.name}`);
+  }
+  if (migrations.length === 0) {
     throw new Error("staged tree has no migrations/*.sql — the runtime would boot with an empty schema");
   }
-  log(`${migrations} migrations staged`);
+  log(`${migrations.length} migrations staged`);
 
   // The gate that would have caught 0.2.0. See assertPackagedImports for what it
   // checks and why the failure is invisible in a dev run.
   assertPackagedImports();
 
-  const size = du(APP);
+  const size = fileBytes(APP);
   writeFileSync(join(STAGE, "MANIFEST.json"), JSON.stringify({
     stagedAt: new Date().toISOString(),
     version: JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version,
@@ -181,6 +190,9 @@ const RUNTIME_SCRIPT_ENTRIES = [
   "scripts/beezilla-local.mjs",
   "scripts/migrate.mjs",
   "bin/beezilla.mjs",
+  // CLI imports this unconditionally at startup. An incomplete checkout must not
+  // produce a "successful" stage whose CLI cannot even show its help.
+  "scripts/lib/pins.mjs",
   "scripts/lib/parent-watchdog.cjs",
   // Loaded at call time through runtimeLib() from the shell, never imported.
   "scripts/lib/inference.mjs",
@@ -301,13 +313,15 @@ function assertPackagedImports() {
   log(`packaged imports: ok (${asarFiles.length} shell files, ${REQUIRED_RUNTIME_FILES.length} runtime libs)`);
 }
 
-function du(dir) {
-  try {
-    // -k is accepted by both GNU and BSD/macOS du; -b is GNU-only and made macOS report 0 MB.
-    return Number(execFileSync("du", ["-sk", dir], { encoding: "utf8" }).split("\t")[0]) * 1024;
-  } catch {
-    return 0;
+// Logical regular-file bytes, independent of host block allocation and tools.
+function fileBytes(dir) {
+  let bytes = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const file = join(dir, entry.name);
+    if (entry.isDirectory()) bytes += fileBytes(file);
+    else if (entry.isFile()) bytes += statSync(file).size;
   }
+  return bytes;
 }
 
 const LOCAL_TEST = "LOCAL TEST BUILD — not a release, unsigned, no publisher pins";
@@ -328,16 +342,41 @@ function packDir(builder) {
   const flag = { darwin: "--mac", win32: "--win", linux: "--linux" }[process.platform];
   if (!flag) throw new Error(`no electron-builder target for ${process.platform}`);
   log(`running electron-builder ${flag} dir (unpacked, no installer, no publish)…`);
-  runCli(DESKTOP, builder, [flag, "dir", "--publish", "never"]);
+  // Windows/Linux must validate what this invocation packed, not the first
+  // plausible directory left by an earlier build. Keep this local receipt out
+  // of resources/app and all release/publisher flows.
+  const localBinding = process.platform === "win32" || process.platform === "linux";
+  const token = localBinding ? randomUUID() : null;
+  const env = token ? { ...process.env, BZ_LOCAL_DIR_BUILD_TOKEN: token } : process.env;
+  runCli(DESKTOP, builder, [flag, "dir", "--publish", "never"], env);
   // The production node_modules is added by the afterPack hook (after-pack.cjs)
   // for every target, because extraResources drops a top-level node_modules.
   // Check it really landed: without it the packaged runtime cannot start.
-  const resources = unpackedResources();
+  const resources = token ? boundLocalResources(token) : unpackedResources();
   if (!existsSync(join(resources, "node_modules", "@electric-sql", "pglite"))) {
     throw new Error(`packaged runtime has no node_modules under ${resources} — the afterPack hook did not run`);
   }
   localTestBanner();
   log("unpacked app written under dist-desktop/");
+}
+
+/** This receipt binds the directory path only; it does not attest binary
+ * architecture or native behavior. Native acceptance remains separate. */
+function boundLocalResources(token) {
+  const receiptPath = join(STAGE, "unpacked-local-receipt.json");
+  if (!existsSync(receiptPath)) throw new Error("afterPack receipt missing for this local build");
+  const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+  if (receipt.token !== token || receipt.platform !== process.platform) {
+    throw new Error("afterPack receipt does not match this local build");
+  }
+  const label = process.platform === "win32" ? "win" : "linux";
+  const suffix = process.arch === "x64" ? "" : `-${process.arch}`;
+  const expected = join(OUT, `${label}${suffix}-unpacked`, "resources", "app");
+  if (typeof receipt.app !== "string" || !isAbsolute(receipt.app) || relative(expected, receipt.app) !== "" ||
+      !existsSync(join(expected, "package.json"))) {
+    throw new Error(`afterPack wrote to the wrong local output or it disappeared: expected ${expected}`);
+  }
+  return expected;
 }
 
 /** The resources/app folder electron-builder wrote for this platform. */
@@ -354,6 +393,9 @@ function unpackedResources() {
 }
 
 const mode = process.argv[2] ?? "stage";
+if (!["stage", "all", "dir"].includes(mode)) {
+  throw new Error(`unknown packaging target "${mode}"; expected stage, all or dir`);
+}
 if (mode === "dir") localTestBanner();
 const builder = mode === "all" || mode === "dir"
   ? lockedCli(DESKTOP, "electron-builder", "cli.js")

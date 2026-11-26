@@ -134,6 +134,11 @@
     var canvas = document.getElementById("canvas");
     var svg = document.getElementById("edges");
     var statusEl = document.getElementById("status");
+    var saveButton = document.getElementById("save");
+    var listBox = document.getElementById("list");
+    var signedOut = false;
+    function ownsCanvas() { return canvas.isConnected && document.getElementById("canvas") === canvas; }
+    function paintSave() { saveButton.disabled = signedOut || !!state.saving; }
 
     function say(msg, cls) { statusEl.textContent = msg; statusEl.className = "hint " + (cls || ""); }
     function rid() {
@@ -342,8 +347,9 @@
     }
 
     // ── save / load ──────────────────────────────────────────────────────
-    document.getElementById("save").addEventListener("click", function () {
+    saveButton.addEventListener("click", function () {
       var owner = state;
+      if (signedOut || owner.saving) return;
       var body = {
         id: state.graphId || undefined,
         title: (document.getElementById("title").value || "Untitled workflow").trim(),
@@ -352,23 +358,25 @@
         edges: state.edges.map(function (e) { return { from: e.from, to: e.to, kind: e.kind }; })
       };
       if (!body.nodes.length) { say("Add at least one node first.", "bad"); return; }
+      owner.saving = true; paintSave();
       say("Saving…");
       fetch("/api/buzzy/graphs", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
         .then(function (r) { return r.json(); })
         .then(function (j) {
-          if (state !== owner) return;
+          if (state !== owner || !ownsCanvas()) return;
           if (!j.ok) { say(j.error || "Save failed.", "bad"); return; }
           state.graphId = j.id;
           say("Saved · version " + j.version, "ok");
           loadList();
         })
-        .catch(function () { if (state === owner) say("Save failed — check the connection.", "bad"); });
+        .catch(function () { if (state === owner && ownsCanvas()) say("Save failed — check the connection.", "bad"); })
+        .then(function () { owner.saving = false; if (state === owner && ownsCanvas()) paintSave(); });
     });
 
     document.getElementById("new").addEventListener("click", function () {
       state = { graphId: null, description: null, nodes: [], edges: [], sel: null, linkFrom: null, seq: 0 };
       document.getElementById("title").value = "";
-      draw(); inspect(); say("");
+      paintSave(); draw(); inspect(); say("");
     });
 
     // ── run ──────────────────────────────────────────────────────────────
@@ -429,8 +437,10 @@
       fetch("/api/buzzy/graphs?limit=20", { credentials: "same-origin" })
         .then(function (r) { return r.json(); })
         .then(function (j) {
-          var box = document.getElementById("list");
-          if (!j.ok || !j.graphs.length) { box.innerHTML = '<span class="hint">Nothing saved yet.</span>'; return; }
+          if (!ownsCanvas()) return;
+          var box = listBox;
+          if (!j || !j.ok || !Array.isArray(j.graphs)) throw new Error("Workflow list unavailable");
+          if (!j.graphs.length) { box.innerHTML = '<span class="hint">Nothing saved yet.</span>'; return; }
           box.innerHTML = j.graphs.map(function (g) {
             return '<a href="#" class="gl" data-g="' + g.id + '">' + esc(g.title) + '<br><span class="hint">v' + g.version + " · " + g.nodes + " nodes</span></a>";
           }).join("");
@@ -438,7 +448,7 @@
             a.addEventListener("click", function (ev) { ev.preventDefault(); open(a.getAttribute("data-g")); });
           });
         })
-        .catch(function () { document.getElementById("list").innerHTML = '<span class="hint">Could not load.</span>'; });
+        .catch(function () { if (ownsCanvas()) listBox.innerHTML = '<span class="hint">Could not load.</span>'; });
     }
 
     function open(id) {
@@ -447,7 +457,7 @@
       fetch("/api/buzzy/graphs/" + encodeURIComponent(id), { credentials: "same-origin" })
         .then(function (r) { return r.json(); })
         .then(function (j) {
-          if (state.openRequest !== request) return;
+          if (state.openRequest !== request || !ownsCanvas()) return;
           if (!j || !j.ok) { say(j && j.error || "Could not open.", "bad"); return; }
           var g = j.graph;
           if (!g || g.id !== id || !Array.isArray(g.nodes) || !Array.isArray(g.edges) ||
@@ -455,13 +465,14 @@
             say("Could not open this workflow.", "bad"); return;
           }
           var nodes = g.nodes.map(function (n) {
-            return { key: n.key, kind: n.kind, title: n.title || n.key, config: n.config || {}, x: n.x || 30, y: n.y || 30 };
+            return { key: n.key, kind: n.kind, title: n.title || n.key, config: n.config || {}, x: n.x == null ? 30 : n.x, y: n.y == null ? 30 : n.y };
           });
           var edges = g.edges.map(function (e) { return { from: e.from, to: e.to, kind: e.kind }; });
           // Commit loaded identity and its metadata together; old Save replies
           // still belong to the previous canvas, not this selected workflow.
           state = { graphId: g.id, description: g.description,
             nodes: nodes, edges: edges, sel: null, linkFrom: null, seq: nodes.length, openRequest: request };
+          paintSave();
           document.getElementById("title").value = g.title;
           draw(); inspect();
           say("Opened v" + g.version, "ok");
@@ -472,9 +483,9 @@
     // Session check: the resolver and the graph API both need a signed-in owner.
     fetch("/api/buzzy/assets?limit=1", { credentials: "same-origin" })
       .then(function (r) {
-        if (r.status === 401) {
+        if (r.status === 401 && ownsCanvas()) {
           say("Sign in to save workflows.", "bad");
-          document.getElementById("save").disabled = true;
+          signedOut = true; paintSave();
         }
       })
       .catch(function () {});

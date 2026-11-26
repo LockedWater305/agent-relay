@@ -152,7 +152,7 @@
       var list = document.getElementById("bulkList");
       var retryBtn = document.getElementById("bulkRetry");
       var failed = [];
-      var CONC = 6;
+      var CONC = 6, uploading = false;
 
       function el(t, c, x) { var n = document.createElement(t); if (c) n.className = c; if (x != null) n.textContent = x; return n; }
       function label(f) { return f.webkitRelativePath || f.name; }
@@ -174,6 +174,9 @@
       }
 
       function run(files) {
+        if (uploading || !files.length) return;
+        uploading = true;
+        pick.disabled = true;
         var total = files.length;
         var done = 0, stored = 0, dup = 0;
         failed = [];
@@ -205,7 +208,7 @@
         return Promise.all(lanes).then(function () {
           bar.textContent = "Done. " + stored + " new, " + dup + " already here, " + failed.length + " failed.";
           if (failed.length) retryBtn.classList.remove("hidden");
-        });
+        }).finally(function () { uploading = false; pick.disabled = false; });
       }
 
       pick.addEventListener("change", function () {
@@ -227,6 +230,13 @@
       var draftBox = document.getElementById("draftBox");
       var msg = document.getElementById("msg");
       var CURRENT = null;   // { job, draft }
+      var selection = 0;
+      function ownsDraftPage() {
+        return draftBox.isConnected && document.getElementById("draftBox") === draftBox;
+      }
+      function ownsDraftURL() {
+        return /^\/buzzy\/upload(?:\.html)?\/?$/.test(location.pathname);
+      }
 
       function el(t, c, x) { var n = document.createElement(t); if (c) n.className = c; if (x != null) n.textContent = x; return n; }
       function say(text, ok) { msg.className = "msg " + (ok ? "ok" : "err"); msg.textContent = text; }
@@ -253,6 +263,7 @@
         .catch(function (e) { jobsBox.textContent = "Could not load your jobs (" + e.message + ")."; });
 
       function learn(job, btn) {
+        var request = ++selection;
         btn.disabled = true;
         // A derive takes a minute or more. A frozen "Reading…" reads as a hung
         // page, so show elapsed time — and put the button back on failure.
@@ -271,13 +282,20 @@
           .then(function (res) {
             stopTick();
             btn.disabled = false; btn.textContent = "Learn from this";
+            if (request !== selection || !ownsDraftPage()) return;
             if (res.s !== 200 || !res.b.ok) { jobsBox.appendChild(el("p", "msg err", res.b.error || "Could not read that job.")); return; }
+            if (!CURRENT || CURRENT.job.id !== job.id) document.getElementById("price").value = "0";
             CURRENT = { job: job, draft: res.b.draft };
+            document.getElementById("publish").disabled = false;
+            msg.textContent = "";
             fill(res.b.draft);
             draftBox.classList.remove("hidden");
             draftBox.scrollIntoView({ behavior: "smooth" });
           })
-          .catch(function () { stopTick(); btn.disabled = false; btn.textContent = "Learn from this"; });
+          .catch(function () {
+            stopTick(); btn.disabled = false; btn.textContent = "Learn from this";
+            if (request === selection && ownsDraftPage()) jobsBox.appendChild(el("p", "msg err", "Could not read that job. Try again."));
+          });
       }
 
       function fill(d) {
@@ -293,6 +311,8 @@
       document.getElementById("publish").addEventListener("click", function () {
         if (!CURRENT) return;
         var btn = this;
+        var published = CURRENT, request = selection;
+        function ownsPublication() { return CURRENT === published && ownsDraftPage(); }
         var d = CURRENT.draft;
         var body = {
           basis: CURRENT.job.basis || "quote-comparison",
@@ -315,10 +335,14 @@
         })
           .then(function (r) { return r.json().then(function (b) { return { s: r.status, b: b }; }); })
           .then(function (res) {
-            if (res.s === 201) { say("Published. It is on the shelf now.", true); setTimeout(function () { if (window.BeeZillaShell) window.BeeZillaShell.go("/buzzy/recipes"); }, 900); }
+            if (!ownsPublication()) return;
+            if (res.s === 201) { say("Published. It is on the shelf now.", true); setTimeout(function () { if (ownsPublication() && request === selection && ownsDraftURL() && window.BeeZillaShell) window.BeeZillaShell.go("/buzzy/recipes"); }, 900); }
             else { say(res.b.error || "That did not publish.", false); btn.disabled = false; }
           })
-          .catch(function (e) { say("Could not reach the server (" + e.message + ").", false); btn.disabled = false; });
+          .catch(function (e) {
+            if (!ownsPublication()) return;
+            say("Could not reach the server (" + e.message + ").", false); btn.disabled = false;
+          });
       });
 
       var link = document.querySelector(".account-link");

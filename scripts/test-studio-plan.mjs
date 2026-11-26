@@ -85,13 +85,14 @@ async function fixture(t){
   dispatch(name,props={}){for(const fn of this.handlers[name]||[])fn.call(this,{target:this,preventDefault(){},...props});}
   click(){if(!this.disabled)this.dispatch('click');}
   getAttribute(name){return this[name]??null;}
+  closest(selector){return selector==='main'?this.owner?.main??null:null;}
   getContext(){return new Proxy({},{get:()=>()=>{}});}
   getBoundingClientRect(){return {left:0,top:0,width:700,height:120};}
   setPointerCapture(){}load(){}play(){}pause(){}
  }
  const location={pathname:'/buzzy/studio',search:'?job=job_track'};
  const document={getElementById:id=>id==='bzPage'?(active?.hard?null:active?.root):active?.elements.get(id)||null,querySelectorAll:()=>[...active.elements.values()],createElement:()=>new Element(),head:new Element()};
- const window={devicePixelRatio:1,addEventListener:(name,fn)=>{(windowHandlers[name]??=[]).push(fn);},BeeZillaChat:{mount:(...args)=>f.mounts.push(args)},BeeZillaShell:{go:url=>{f.hops.push(url);}}};
+ const window={devicePixelRatio:1,addEventListener:(name,fn)=>{(windowHandlers[name]??=[]).push(fn);},removeEventListener:(name,fn)=>{windowHandlers[name]=(windowHandlers[name]||[]).filter(handler=>handler!==fn);},BeeZillaChat:{mount:(...args)=>f.mounts.push(args)},BeeZillaShell:{go:url=>{f.hops.push(url);}}};
  const ui=vm.createContext({document,location,URLSearchParams,fetch:(url,init={})=>{
   const req={url,init,method:init.method||'GET',body:init.body?JSON.parse(init.body):null};uiRequests.push(req);
   return Promise.resolve().then(()=>f.transport?f.transport(req,()=>api(url,init)):api(url,init));
@@ -99,7 +100,7 @@ async function fixture(t){
  f.mount=async(job='job_track',options={})=>{
   if(active)active.connected=false;
   active={elements:new Map(),connected:true,hard:!!options.hard};
-  const page=active;page.root=new Element('bzPage',page);page.root.querySelectorAll=()=>[...page.elements.values()];
+  const page=active;page.main=new Element('main',page);page.root=new Element('bzPage',page);page.root.querySelectorAll=()=>[...page.elements.values()];
   for(const m of html.matchAll(/\bid="([^"]+)"/g))page.elements.set(m[1],new Element(m[1],page));
   for(const[id,label]of Object.entries({savePlan:'Save brief',saveLyrics:'Save lyrics',renderBtn:'Create track',editBtn:'Change this passage'}))page.elements.get(id).textContent=label;
   location.pathname=options.pathname||'/buzzy/studio';location.search=job?'?job='+encodeURIComponent(job):'';
