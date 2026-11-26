@@ -103,7 +103,7 @@ export function ui(fetcher,options={}){
  const element=t=>new Element(t,notify),body=element('body'),head=element('head');body.connected=head.connected=true;
  const host=body.appendChild(element('div')),location={pathname:'/buzzy/'+(options.surface||'project'),search:options.job===null?'':'?job='+encodeURIComponent(options.job||'job_b')};
  const document={body,head,createElement:element,getElementById:id=>id==='chatSlot'||id==='aiSlot'?host:id==='bz-chat-css'?head.children.find(n=>n.id===id):null};
- const window={addEventListener:(name,fn)=>(events[name]??=[]).push(fn),removeEventListener:(name,fn)=>events[name]=(events[name]||[]).filter(f=>f!==fn)};
+ const window={setTimeout:(...args)=>setTimeout(...args).unref(),clearTimeout,addEventListener:(name,fn)=>(events[name]??=[]).push(fn),removeEventListener:(name,fn)=>events[name]=(events[name]||[]).filter(f=>f!==fn)};
  const ctx=vm.createContext({document,window,location,localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v)},fetch:(url,init={})=>{calls.push({url,init,body:init.body?JSON.parse(init.body):null});return fetcher(url,init);},URLSearchParams,performance,TextDecoder,AbortController,MutationObserver:class{constructor(cb){this.cb=cb;}observe(){callbacks.add(this.cb);}disconnect(){callbacks.delete(this.cb);}},console});
  vm.runInContext(read('public/buzzy/chat.js'),ctx);
  function mount(job=options.job??'job_b',surface=options.surface||'project'){

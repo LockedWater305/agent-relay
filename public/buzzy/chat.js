@@ -133,10 +133,20 @@
       return !retired && host.bzChatOwner === owner && root.parentNode === host && root.isConnected;
     }
     function current(op) { return mounted() && !hidden && pageKey() === route && turn === op; }
+    // A silent resolver or stalled response must not lock the entire composer
+    // indefinitely. Active long streams get a fresh inactivity budget per chunk.
+    function deadline(op, ms) {
+      window.clearTimeout(op.timer);
+      op.timer = window.setTimeout(function () {
+        op.timedOut = true;
+        op.controller.abort();
+      }, ms);
+    }
     function cancel() {
       var old = turn;
       turn = null;
       if (old) {
+        window.clearTimeout(old.timer);
         old.controller.abort();
         if (old.reader) Promise.resolve(old.reader.cancel()).catch(function () {});
       }
@@ -197,6 +207,7 @@
         // Never pair a URL's job with bz_session_id. The authenticated resolver
         // owner-checks the requested item and resumes only its company/job scope.
         // Resolve again each turn so a removed/reassigned item cannot use a cache.
+        deadline(op, 8000);
         var resolved = await fetch("/api/buzzy/sessions", {
           method: "POST", credentials: "same-origin", headers: headers,
           body: JSON.stringify(requestedJob ? { jobId: requestedJob } : {}),
@@ -218,6 +229,7 @@
         stage.textContent = "Working…";
         var body = { message: text, stream: true, sessionId: session.id };
         if (selectedJob) body.jobId = selectedJob;
+        deadline(op, 120000);
         var res = await fetch(CHAT, {
           method: "POST", credentials: "same-origin", headers: headers,
           body: JSON.stringify(body), signal: op.controller.signal,
@@ -241,6 +253,7 @@
             throw refusal;
           }
         } else {
+          deadline(op, 120000);
           op.reader = res.body.getReader();
           var dec = new TextDecoder(), buf = "", finalData = null;
           function frame(f) {
@@ -268,6 +281,7 @@
             var r = await op.reader.read();
             if (!current(op)) return;
             if (r.done) break;
+            deadline(op, 120000);
             buf += dec.decode(r.value, { stream: true });
             var i;
             while ((i = buf.indexOf("\n\n")) !== -1) { frame(buf.slice(0, i)); buf = buf.slice(i + 2); }
@@ -295,7 +309,13 @@
         if (data.audio && data.audio.url) card({ kind: "audio", url: data.audio.url, name: data.audio.name, bytes: data.audio.bytes });
       } catch (e) {
         if (!current(op)) return;
-        if (live && e.notSent) {
+        if (op.timedOut && live) {
+          stage.textContent = "";
+          live.textContent = (liveText ? liveText + "\n\n" : "") +
+            "The reply timed out. Your question may already have been received; check the conversation before retrying.";
+        } else if (op.timedOut) {
+          stage.textContent = "Opening the conversation timed out. Your question is still here; try again.";
+        } else if (live && e.notSent) {
           if (!input.value || input.value === draft) {
             input.value = draft;
             if (sent && sent.parentNode === log) log.removeChild(sent);
@@ -310,6 +330,7 @@
         } else if (live) { stage.textContent = ""; live.textContent = "That turn failed: " + e.message; }
         else stage.textContent = "Conversation not opened: " + e.message + " Your question is kept; try again.";
       } finally {
+        window.clearTimeout(op.timer);
         if (op.reader) Promise.resolve(op.reader.cancel()).catch(function () {});
         if (turn === op) {
           turn = null;
