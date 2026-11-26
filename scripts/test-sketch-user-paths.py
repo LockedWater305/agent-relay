@@ -456,6 +456,21 @@ class Sketch(unittest.TestCase):
         p.click("#redo"); self.save(p); self.assertEqual(self.board["strokes"],stroke)
         p.click('[data-tool="rect"]'); self.drag(p,140,170,240,245); self.save(p)
         self.assertEqual([s["tool"] for s in self.board["strokes"]],["pen","rect"])
+    def test_blank_note_is_not_saved_as_an_invisible_mark(self):
+        p=self.start([LINE.copy()])
+        p.click('[data-tool="text"]')
+        p.once("dialog",lambda d:d.accept("   "))
+        self.hit(p,320,140)
+        status=p.inner_text("#status")
+        self.save(p)
+        self.assertEqual(self.board["strokes"],[LINE],"A whitespace-only note was saved as a hidden mark.")
+        self.assertEqual(type(self).last_size,0)
+        self.assertIn("No note added",status)
+
+        caption="  Keep  two  spaces  "
+        p.once("dialog",lambda d:d.accept(caption))
+        self.hit(p,320,140); self.save(p)
+        self.assertEqual(self.board["strokes"][-1]["text"],caption)
     def test_new_note_anchors_to_shape_behind_existing_text_not_to_the_note(self):
         older=dict(id="older",tool="text",color="#ff0000",x1=95,y1=53,text="Existing note")
         p=self.start([LINE.copy(),older]); p.click('[data-tool="text"]')

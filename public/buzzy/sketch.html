@@ -541,6 +541,7 @@
       var p = pt(e);
       if (tool === "text") {
         var t = window.prompt("Note:");
+        if (t !== null && !t.trim()) { setStatus("No note added. Enter some text."); return; }
         if (t) {
           snapshot();
           // Clicking a mark anchors the note to it; clicking empty space leaves it free.

@@ -443,7 +443,9 @@
       m.style.display = "none";
       m.style.top = "100%";
       m.style.right = "0";
-      chrome.appendChild(m);
+      // The disclosure belongs directly after its trigger. On a cold load Ask
+      // is already mounted, so appending here put Ask first in the tab order.
+      chrome.insertBefore(m, a.parentNode === chrome ? a.nextSibling : null);
       fillMenu(m);
     }
     if (!a.textContent) a.textContent = "";

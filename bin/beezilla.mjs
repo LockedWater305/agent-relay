@@ -596,4 +596,5 @@ if (!fn) {
   const requestedHelp = !verb || ["--help", "-h", "help"].includes(verb);
   process.exit(requestedHelp ? 0 : 2);
 }
-process.exit(await fn(rest));
+// Let stdout and stderr drain, including asynchronous writes to pipes.
+process.exitCode = await fn(rest);

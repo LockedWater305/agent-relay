@@ -1188,7 +1188,7 @@
 }
 .ctx-meter.hidden { display: none; }
 .ctx-bar {
-  flex: 1;
+  flex: 1 0 2rem;
   height: 4px;
   border-radius: 999px;
   background: #232323;
@@ -1205,7 +1205,8 @@
 .ctx-text {
   font-size: 0.7rem;
   color: #7A7A7A;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
 .ctx-meter.warn .ctx-bar > span { background: var(--bz-yellow); }
