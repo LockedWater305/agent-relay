@@ -630,3 +630,31 @@ test('Sketch navigation retires pending Create before a late reference can post 
  assert.equal(newPage.el('create').disabled,false);
  assert.notEqual(newPage.el('status').textContent,p.el('status').textContent);
 });
+
+const duplicateStrokeBoard=()=>({
+ ...savedBoard,strokes:[savedBoard.strokes[0],{...savedBoard.strokes[0],x1:300,y1:150,x2:450,y2:210,legacyTag:'other mark'},savedBoard.strokes[1]]
+});
+test('hit-testing the second legacy duplicate highlights only that drawing',async t=>{
+ const board=duplicateStrokeBoard(),f=await fixture(t,board);
+ const create=f.h.document.createElement.bind(f.h.document),highlights=[];
+ f.h.document.createElement=tag=>{
+   const el=create(tag);
+   if(tag==='canvas'){
+     const state={stroke(){if(this.strokeStyle==='rgba(255,212,13,0.25)'&&this.lineWidth===9) highlights.push(this.start);},moveTo(x,y){this.start=[x,y];}};
+     const ctx=new Proxy(state,{get:(o,k)=>Object.hasOwn(o,k)?o[k]:()=>{}});
+     el.getContext=()=>ctx;
+   }
+   return el;
+ };
+ const p=await f.mount();p.el('board').dispatch('pointerdown',{clientX:375,clientY:180,pointerId:1,pointerType:'mouse'});
+ assert.deepEqual(highlights,[[300,150]]);assert.equal(f.posts().length,0);assert.deepEqual(f.data().board,board);
+});
+for(const hit of [0,1])test('Delete only the hit legacy duplicate #'+hit+' and preserve note ownership across Undo/Redo',async t=>{
+ const board=duplicateStrokeBoard(),f=await fixture(t,board),p=await f.mount(),draw=board.strokes[hit];
+ p.el('board').dispatch('pointerdown',{clientX:(draw.x1+draw.x2)/2,clientY:(draw.y1+draw.y2)/2,pointerId:1,pointerType:'mouse'});
+ f.event('keydown',{key:'Delete',target:p.el('board')});await p.save();
+ const expected=[board.strokes[1-hit],{...board.strokes[2],anchor:hit===0?null:'road_1'}];
+ assert.equal(f.posts().length,1);assert.deepEqual(f.data().board.strokes,expected);
+ p.el('undo').click();await p.save();assert.deepEqual(f.data().board,board);
+ p.el('redo').click();await p.save();assert.deepEqual(f.data().board.strokes,expected);
+});

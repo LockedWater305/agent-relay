@@ -353,9 +353,11 @@
     // A note belongs to a mark, not to a coordinate: "this road is too narrow" must
     // stay attached to the road when the drawing around it moves. Anchor = stroke id;
     // the note's own x1/y1 is only a fallback for marks that no longer exist.
+    function anchorTarget(id) {
+      return strokes.find(function (stroke) { return stroke.id === id; });
+    }
     function anchorPoint(id) {
-      var st = null;
-      for (var i = 0; i < strokes.length; i++) if (strokes[i].id === id) { st = strokes[i]; break; }
+      var st = anchorTarget(id);
       if (!st) return null;
       if (st.tool === "pen" && st.points && st.points.length) {
         var p = st.points[Math.floor(st.points.length / 2)];
@@ -416,7 +418,7 @@
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.setLineDash(isDraft ? [6, 4] : []);
-      if (s.id && s.id === selectedStroke) {
+      if (s === selectedStroke) {
         ctx.lineWidth = (s.width || 3) + 6;
         ctx.strokeStyle = "rgba(255,212,13,0.25)";
         ctx.beginPath();
@@ -469,8 +471,7 @@
       if (!editable()) return;
       if (tool === "select") {
         if (drag) return;
-        var hit = hitTest(pt(e));
-        selectedStroke = hit ? hit.id : null;
+        selectedStroke = hitTest(pt(e));
         if (selected) { selected = null; renderImages(); }
         redraw();
         return;
@@ -638,8 +639,8 @@
         if (e.defaultPrevented || target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || "")) return;
         if (tool !== "select") return;
         var imageIndex = images.indexOf(selected);
-        var strokeId = selectedStroke;
-        if (imageIndex < 0 && (!strokeId || !strokes.some(function (x) { return x.id === strokeId; }))) return;
+        var strokeIndex = strokes.indexOf(selectedStroke);
+        if (imageIndex < 0 && strokeIndex < 0) return;
         e.preventDefault();
         snapshot();
         if (imageIndex >= 0) {
@@ -649,9 +650,11 @@
           selected = null;
           renderImages();
         } else {
-          strokes = strokes.filter(function (x) { return x.id !== strokeId; });
+          var strokeId = selectedStroke.id;
+          var removesAnchor = strokeId && anchorTarget(strokeId) === selectedStroke;
+          strokes.splice(strokeIndex, 1);
           // Notes anchored to a deleted mark keep their fallback position.
-          strokes.forEach(function (x) { if (x.anchor === strokeId) x.anchor = null; });
+          if (removesAnchor) strokes.forEach(function (x) { if (x.anchor === strokeId) x.anchor = null; });
         }
         selectedStroke = null;
         redraw();
