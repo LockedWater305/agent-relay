@@ -544,3 +544,89 @@ test('explicit Save still settles an owned mouse drag without a pointerup event'
  assert.deepEqual(f.data().board.images,expected);assert.equal(f.posts().length,1);
  f.event('pointerup',{pointerId:1,pointerType:'mouse'});await f.timers(1200);assert.equal(f.posts().length,1);
 });
+
+// Canvas/load doubles expose what the real Sketch Create button sends, without
+// decoding real media or allowing the Art transport to reach a provider.
+function referenceCompositeFixture(f) {
+ const images=metadataImageIO(f), drawn=[], exports=[];
+ const create=f.h.document.createElement.bind(f.h.document);
+ const url=()=> 'data:image/png;base64,'+Buffer.from(JSON.stringify(drawn)).toString('base64');
+ f.h.document.createElement=tag=>{
+  const el=create(tag);
+  if(tag==='canvas'){
+   el.getContext=()=>new Proxy({}, {get:(_,key)=>key==='drawImage'?(img,...geometry)=>drawn.push({url:img.src,geometry}):()=>{}});
+   el.toDataURL=url;
+  } else if(tag==='a') el.click=()=>exports.push(el.href);
+  return el;
+ };
+ f.transport=(req,next)=>req.body?.action==='render'
+  ?Promise.resolve(new Response('{"error":"Synthetic request captured without a provider."}',{status:400})):next();
+ return {images,drawn,exports,url,requests:()=>f.uiRequests.filter(r=>r.url==='/api/buzzy/art'&&r.body?.action==='render')};
+}
+
+test('Sketch stops Create rather than silently sending a board with a failed reference removed',async t=>{
+ const f=await fixture(t,imageBoard),p=await f.mount(),capture=referenceCompositeFixture(f);
+ p.el('prompt').value='Keep the pictures in their places';p.el('create').click();
+ assert.equal(capture.images.length,2);
+ capture.images[0].onerror();capture.images[1].onload();await drain();
+ assert.deepEqual(capture.requests(),[]);
+ assert.match(p.el('status').textContent,/a board image could not be loaded.*re-add/i);
+ assert.doesNotMatch(p.el('status').textContent,/synthetic/);
+ assert.equal(p.el('create').disabled,false);
+ assert.deepEqual(f.data().board,imageBoard);
+});
+
+test('Sketch Create sends the displayed image layering even when image loads finish in reverse order',async t=>{
+ const board=plain(imageBoard);board.images[1].x=board.images[0].x;board.images[1].y=board.images[0].y;
+ const f=await fixture(t,board),p=await f.mount(),capture=referenceCompositeFixture(f);
+ p.el('prompt').value='Preserve my foreground reference';p.el('create').click();
+ capture.images[1].onload();capture.images[0].onload();await drain();
+ assert.deepEqual(capture.drawn,board.images.map(im=>({url:im.url,geometry:[im.x,im.y,im.w,im.h]})));
+ assert.deepEqual(capture.requests().map(r=>r.body.refs),[[capture.url()]]);
+ assert.equal(capture.requests()[0].body.jobId,'job_board');
+});
+
+test('Sketch PNG export reports a failed reference rather than downloading a partial board',async t=>{
+ const f=await fixture(t,imageBoard),p=await f.mount(),capture=referenceCompositeFixture(f);
+ p.el('shot').click();
+ capture.images[1].onerror();capture.images[0].onload();await drain();
+ assert.deepEqual(capture.exports,[]);
+ assert.match(p.el('status').textContent,/could not export.*a board image could not be loaded/i);
+});
+
+for(const action of ['create','shot'])test('Sketch '+action+' bounds a never-decoded reference and ignores its late load',async t=>{
+ const f=await fixture(t,imageBoard),p=await f.mount(),capture=referenceCompositeFixture(f);
+ p.el('prompt').value='Keep both references';p.el(action).click();
+ const late=capture.images[1].onload, priorRender=p.el('resultImg').src;
+ capture.images[0].onload();await drain();
+ assert.deepEqual(capture.requests(),[]);assert.deepEqual(capture.exports,[]);
+ if(action==='create')assert.equal(p.el('create').disabled,true);
+ await f.timers(10_000);
+ assert.match(p.el('status').textContent,/board image took too long to load.*try again/i);
+ assert.equal(p.el(action).disabled,false);
+ assert.equal(capture.images[1].onload,null);assert.equal(capture.images[1].onerror,null);
+ late();await drain();
+ assert.deepEqual(capture.requests(),[]);assert.deepEqual(capture.exports,[]);
+ assert.deepEqual(capture.drawn,[]);assert.equal(p.el('resultImg').src,priorRender);
+ p.el(action).click();
+ capture.images[2].onload();capture.images[3].onload();await drain();
+ assert.equal(action==='create'?capture.requests().length:capture.exports.length,1,'the current board can retry');
+ assert.deepEqual(f.data().board,imageBoard);
+});
+
+test('Sketch navigation retires pending Create before a late reference can post or reveal an overlay',async t=>{
+ const f=await fixture(t,imageBoard),p=await f.mount(),capture=referenceCompositeFixture(f);
+ const priorRender=p.el('resultImg').src;
+ p.el('prompt').value='Do not deliver this after leaving';p.el('create').click();
+ assert.equal(capture.images.length,2);
+ const lateCallbacks=capture.images.map(img=>img.onload);
+ assert.equal(await f.h.shell.go('/buzzy/memory'),true);
+ assert.equal(p.el('create').disabled,true,'retired page stays disabled');
+ assert.ok(capture.images.every(img=>img.onload===null&&img.onerror===null));
+ lateCallbacks.forEach(load=>load());await f.timers(10_000);
+ assert.deepEqual(capture.requests(),[]);assert.deepEqual(capture.drawn,[]);
+ assert.equal(p.el('resultImg').src,priorRender);
+ const newPage=await f.mount();
+ assert.equal(newPage.el('create').disabled,false);
+ assert.notEqual(newPage.el('status').textContent,p.el('status').textContent);
+});

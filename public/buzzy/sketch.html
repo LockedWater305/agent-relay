@@ -149,6 +149,8 @@
     var redoStack = [];
     var hydrated = !jobId, loading = false, leaving = false, pageHidden = false;
     var createBusy = false, regionBusy = false, desktopLease = null;
+    var boardCaptureGeneration = 0, pendingBoardCaptures = new Set();
+    var BOARD_IMAGE_LOAD_TIMEOUT_MS = 10000;
     var revision = 0, savedRevision = 0, saveTimer = null, pendingSave = null;
     var toolButtons = Array.prototype.slice.call(document.querySelectorAll("[data-tool]"));
     function ownsPage() { return stage.isConnected && document.getElementById("stage") === stage; }
@@ -240,6 +242,7 @@
       finishStroke();
       finishImageDrag();
       leaving = true;
+      retireBoardCaptures();
       enableControls();
       clearTimeout(saveTimer);
       if (!hydrated || revision === savedRevision && !pendingSave) return Promise.resolve(true);
@@ -256,6 +259,7 @@
         if (!currentPage() || desktopLease && desktopLease !== nonce) throw new Error("Sketch owner changed.");
         finishStroke(); finishImageDrag();
         desktopLease = nonce;
+        retireBoardCaptures();
         clearTimeout(saveTimer); enableControls();
       },
       state: function (nonce) {
@@ -276,6 +280,7 @@
       finishStroke(); finishImageDrag();
       flushSave();
       pageHidden = true;
+      retireBoardCaptures();
     });
     document.addEventListener("visibilitychange", function () { if (document.hidden) flushSave(); });
     window.addEventListener("beforeunload", function (event) {
@@ -670,6 +675,14 @@
     function setStatus(t) { if (ownsPage()) statusEl.textContent = t; }
 
     // ── flatten the board for the model ───────────────────────────────
+    function ownsBoardCapture(generation) { return generation === boardCaptureGeneration && editable(); }
+    function retireBoardCaptures() {
+      boardCaptureGeneration++;
+      if (pendingBoardCaptures.size && statusEl.textContent === "Creating — flattening the board…") {
+        setStatus("Board capture stopped.");
+      }
+      pendingBoardCaptures.forEach(function (cancel) { cancel(); });
+    }
     function flatten() {
       var r = stage.getBoundingClientRect();
       var out = document.createElement("canvas");
@@ -679,16 +692,39 @@
       var c = out.getContext("2d");
       c.fillStyle = "#ffffff";
       c.fillRect(0, 0, out.width, out.height);
-      var pending = images.map(function (im) {
-        return new Promise(function (resolve) {
-          var img = new Image();
-          img.crossOrigin = "anonymous";
-          img.onload = function () { c.drawImage(img, im.x * s, im.y * s, im.w * s, im.h * s); resolve(); };
-          img.onerror = function () { resolve(); };
-          img.src = im.url;
+      var decoders = [], timer, cancel;
+      var ready = new Promise(function (resolve, reject) {
+        cancel = function () { reject(new Error("Board capture stopped.")); };
+        pendingBoardCaptures.add(cancel);
+        if (images.length) timer = setTimeout(function () {
+          reject(new Error("A board image took too long to load. Re-add it or remove it, then try again."));
+        }, BOARD_IMAGE_LOAD_TIMEOUT_MS);
+        var pending = images.map(function (im) {
+          // Capture the displayed image placement now, not when decoding finishes.
+          var x = im.x * s, y = im.y * s, w = im.w * s, h = im.h * s;
+          return new Promise(function (loaded, failed) {
+            var img = new Image();
+            decoders.push(img);
+            img.crossOrigin = "anonymous";
+            img.onload = function () { loaded({ img: img, x: x, y: y, w: w, h: h }); };
+            img.onerror = function () {
+              failed(new Error("A board image could not be loaded. Re-add it or remove it, then try again."));
+            };
+            img.src = im.url;
+          });
         });
+        Promise.all(pending).then(resolve, reject);
       });
-      return Promise.all(pending).then(function () {
+      return ready.finally(function () {
+        clearTimeout(timer);
+        pendingBoardCaptures.delete(cancel);
+        decoders.forEach(function (img) { img.onload = img.onerror = null; });
+      }).then(function (layers) {
+        // Promise.all retains board order: a slow background cannot cover a
+        // foreground reference, and a failed load never becomes a blank layer.
+        layers.forEach(function (layer) {
+          c.drawImage(layer.img, layer.x, layer.y, layer.w, layer.h);
+        });
         c.setTransform(s, 0, 0, s, 0, 0);
         strokes.forEach(function (st) {
           c.strokeStyle = st.color || color; c.fillStyle = st.color || color;
@@ -794,9 +830,14 @@
     });
 
     $("shot").addEventListener("click", function () {
+      if (!editable()) return;
+      var generation = boardCaptureGeneration;
       flatten().then(function (url) {
+        if (!ownsBoardCapture(generation)) return;
         var a = document.createElement("a");
         a.href = url; a.download = "sketch-" + Date.now() + ".png"; a.click();
+      }).catch(function (e) {
+        if (ownsBoardCapture(generation)) setStatus("Could not export: " + e.message);
       });
     });
 
@@ -805,15 +846,18 @@
       var prompt = (promptEl.value || "").trim();
       if (!prompt) { setStatus("Describe what to create first."); promptEl.focus(); return; }
       var btn = $("create");
+      var generation = boardCaptureGeneration;
       createBusy = true;
       btn.disabled = true;
       var iterate = $("iterate").checked && !!lastRenderUrl;
       setStatus(iterate ? "Creating — using the last render as the reference…" : "Creating — flattening the board…");
       (iterate ? toDataUrl(lastRenderUrl) : flatten()).then(function (composite) {
+        if (!ownsBoardCapture(generation)) return null;
         setStatus("Creating — the model is working…");
         // Create is the other moment a board becomes a project: without an id the
         // render lands as an asset no job claims.
         return ensureJob().then(function (id) {
+          if (!ownsBoardCapture(generation)) return null;
           var body = {
             action: "render",
             prompt: prompt + (iterate
@@ -830,6 +874,7 @@
       }).then(function (res) {
         createBusy = false;
         enableControls();
+        if (!res || !ownsBoardCapture(generation)) return;
         if (!res.ok) {
           setStatus(res.status === 402 ? "Art is part of the paid plans — " + (res.d.error || "") : (res.d.error || "Could not create."));
           return;
@@ -845,7 +890,7 @@
       }).catch(function (e) {
         createBusy = false;
         enableControls();
-        setStatus("Failed: " + e.message);
+        if (ownsBoardCapture(generation)) setStatus("Failed: " + e.message);
       });
     });
 
