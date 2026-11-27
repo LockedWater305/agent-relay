@@ -636,36 +636,32 @@ export default defineEventHandler(async (event) => {
       : null;
     const pageUrl = pathOnly(raw?.page_url ?? (clean.diag?.page as any)?.url ?? null);
     const route = (typeof raw?.route === "string" ? raw.route.trim().slice(0, 40) : null) || null;
-    const ua = (getHeader(event, "user-agent") || "").slice(0, 400) || null;
+    // Browser information belongs only to the opt-in, sanitized diagnostic.
+    // Leave the legacy nullable UA field untouched, and omit it on new writes.
 
-    let ref = "";
-    let id = "";
-    let receivedAt = new Date().toISOString();
+    // A receipt is evidence of a persisted report. Only the ref conflict is
+    // retryable; do not hide unrelated database errors.
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      ref = makeRef();
-      id = newFeedbackId();
-      try {
-        const inserted = (await sql`
-          INSERT INTO buzzy_feedback
-            (id, ref, user_id, body, page_url, route, app_sha, diag, diag_redactions, ip_hash, ua, screenshot)
-          VALUES (${id}, ${ref}, ${userId}, ${body}, ${pageUrl}, ${route}, ${appSha()},
-                  ${diag ? JSON.stringify(diag) : null}::jsonb, ${clean.redactions}, ${hashed}, ${ua}, ${shot.value})
-          RETURNING ref, created_at
-        `) as Array<{ ref: string; created_at: string }>;
-        if (inserted[0]) {
-          ref = inserted[0].ref;
-          receivedAt = new Date(inserted[0].created_at).toISOString();
-        }
-        attempt = 99;
-      } catch (e) {
-        // A ref collision is the only recoverable case; anything else is a real
-        // failure and must not be retried into five copies of the same report.
-        const msg = String((e as Error)?.message || e);
-        if (!/duplicate key|unique/i.test(msg)) throw e;
-      }
+      const ref = makeRef();
+      const id = newFeedbackId();
+      const [saved] = (await sql`
+        INSERT INTO buzzy_feedback
+          (id, ref, user_id, body, page_url, route, app_sha, diag, diag_redactions, ip_hash, screenshot)
+        VALUES (${id}, ${ref}, ${userId}, ${body}, ${pageUrl}, ${route}, ${appSha()},
+                ${diag ? JSON.stringify(diag) : null}::jsonb, ${clean.redactions}, ${hashed}, ${shot.value})
+        ON CONFLICT (ref) DO NOTHING
+        RETURNING ref, created_at
+      `) as Array<{ ref: string; created_at: string }>;
+      if (!saved) continue;
+      setResponseStatus(event, 201);
+      return { ok: true, ref: saved.ref, received_at: new Date(saved.created_at).toISOString() };
     }
-    setResponseStatus(event, 201);
-    return { ok: true, ref, received_at: receivedAt };
+    setResponseStatus(event, 503);
+    return {
+      ok: false,
+      error: "Could not save your feedback. Please try again in a moment.",
+      code: "feedback_receipt_unavailable",
+    };
   }
 
   // ── CR-6 — POST /api/buzzy/feedback/transcribe, anonymous ─────────────
@@ -1232,7 +1228,7 @@ export default defineEventHandler(async (event) => {
           // A model with no texture is not finished: paint it again from the same picture or
           // words, once (testers: "kinda disappointing and textureless").
           const look = glbSummary(bytes);
-          const bareModel = look.ok && look.texturedMaterials === 0 && look.images === 0;
+          const bareModel = look.ok && look.texturedMaterials === 0;
           let warning = "";
           if (bareModel) {
             if (job.kind !== "rtx") {

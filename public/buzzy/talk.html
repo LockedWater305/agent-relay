@@ -3600,6 +3600,23 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
+    function submitLocalFile(file, showReadError) {
+      // A file belongs to the conversation that took the click or drop, not
+      // whichever one is open when the asynchronous FileReader finishes.
+      var state = chatState, epoch = chatEpoch, company = activeCompanyId() || null;
+      var job = chatState.jobId || null, session = chatState.sessionId || null;
+      function readScopeIsCurrent() {
+        return chatState === state && chatEpoch === epoch && (activeCompanyId() || null) === company &&
+          (chatState.jobId || null) === job && (chatState.sessionId || null) === session;
+      }
+      return readDroppedFile(file).then(function (payload) {
+        if (!readScopeIsCurrent()) return;
+        return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload);
+      }).catch(function (err) {
+        if (readScopeIsCurrent()) showReadError(err);
+      });
+    }
+
     function submitPaper(payload) {
       var note = document.getElementById("paperNote");
       var co = activeCompanyId();
@@ -3608,20 +3625,37 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         return Promise.resolve();
       }
       if (paperBusy) return Promise.resolve();
+      var startState = chatState, startEpoch = chatEpoch;
+      var startJob = chatState.jobId || null, startSession = chatState.sessionId || null;
+      var paperSession = startSession;
+      function scopeIsCurrent() {
+        return chatState === startState && chatEpoch === startEpoch &&
+          activeCompanyId() === co && (chatState.jobId || null) === startJob;
+      }
+      function ownsPaperResponse() {
+        return scopeIsCurrent() && (chatState.sessionId || null) === paperSession;
+      }
       paperBusy = true;
       if (note) note.textContent = "Reading…";
       var userLine = payload.filename ? "Read this — " + payload.filename : "Read this.";
       chatState.messages.push({ role: "user", content: userLine });
       renderChatMessages();
-      return ensureChatSession().then(function () {
+      return ensureChatSession(startSession ? null : function () {
+        return scopeIsCurrent() && !chatState.sessionId;
+      }).then(function (readySession) {
+        var ready = readySession || null;
+        // The old input never follows a newly selected company, job or session.
+        if (!scopeIsCurrent() || (chatState.sessionId || null) !== ready ||
+            (startSession && ready !== startSession)) return null;
+        paperSession = ready;
         return fetch("/api/buzzy/papers", {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             companyId: co,
-            jobId: chatState.jobId || undefined,
-            sessionId: chatState.sessionId || undefined,
+            jobId: startJob || undefined,
+            sessionId: paperSession || undefined,
             filename: payload.filename || "",
             text: payload.text || "",
             fileKind: payload.fileKind || "paste",
@@ -3629,9 +3663,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           }),
         });
       }).then(function (r) {
+        if (!r || !ownsPaperResponse()) return null;
         if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
         return r.json().then(function (d) { return { ok: r.ok, d: d }; });
       }).then(function (res) {
+        if (!res || !ownsPaperResponse()) return;
         if (!res.ok || !res.d.paper) {
           if (note) note.textContent = (res.d && res.d.error) || "Couldn't read that.";
           return;
@@ -3652,8 +3688,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (file) file.value = "";
         if (note) note.textContent = "These lines are proposed. Nothing is confirmed until you accept one.";
       }).catch(function (e) {
-        if (e && e.message === "signed_out") return;
-        if (note) note.textContent = (e && e.message) || "Couldn't read that.";
+        if (!ownsPaperResponse() || (e && e.message === "signed_out")) return;
+        if (note) note.textContent = e?.message === "fresh_session_timeout"
+          ? "Starting this conversation took too long. No paper was submitted. Try again."
+          : (e && e.message) || "Couldn't read that.";
       }).finally(function () { paperBusy = false; });
     }
 
@@ -7388,22 +7426,40 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
-    function ensureChatSession() {
-      if (chatState.sessionId) return Promise.resolve(chatState.sessionId);
+    var latestFreshChatSend = null;
+    function ensureChatSession(ownsFreshSend) {
+      if (chatState.sessionId) return Promise.resolve(ownsFreshSend ? null : chatState.sessionId);
       var coId = activeCompanyId();
       // `fresh`: a new conversation, never the last one the server touched in the past
       // 12 hours. The page only lands here without a conversation on a fresh visit,
       // after New conversation, or after a company switch — each one a new start.
-      return fetch(SESSIONS_BASE, {
+      var controller = new AbortController(), timer, expired = false;
+      // Bound both headers and JSON. A renderer transport may settle after
+      // abort; only the bounded winner can adopt a session or redirect.
+      var deadline = new Promise(function (_, reject) {
+        timer = setTimeout(function () {
+          expired = true;
+          reject(new Error("fresh_session_timeout"));
+          controller.abort();
+        }, 15000);
+      });
+      var reply = fetch(SESSIONS_BASE, {
         method: "POST",
         credentials: "same-origin",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ companyId: coId || undefined, fresh: true }),
       }).then(function (r) {
-        if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
-        return r.ok ? r.json() : null;
-      }).then(function (data) {
-        var s = data && data.session;
+        if (expired || (ownsFreshSend && !ownsFreshSend())) return null;
+        if (r.status === 401) return { signedOut: true };
+        return r.ok ? r.json().then(function (data) { return { data: data }; }) : null;
+      });
+      return Promise.race([reply, deadline]).then(function (result) {
+        if (expired || (ownsFreshSend && !ownsFreshSend())) return null;
+        if (result?.signedOut) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
+        var s = result?.data?.session;
+        if (ownsFreshSend && (!ownsFreshSend() || typeof s?.id !== "string" ||
+            !/^sess_[a-f0-9]{20}$/.test(s.id) || (s.companyId ?? null) !== (coId ?? null))) return null;
         if (s && s.id) {
           chatState.sessionId = s.id;
           try { localStorage.setItem("bz_session_id", s.id); } catch (_) {}
@@ -7411,9 +7467,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         }
         return chatState.sessionId;
       }).catch(function (e) {
-        if (e && e.message === "signed_out") throw e;
-        return chatState.sessionId;
-      });
+        if (e && (e.message === "signed_out" || e.message === "fresh_session_timeout")) throw e;
+        return ownsFreshSend ? null : chatState.sessionId;
+      }).finally(function () { clearTimeout(timer); });
     }
 
     // The composer's "Do it" control. A pressed button is a clearer instruction
@@ -7443,9 +7499,35 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         submitPaper({ filename: "", fileKind: "paste", text: pastedPaper });
         return;
       }
-      try { await ensureChatSession(); } catch (e) {
+      const startState = chatState;
+      const startEpoch = chatEpoch;
+      const startCompany = activeCompanyId() ?? null;
+      const startSession = chatState.sessionId || null;
+      const freshSend = startSession ? null : {};
+      if (freshSend) latestFreshChatSend = freshSend;
+      const scopeIsCurrent = () => chatState === startState && chatEpoch === startEpoch &&
+        (activeCompanyId() ?? null) === startCompany;
+      const ownsFreshSend = freshSend ? () => scopeIsCurrent() &&
+        latestFreshChatSend === freshSend && !chatState.sessionId : null;
+      let readySession;
+      try { readySession = await ensureChatSession(ownsFreshSend); } catch (e) {
         if (e && e.message === "signed_out") return;
       }
+      // An older response may not replace the selected conversation, reroute
+      // its pending input, or clear a newer conversation's text.
+      if (!scopeIsCurrent() || (freshSend && latestFreshChatSend !== freshSend) ||
+          (startSession && chatState.sessionId !== startSession)) return;
+      if (!readySession) {
+        if (!chatState.sessionId) {
+          const error = document.getElementById("chatError");
+          if (error) {
+            error.textContent = "BeeZilla couldn’t start this conversation. Your message is still here. Try Send again.";
+            error.classList.remove("hidden");
+          }
+        }
+        return;
+      }
+      if (chatState.sessionId !== readySession || (startSession && readySession !== startSession)) return;
       // The conversation this turn belongs to. Testers, 2026-11-24: "When I click new
       // conversation it's not actually giving me a new conversation … I still have all
       // these nodes here." A turn still answering when New conversation (or History, or
@@ -8056,8 +8138,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var file = fileInput && fileInput.files && fileInput.files[0];
       var pasted = (document.getElementById("paperPaste").value || "").trim();
       if (file) {
-        readDroppedFile(file).then(function (payload) { return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload); }).catch(function (e) {
-          if (note) note.textContent = e.message || "Couldn't read that file.";
+        submitLocalFile(file, function (e) {
+          if (note) note.textContent = (e && e.message) || "Couldn't read that file.";
         });
         return;
       }
@@ -8092,9 +8174,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (!files || !files.length) return;
         e.preventDefault();
         Array.prototype.slice.call(files, 0, 5).forEach(function (file) {
-          readDroppedFile(file).then(function (payload) {
-            return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload);
-          }).catch(function (err) {
+          submitLocalFile(file, function (err) {
             chatState.messages.push({ role: "assistant", content: (err && err.message) || "Couldn't read that file." });
             renderChatMessages();
           });
@@ -8169,8 +8249,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
         var note = document.getElementById("paperNote");
         if (!file) return;
-        readDroppedFile(file).then(function (payload) { return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload); }).catch(function (err) {
-          if (note) note.textContent = err.message || "Couldn't read that file.";
+        submitLocalFile(file, function (err) {
+          if (note) note.textContent = (err && err.message) || "Couldn't read that file.";
         });
       });
     })();

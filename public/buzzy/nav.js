@@ -974,6 +974,10 @@
     var mounted = false;
     var sending = false;
     var recorder = null;
+    var voiceGeneration = 0;
+    var voiceAttempt = 0;
+    var pendingVoicePermission = null;
+    var voiceTranscripts = [];
 
     function signedIn() {
       try {
@@ -1014,8 +1018,10 @@
 
     var text, diagBox, diagSee, mic, hint, send, status;
     var shot = null;
+    var shotGeneration = 0;
+    var shotPending = false;
     function refs() {
-      if (text) return;
+      if (text && body.contains(text)) return;
       text = body.querySelector("#bzFbText");
       diagBox = body.querySelector("#bzFbDiagBox");
       diagSee = body.querySelector("#bzFbSee");
@@ -1069,18 +1075,82 @@
       return out;
     }
 
+    function ownsVoiceDraft(generation) {
+      return generation === voiceGeneration && panel.isConnected &&
+        panel.classList.contains("open") && text && body.contains(text);
+    }
+
+    function stopVoiceTracks(stream) {
+      if (stream) stream.getTracks().forEach(function (track) {
+        try { track.stop(); } catch (e) { /* already stopped */ }
+      });
+    }
+
+    function releaseVoice(r) {
+      if (!r) return;
+      if (r.proc) {
+        r.proc.onaudioprocess = null;
+        try { r.proc.disconnect(); } catch (e) { /* already disconnected */ }
+      }
+      if (r.src) { try { r.src.disconnect(); } catch (e) { /* already disconnected */ } }
+      stopVoiceTracks(r.stream);
+      if (r.ctx && r.ctx.state !== "closed") {
+        try { r.ctx.close().catch(function () {}); } catch (e) { /* already closed */ }
+      }
+    }
+
+    function resetVoiceButton() {
+      mic.setAttribute("aria-pressed", "false");
+      mic.innerHTML = "&#127908; Speak";
+    }
+
+    function invalidateVoiceDraft() {
+      voiceGeneration += 1;
+      pendingVoicePermission = null;
+      voiceTranscripts.forEach(function (job) {
+        clearTimeout(job.deadline);
+        if (!job.result) job.controller.abort();
+      });
+      voiceTranscripts = [];
+      var r = recorder;
+      recorder = null;
+      releaseVoice(r);
+      if (mic && body.contains(mic)) {
+        resetVoiceButton();
+        hint.textContent = "Up to 60 seconds.";
+      }
+    }
+
+    function finishVoiceTranscript(job, words, message) {
+      if (job.result) return;
+      clearTimeout(job.deadline);
+      if (!ownsVoiceDraft(job.generation)) {
+        if (job.generation === voiceGeneration) invalidateVoiceDraft();
+        return;
+      }
+      job.result = { words: words, message: message };
+      var ready;
+      // Preserve capture order while allowing another Speak during ASR.
+      while (voiceTranscripts.length && voiceTranscripts[0].result) {
+        ready = voiceTranscripts.shift();
+        if (ready.result.words) {
+          text.value = (text.value ? text.value.replace(/\s*$/, " ") : "") + ready.result.words;
+        }
+      }
+      if (ready && ready.attempt === voiceAttempt) hint.textContent = ready.result.message;
+    }
+
     function stopRecording() {
       if (!recorder) return;
       var r = recorder;
+      var generation = voiceGeneration;
       recorder = null;
-      try { r.stop(); } catch (e) { /* already stopped */ }
-      mic.setAttribute("aria-pressed", "false");
-      mic.innerHTML = "&#127908; Speak";
+      releaseVoice(r);
+      if (!ownsVoiceDraft(generation)) return;
+      resetVoiceButton();
       hint.textContent = "Transcribing\u2026";
       var chunks = r.chunks;
       var rate = r.rate;
-      if (r.ctx && r.ctx.state !== "closed") { try { r.ctx.close(); } catch (e) { /* nothing to do */ } }
-      if (r.stream) { r.stream.getTracks().forEach(function (t) { t.stop(); }); }
       var total = 0;
       chunks.forEach(function (c) { total += c.length; });
       if (total < rate * 0.4) {
@@ -1091,50 +1161,82 @@
       var at = 0;
       chunks.forEach(function (c) { merged.set(c, at); at += c.length; });
       var wav = encodeWav(downsample(merged, rate, 16000), 16000);
+      var job = {
+        generation: generation, attempt: r.attempt, result: null,
+        controller: new AbortController(),
+      };
+      voiceTranscripts.push(job);
+      // A lost older reply must not hold a later completed note indefinitely.
+      job.deadline = setTimeout(function () {
+        finishVoiceTranscript(job, "", "Transcription timed out \u2014 type it instead.");
+        job.controller.abort();
+      }, 60000);
       fetch("/api/buzzy/feedback/transcribe", {
         method: "POST",
         headers: { "content-type": "audio/wav" },
         body: wav,
+        signal: job.controller.signal,
       }).then(function (res) { return res.json().then(function (j) { return { res: res, j: j }; }); })
         .then(function (out) {
-          if (out.res.ok && out.j && out.j.text) {
-            var t = out.j.text.trim();
-            text.value = (text.value ? text.value.replace(/\s*$/, " ") : "") + t;
-            hint.textContent = "Said what you wanted? You can edit it.";
+          if (out.res.ok && out.j && typeof out.j.text === "string" && out.j.text.trim()) {
+            finishVoiceTranscript(job, out.j.text.trim(), "Said what you wanted? You can edit it.");
           } else {
-            hint.textContent = (out.j && out.j.error) || "Could not transcribe \u2014 type it instead.";
+            finishVoiceTranscript(job, "", (out.j && out.j.error) || "Could not transcribe \u2014 type it instead.");
           }
         })
-        .catch(function () { hint.textContent = "Could not transcribe \u2014 type it instead."; });
+        .catch(function () {
+          finishVoiceTranscript(job, "", "Could not transcribe \u2014 type it instead.");
+        });
     }
 
     function startRecording() {
-      if (recorder) return;
+      if (recorder || pendingVoicePermission !== null) return;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         hint.textContent = "This browser will not record \u2014 type your feedback.";
         return;
       }
+      var generation = voiceGeneration;
+      var attempt = ++voiceAttempt;
+      pendingVoicePermission = generation;
       navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
-        var AC = window.AudioContext || window.webkitAudioContext;
-        var ctx = new AC();
-        var src = ctx.createMediaStreamSource(stream);
-        var proc = ctx.createScriptProcessor(4096, 1, 1);
-        var chunks = [];
-        var started = Date.now();
-        proc.onaudioprocess = function (ev) {
-          chunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
-          if (Date.now() - started > 60000) stopRecording();
-        };
-        src.connect(proc);
-        proc.connect(ctx.destination);
-        recorder = { ctx: ctx, stream: stream, proc: proc, chunks: chunks, rate: ctx.sampleRate, stop: function () {
-          try { proc.disconnect(); } catch (e) { /* nothing to do */ }
-          try { src.disconnect(); } catch (e) { /* nothing to do */ }
-        } };
+        if (pendingVoicePermission !== generation) {
+          stopVoiceTracks(stream);
+          return;
+        }
+        pendingVoicePermission = null;
+        if (!ownsVoiceDraft(generation)) {
+          stopVoiceTracks(stream);
+          return;
+        }
+        var r = { attempt: attempt, stream: stream, ctx: null, src: null, proc: null, chunks: [] };
+        try {
+          var AC = window.AudioContext || window.webkitAudioContext;
+          r.ctx = new AC();
+          r.rate = r.ctx.sampleRate;
+          r.src = r.ctx.createMediaStreamSource(stream);
+          r.proc = r.ctx.createScriptProcessor(4096, 1, 1);
+          var started = Date.now();
+          r.proc.onaudioprocess = function (ev) {
+            if (recorder !== r) return;
+            if (!ownsVoiceDraft(generation)) { invalidateVoiceDraft(); return; }
+            r.chunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+            if (Date.now() - started > 60000) stopRecording();
+          };
+          r.src.connect(r.proc);
+          r.proc.connect(r.ctx.destination);
+        } catch (e) {
+          releaseVoice(r);
+          hint.textContent = "Could not start the microphone \u2014 type your feedback instead.";
+          return;
+        }
+        recorder = r;
         mic.setAttribute("aria-pressed", "true");
         mic.innerHTML = "&#9632; Stop";
         hint.textContent = "Listening\u2026 up to 60 seconds.";
       }).catch(function () {
+        if (pendingVoicePermission !== generation) return;
+        pendingVoicePermission = null;
+        if (!ownsVoiceDraft(generation)) return;
         hint.textContent = "Microphone blocked \u2014 type your feedback instead.";
       });
     }
@@ -1157,9 +1259,11 @@
       panel.classList.remove("min");
       min.textContent = "\u2013";
       btn.setAttribute("aria-expanded", "true");
-      text.focus();
+      var focus = text || body.querySelector("#bzFbAgain");
+      if (focus) focus.focus();
     }
     function shut() {
+      invalidateVoiceDraft();
       panel.classList.remove("open");
       panel.classList.remove("min");
       btn.setAttribute("aria-expanded", "false");
@@ -1203,6 +1307,8 @@
       } else if (el.id === "bzFbSend") {
         submit();
       } else if (el.id === "bzFbShotDrop") {
+        shotGeneration += 1;
+        shotPending = false;
         shot = null;
         var row = body.querySelector("#bzFbShotRow");
         var input = body.querySelector("#bzFbShot");
@@ -1226,13 +1332,19 @@
       var img = body.querySelector("#bzFbShotImg");
       var file = input.files && input.files[0];
       if (!file) return;
+      var readGeneration = ++shotGeneration;
+      shotPending = false;
       if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
         if (h) h.textContent = "Pick a PNG, JPEG or WebP picture.";
         input.value = "";
         return;
       }
       var reader = new FileReader();
+      shotPending = true;
+      if (h) h.textContent = "Attaching screenshot\u2026";
       reader.onload = function () {
+        if (!body.contains(input) || readGeneration !== shotGeneration) return;
+        shotPending = false;
         var data = String(reader.result || "");
         if (data.length > SHOT_MAX) {
           shot = null;
@@ -1246,19 +1358,54 @@
         if (row) row.hidden = false;
         if (h) h.textContent = "Attached. It is stored with your report.";
       };
+      reader.onerror = reader.onabort = function () {
+        if (!body.contains(input) || readGeneration !== shotGeneration) return;
+        shotPending = false;
+        input.value = "";
+        if (h) h.textContent = "Could not attach the new screenshot.";
+      };
       reader.readAsDataURL(file);
     });
+
+    function confirmedFeedbackRef(out) {
+      var receipt = out.j;
+      // Match the server's persisted INSERT receipt, not merely an HTTP 2xx
+      // or a truthy property from a proxy/stale/malformed response.
+      if (!out.res.ok || out.res.status !== 201 || !receipt || receipt.ok !== true ||
+          typeof receipt.ref !== "string" || receipt.ref.length !== 12 ||
+          !/^BZ-FB-[A-HJ-NP-Z2-9]{6}$/.test(receipt.ref) ||
+          typeof receipt.received_at !== "string") return null;
+      var received = Date.parse(receipt.received_at);
+      return Number.isFinite(received) && new Date(received).toISOString() === receipt.received_at
+        ? receipt.ref : null;
+    }
+    function restoreFeedbackDraft(message) {
+      sending = false;
+      send.disabled = false;
+      send.textContent = "Try again";
+      status.textContent = message;
+    }
+    function unconfirmedFeedback() {
+      restoreFeedbackDraft("We could not confirm that your report arrived. Your draft is still here. Retrying could send it twice.");
+    }
 
     function submit() {
       if (sending) return;
       refs();
-      var words = (text.value || "").trim();
+      if (shotPending) {
+        body.querySelector("#bzFbShotHint").textContent = "Wait for the screenshot to finish attaching.";
+        return;
+      }
+      var submittedText = text.value || "";
+      var submittedShot = shot;
+      var words = submittedText.trim();
       if (!words) {
         status.textContent = "Tell us what happened first.";
         text.focus();
         return;
       }
-      var withDiag = Boolean(body.querySelector("#bzFbDiag") && body.querySelector("#bzFbDiag").checked);
+      var diagCheckbox = body.querySelector("#bzFbDiag");
+      var withDiag = Boolean(diagCheckbox && diagCheckbox.checked);
       var payload = {
         body: words,
         page_url: location.pathname,
@@ -1273,36 +1420,51 @@
       sending = true;
       send.disabled = true;
       status.textContent = "Sending\u2026";
+      // Bound both the request and receipt read, not just time to headers.
+      // A lost receipt is ambiguous: let the person choose, never auto-retry.
+      var controller = new AbortController();
+      var deadline = setTimeout(function () { controller.abort(); }, 45000);
       fetch("/api/buzzy/feedback", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       }).then(function (res) {
         return res.json().then(function (j) { return { res: res, j: j }; });
       }).then(function (out) {
-        sending = false;
-        if (out.res.ok && out.j && out.j.ok) {
+        var ref = confirmedFeedbackRef(out);
+        if (ref !== null) {
+          sending = false;
+          // This receipt is for the immutable POST, not edits made while it was pending.
+          if (text.value !== submittedText || shot !== submittedShot || shotPending ||
+              Boolean(diagCheckbox && diagCheckbox.checked) !== withDiag) {
+            send.disabled = false;
+            send.textContent = "Send current draft";
+            status.textContent = "Your earlier report was saved as " + ref + ". Your current draft has not been sent.";
+            return;
+          }
+          invalidateVoiceDraft();
           body.innerHTML =
             '<div class="bz-fb-done"><p><strong>Thank you \u2014 that reached us.</strong></p>' +
-            '<p>Your reference is <code>' + out.j.ref + "</code>.</p>" +
+            '<p>Your reference is <code id="bzFbRef"></code>.</p>' +
             '<p class="bz-fb-hint">Keep it if you follow up; it is how we find your report.</p>' +
             '<button type="button" class="bz-fb-link" id="bzFbAgain">Send another</button></div>';
+          body.querySelector("#bzFbRef").textContent = ref;
           body.querySelector("#bzFbAgain").addEventListener("click", function () {
             mounted = false;
+            shot = null;
             body.innerHTML = "";
             mount();
             refs();
             text.focus();
           });
+        } else if (!out.res.ok && out.j && out.j.ok === false) {
+          restoreFeedbackDraft(typeof out.j.error === "string" && out.j.error
+            ? out.j.error : "Could not send \u2014 try again in a moment.");
         } else {
-          send.disabled = false;
-          status.textContent = (out.j && out.j.error) || "Could not send \u2014 try again in a moment.";
+          unconfirmedFeedback();
         }
-      }).catch(function () {
-        sending = false;
-        send.disabled = false;
-        status.textContent = "Could not send \u2014 check your connection and try again.";
-      });
+      }).catch(unconfirmedFeedback).finally(function () { clearTimeout(deadline); });
     }
   }
 

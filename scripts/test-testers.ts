@@ -50,7 +50,7 @@ check(/export function isAdminEmail/.test(fb) && /BZ_ADMIN_EMAILS/.test(fb), "ad
 // ── the routes ───────────────────────────────────────────────────────────────
 const nit = read("src/lib/buzzy/chat.nitro.ts");
 check(/const shot = checkScreenshot\(raw\?\.screenshot \?\? null\)/.test(nit), "POST /api/buzzy/feedback validates the picture");
-check(/screenshot\)\n {10}VALUES \(/.test(nit) && /\$\{shot\.value\}/.test(nit), "the picture is stored in the same row as the report");
+check(/INSERT INTO buzzy_feedback\s*\([^)]*\bscreenshot\)\s*VALUES\s*\([^;]*?\$\{shot\.value\}\)/.test(nit), "the picture is stored in the same row as the report");
 check(/\?id=<report> returns that report's screenshot/.test(nit), "GET /api/buzzy/admin/feedback documents ?id=");
 check(/if \(method === "GET" && path === "\/api\/buzzy\/admin\/feedback"\)/.test(nit), "the admin read exists");
 check(/const one = queryValue\(fullPath, "id"\);\n {4}if \(one\) return \{ ok: true, id: one/.test(nit), "the id is passed through as a string — no Number() to turn it into NaN");
