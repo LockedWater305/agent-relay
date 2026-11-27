@@ -260,6 +260,43 @@ test("Save/Clear transactions are serialized through health, restart and endpoin
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("local owner profile stays available to the runtime but is not copied into startup diagnostics", async () => {
+  const { existsSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "desktop-profile-log-"));
+  const lines = [];
+  const env = {};
+  const source = readFileSync(new URL("../desktop/main.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("function identityFile()");
+  const end = source.indexOf("\n// Only values this process injected", start);
+  assert.ok(start >= 0 && end > start);
+  const { saveIdentity, applyIdentityToEnv } = runInNewContext(
+    source.slice(start, end) + "\n({ saveIdentity, applyIdentityToEnv })",
+    {
+      supervisor: { dataDir: dir }, process: { env },
+      existsSync, mkdirSync, writeFileSync, readFileSync, join,
+      console: { log: (...args) => lines.push(args.join(" ")), warn: (...args) => lines.push(args.join(" ")) },
+    },
+  );
+  const profile = { name: "Fixture Local Owner", email: "fixture-owner@example.invalid" };
+  try {
+    saveIdentity(profile);
+    assert.equal(env.BZ_LOCAL_OWNER_NAME, profile.name);
+    assert.equal(env.BZ_LOCAL_OWNER_EMAIL, profile.email);
+    const identityPath = join(dir, "identity.json");
+    const saved = JSON.parse(readFileSync(identityPath, "utf8"));
+    assert.equal(saved.name, profile.name);
+    assert.equal(saved.email, profile.email);
+    assert.ok(!lines.join("\n").includes(profile.name));
+    assert.ok(!lines.join("\n").includes(profile.email));
+    assert.match(lines.join("\n"), /local owner profile loaded/);
+    assert.match(lines.join("\n"), /local owner profile saved/);
+    writeFileSync(identityPath, "fixture-profile-content");
+    applyIdentityToEnv();
+    assert.match(lines.at(-1), /could not read identity.json/);
+    assert.ok(!lines.at(-1).includes("fixture-profile-content"));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("main wiring retains guards, isolated cloud session and extensionless settings route", () => {
   const src = readFileSync(new URL("../desktop/main.mjs", import.meta.url), "utf8");
   assert.match(src, /isTrustedSender\(event,/);

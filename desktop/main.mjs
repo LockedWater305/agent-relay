@@ -260,9 +260,11 @@ function applyIdentityToEnv() {
     const id = JSON.parse(readFileSync(identityFile(), "utf8"));
     if (id?.name) process.env.BZ_LOCAL_OWNER_NAME = String(id.name);
     if (id?.email) process.env.BZ_LOCAL_OWNER_EMAIL = String(id.email);
-    console.log(`[desktop] identity: ${id.name || "(no name)"} <${id.email || "(no email)"}>`);
+    console.log("[desktop] local owner profile loaded");
   } catch (err) {
-    console.warn("[desktop] could not read identity.json:", err instanceof Error ? err.message : err);
+    // JSON parser errors can quote the file contents. Log only the failure type.
+    const reason = err instanceof SyntaxError ? " (invalid JSON)" : "";
+    console.warn(`[desktop] could not read identity.json${reason}`);
   }
 }
 
@@ -272,9 +274,9 @@ function saveIdentity(account) {
     mkdirSync(supervisor.dataDir, { recursive: true });
     writeFileSync(identityFile(), JSON.stringify({ ...account, savedAt: new Date().toISOString() }, null, 2) + "\n");
     applyIdentityToEnv();
-    console.log(`[desktop] identity saved: ${account.name || "(no name)"} <${account.email}>`);
-  } catch (err) {
-    console.warn("[desktop] could not save identity.json:", err instanceof Error ? err.message : err);
+    console.log("[desktop] local owner profile saved");
+  } catch {
+    console.warn("[desktop] could not save identity.json; check that the local data directory is writable");
   }
 }
 
@@ -363,32 +365,35 @@ async function applyStoredInferenceToEnv() {
   }
 }
 
+let injectedMusicEnv = null;
+
 /**
- * ElevenLabs key → BZ_ELEVEN_KEY before the runtime is spawned.
- *
- * The local runtime reads credentials from the environment at module load, and a
- * desktop install has no environment of its own — so this is the only path by
- * which the Music button can ever be configured (it answered `not_configured` on
- * every install until this existed). Same rule as inference: a store we cannot
- * read must not take the app down, it must refuse by name.
+ * Resolve the same env-first music configuration as the CLI before spawning the
+ * local runtime. A Save/Clear may withdraw a prior store injection, but must
+ * never overwrite or erase a key the operator supplied in their environment.
  */
 async function applyStoredMusicToEnv() {
+  if (injectedMusicEnv && process.env.BZ_ELEVEN_KEY === injectedMusicEnv.value) {
+    if (injectedMusicEnv.previous === undefined) delete process.env.BZ_ELEVEN_KEY;
+    else process.env.BZ_ELEVEN_KEY = injectedMusicEnv.previous;
+  }
+  injectedMusicEnv = null;
   try {
-    // process.env holds the last applied key, not an independent source of
-    // truth. Resolve from the store so Save/Remove also work after first launch.
-    const { loadMusicKey } = await runtimeLib("scripts/lib/music-keys.mjs");
-    const found = loadMusicKey(supervisor.dataDir, {
+    const { resolveMusicKey } = await runtimeLib("scripts/lib/music-keys.mjs");
+    const previous = process.env.BZ_ELEVEN_KEY;
+    const found = resolveMusicKey(supervisor.dataDir, {
       decrypt: (buf) => safeStorage.decryptString(Buffer.from(buf)),
     });
-    if (found?.key) {
+    if (found?.source === "env") {
+      console.log("[desktop] music: env");
+    } else if (found?.source === "store") {
       process.env.BZ_ELEVEN_KEY = found.key;
+      injectedMusicEnv = { previous, value: process.env.BZ_ELEVEN_KEY };
       console.log(`[desktop] music: ${found.provider} (stored${found.encrypted ? ", encrypted" : ""})`);
-      return;
     }
   } catch (err) {
     console.warn("[desktop] could not read the stored music key:", err instanceof Error ? err.message : err);
   }
-  delete process.env.BZ_ELEVEN_KEY;
 }
 
 /**

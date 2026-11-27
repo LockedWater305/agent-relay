@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createContext, runInContext, runInNewContext } from "node:vm";
+import { createContext, runInContext } from "node:vm";
 import test from "node:test";
 import { saveInference, clearInference, storePath } from "./lib/inference.mjs";
 import { saveMusicKey, clearMusicKey, musicStorePath } from "./lib/music-keys.mjs";
@@ -18,14 +18,6 @@ const envKeys = [
   "BZ_CHAT_KEY", "BZ_CHAT_BASE_URL", "BZ_CHAT_MODEL", "BZ_MANAGED_EXPIRED",
   "BZ_MUSIC_VIA_GATEWAY", "BZ_ELEVEN_KEY",
 ];
-
-function functionSource(name) {
-  const start = source.indexOf(`async function ${name}() {`);
-  assert.notEqual(start, -1, `main process still defines ${name}`);
-  const end = source.indexOf("\n}", start);
-  assert.notEqual(end, -1, `main process function ${name} is complete`);
-  return `(${source.slice(start, end + 2)})`;
-}
 
 function setup(t) {
   const dir = mkdtempSync(join(tmpdir(), "bz-credential-env-"));
@@ -64,16 +56,16 @@ function setup(t) {
     rmSync(dir, { recursive: true, force: true });
     assert.equal(logged.some((line) => /synthetic-key|sk_synthetic/.test(line)), false, "credentials must not be logged");
   });
-  const inferenceContext = createContext(context);
-  const inferenceStart = source.indexOf("const injectedInferenceEnv =");
-  const inferenceEnd = source.indexOf("\n}", source.indexOf("async function applyStoredInferenceToEnv()")) + 2;
-  assert.ok(inferenceStart >= 0 && inferenceEnd > inferenceStart);
-  runInContext(source.slice(inferenceStart, inferenceEnd), inferenceContext);
+  const credentialContext = createContext(context);
+  const credentialStart = source.indexOf("const injectedInferenceEnv =");
+  const credentialEnd = source.indexOf("\n}", source.indexOf("async function applyStoredMusicToEnv()")) + 2;
+  assert.ok(credentialStart >= 0 && credentialEnd > credentialStart);
+  runInContext(source.slice(credentialStart, credentialEnd), credentialContext);
   return {
     dir, cipher,
     failDecryption: () => { decryptionFails = true; },
-    applyInference: runInContext("applyStoredInferenceToEnv", inferenceContext),
-    applyMusic: runInNewContext(functionSource("applyStoredMusicToEnv"), context),
+    applyInference: runInContext("applyStoredInferenceToEnv", credentialContext),
+    applyMusic: runInContext("applyStoredMusicToEnv", credentialContext),
   };
 }
 
@@ -183,4 +175,44 @@ test("unreadable or undecryptable music stores do not revive the old environment
     await fixture.applyMusic();
     assert.equal(process.env.BZ_ELEVEN_KEY, undefined);
   }
+});
+
+test("launch-time music overrides win even when Settings saves, removes or cannot read a key", async (t) => {
+  const fixture = setup(t);
+  // Equal values still have different ownership: Settings must not take over
+  // the exported key or erase it when the saved credentials are cleared.
+  const exported = "sk_synthetic_exported_music";
+  process.env.BZ_ELEVEN_KEY = exported;
+  for (const storeChange of [
+    () => saveMusicKey(fixture.dir, { key: exported }, fixture.cipher),
+    () => saveMusicKey(fixture.dir, { key: "sk_synthetic_other_music" }, fixture.cipher),
+    () => clearMusicKey(fixture.dir),
+    () => writeFileSync(musicStorePath(fixture.dir), "not JSON"),
+  ]) {
+    storeChange();
+    await fixture.applyMusic();
+    assert.equal(process.env.BZ_ELEVEN_KEY, exported);
+  }
+});
+
+test("removing injected music configuration restores the original blank launch setting", async (t) => {
+  const fixture = setup(t);
+  process.env.BZ_ELEVEN_KEY = " ";
+  saveMusicKey(fixture.dir, { key: "sk_synthetic_from_store" }, fixture.cipher);
+  await fixture.applyMusic();
+  assert.equal(process.env.BZ_ELEVEN_KEY, "sk_synthetic_from_store");
+  clearMusicKey(fixture.dir);
+  await fixture.applyMusic();
+  assert.equal(process.env.BZ_ELEVEN_KEY, " ");
+});
+
+test("a later music override is not cleared as if it were injected by the desktop", async (t) => {
+  const fixture = setup(t);
+  saveMusicKey(fixture.dir, { key: "sk_synthetic_injected_music" }, fixture.cipher);
+  await fixture.applyMusic();
+  assert.equal(process.env.BZ_ELEVEN_KEY, "sk_synthetic_injected_music");
+  process.env.BZ_ELEVEN_KEY = "sk_synthetic_updated_override";
+  clearMusicKey(fixture.dir);
+  await fixture.applyMusic();
+  assert.equal(process.env.BZ_ELEVEN_KEY, "sk_synthetic_updated_override");
 });
