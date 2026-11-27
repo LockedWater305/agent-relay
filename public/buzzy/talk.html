@@ -7388,8 +7388,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
-    function ensureChatSession() {
-      if (chatState.sessionId) return Promise.resolve(chatState.sessionId);
+    var latestFreshChatSend = null;
+    function ensureChatSession(ownsFreshSend) {
+      if (chatState.sessionId) return Promise.resolve(ownsFreshSend ? null : chatState.sessionId);
       var coId = activeCompanyId();
       // `fresh`: a new conversation, never the last one the server touched in the past
       // 12 hours. The page only lands here without a conversation on a fresh visit,
@@ -7400,10 +7401,13 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ companyId: coId || undefined, fresh: true }),
       }).then(function (r) {
+        if (ownsFreshSend && !ownsFreshSend()) return null;
         if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
         return r.ok ? r.json() : null;
       }).then(function (data) {
         var s = data && data.session;
+        if (ownsFreshSend && (!ownsFreshSend() || typeof s?.id !== "string" ||
+            !/^sess_[a-f0-9]{20}$/.test(s.id) || (s.companyId ?? null) !== (coId ?? null))) return null;
         if (s && s.id) {
           chatState.sessionId = s.id;
           try { localStorage.setItem("bz_session_id", s.id); } catch (_) {}
@@ -7412,7 +7416,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         return chatState.sessionId;
       }).catch(function (e) {
         if (e && e.message === "signed_out") throw e;
-        return chatState.sessionId;
+        return ownsFreshSend ? null : chatState.sessionId;
       });
     }
 
@@ -7443,9 +7447,35 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         submitPaper({ filename: "", fileKind: "paste", text: pastedPaper });
         return;
       }
-      try { await ensureChatSession(); } catch (e) {
+      const startState = chatState;
+      const startEpoch = chatEpoch;
+      const startCompany = activeCompanyId() ?? null;
+      const startSession = chatState.sessionId || null;
+      const freshSend = startSession ? null : {};
+      if (freshSend) latestFreshChatSend = freshSend;
+      const scopeIsCurrent = () => chatState === startState && chatEpoch === startEpoch &&
+        (activeCompanyId() ?? null) === startCompany;
+      const ownsFreshSend = freshSend ? () => scopeIsCurrent() &&
+        latestFreshChatSend === freshSend && !chatState.sessionId : null;
+      let readySession;
+      try { readySession = await ensureChatSession(ownsFreshSend); } catch (e) {
         if (e && e.message === "signed_out") return;
       }
+      // An older response may not replace the selected conversation, reroute
+      // its pending input, or clear a newer conversation's text.
+      if (!scopeIsCurrent() || (freshSend && latestFreshChatSend !== freshSend) ||
+          (startSession && chatState.sessionId !== startSession)) return;
+      if (!readySession) {
+        if (!chatState.sessionId) {
+          const error = document.getElementById("chatError");
+          if (error) {
+            error.textContent = "BeeZilla couldn’t start this conversation. Your message is still here. Try Send again.";
+            error.classList.remove("hidden");
+          }
+        }
+        return;
+      }
+      if (chatState.sessionId !== readySession || (startSession && readySession !== startSession)) return;
       // The conversation this turn belongs to. Testers, 2026-11-24: "When I click new
       // conversation it's not actually giving me a new conversation … I still have all
       // these nodes here." A turn still answering when New conversation (or History, or
