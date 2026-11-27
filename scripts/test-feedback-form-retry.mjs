@@ -339,3 +339,33 @@ test("new diagnostic consent while a receipt is pending stays with the unsent dr
   assert.equal(await page.locator("#bzFbDiag").isChecked(),true);
   assert.equal((await calls()).length,1);
 });
+
+test("Feedback keyboard Escape restores launcher focus without discarding a report", async (t) => {
+  const { page, calls } = await form(t, []);
+  const launcher = page.getByRole("button", { name: "Feedback", exact: true });
+  await page.locator("#bzFbText").focus();
+  await page.keyboard.press("Escape");
+  await page.locator("#bzFeedback").waitFor({ state: "hidden" });
+  assert.equal(await launcher.evaluate((el) => document.activeElement === el), true);
+  await page.keyboard.press("Enter");
+  assert.equal(await page.locator("#bzFbText").inputValue(), firstDraft);
+  assert.equal(await page.locator("#bzFbShotImg").getAttribute("src"), imageUrl);
+  assert.equal((await calls()).length, 0);
+});
+
+test("Feedback minimize and restore expose the correct accessible state and keep the draft", async (t) => {
+  const { page, calls } = await form(t, []);
+  const launcher = page.getByRole("button", { name: "Feedback", exact: true });
+  const toggle = page.locator("#bzFeedback .bz-panel-min");
+  const formText = page.locator("#bzFbText");
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  assert.equal(await launcher.getAttribute("aria-expanded"), "false");
+  assert.equal(await toggle.getAttribute("aria-label"), "Restore feedback");
+  await page.keyboard.press("Enter");
+  assert.equal(await launcher.getAttribute("aria-expanded"), "true");
+  assert.equal(await toggle.getAttribute("aria-label"), "Minimize feedback");
+  assert.equal(await formText.evaluate((el) => document.activeElement === el), true);
+  assert.equal(await formText.inputValue(), firstDraft);
+  assert.equal((await calls()).length, 0);
+});

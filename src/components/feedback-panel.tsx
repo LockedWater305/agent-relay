@@ -5,6 +5,7 @@ import { agentApi } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
 type FeedbackRow = Awaited<ReturnType<typeof agentApi.listFeedback>>["feedback"][number];
+const FEEDBACK_LIMIT = 100;
 
 function isRenderableFeedbackRow(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -60,7 +61,7 @@ export function FeedbackPanel() {
     setLoading(true);
     setReadError(null);
     try {
-      const res = await agentApi.listFeedback({ status: currentStatus.current || undefined, limit: 100 });
+      const res = await agentApi.listFeedback({ status: currentStatus.current || undefined, limit: FEEDBACK_LIMIT });
       if (version !== requestVersion.current) return;
       // The HTTP client casts JSON; a successful transport is not a valid list.
       const feedback = res?.feedback;
@@ -146,6 +147,12 @@ export function FeedbackPanel() {
           {loading ? (
             <p role="status" className="px-3 py-2 text-[11px] text-fg-muted">
               {rows.length ? "Refreshing feedback…" : "Loading feedback…"}
+            </p>
+          ) : null}
+          {rows.length === FEEDBACK_LIMIT && !loading && !readError ? (
+            <p role="status" className="px-3 py-2 text-[11px] text-fg-muted">
+              Showing the newest {FEEDBACK_LIMIT} {status ? "matching " : ""}reports.
+              {" "}Older reports may not be shown in this view.
             </p>
           ) : null}
           {rows.length === 0 && !loading && !readError ? (

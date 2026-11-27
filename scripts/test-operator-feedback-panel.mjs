@@ -194,3 +194,77 @@ for (const [name,envelope] of [
     assert.equal(await q.page.getByRole("button",{name:"Refresh"}).count(),1,"panel remains available for a later retry");
   });
 }
+
+const boundary = newer.created_at;
+const fullPage = (status = "new") => Array.from({ length: 100 }, (_, index) => ({
+  ...newer, ref: "synthetic-report-" + (index + 1), status,
+}));
+const capText = /Older reports may not be shown in this view/i;
+async function resolvePage(q, request, feedback, next_before) {
+  await q.page.evaluate(([n, payload]) => window.operatorFixture.envelope(n,payload),
+    [request, { ok: true, feedback, ...(next_before === undefined ? {} : { next_before }) }]);
+  await q.repaint();
+}
+
+test("a full valid page warns that older reports may not be shown; filter change retires it", async t => {
+  const q=await launch(t);
+  assert.equal((await q.page.evaluate(()=>window.operatorFixture.allReads()))[0].limit,100);
+  await resolvePage(q,0,fullPage(),boundary);
+  assert.equal(await q.row("synthetic-report-100").count(),1);
+  assert.match(await q.page.getByText(capText).textContent(),/newest 100 reports/i);
+  await q.select("fixed",2);
+  assert.equal(await q.page.getByText(capText).count(),0,"old cap cannot describe the new filter");
+  await resolvePage(q,1,fullPage("fixed"),boundary);
+  assert.match(await q.page.getByText(capText).textContent(),/newest 100 matching reports/i);
+  await q.select("new",3);
+  await resolvePage(q,2,fullPage().slice(0,99),null);
+  assert.equal(await q.page.getByText(capText).count(),0,"a valid 99-row result has no cap warning");
+  assert.equal(await q.row("synthetic-report-99").count(),1);
+});
+
+test("a stale full first page cannot attach a warning to a different filter", async t => {
+  const q=await launch(t);
+  await q.select("fixed",2);
+  await q.resolveRows(1,[fixed]);
+  await resolvePage(q,0,fullPage(),boundary);
+  assert.equal(await q.page.getByText(capText).count(),0);
+  assert.equal(await q.row(fixed.ref).count(),1);
+});
+
+test("an observed denied refresh removes a previously verified cap warning", async t => {
+  const q=await launch(t);
+  await resolvePage(q,0,fullPage(),boundary);
+  assert.equal(await q.page.getByText(capText).count(),1);
+  await q.page.getByRole("button",{name:"Refresh"}).click();
+  await q.waitReads(2);
+  assert.equal(await q.page.getByText(capText).count(),0,"in-flight refresh must not retain old warning");
+  await q.rejectRead(1,deny);
+  assert.equal(await q.page.getByText(capText).count(),0);
+  assert.equal(await q.page.getByRole("alert").textContent(),deny);
+  assert.equal(await q.row("synthetic-report-100").count(),0);
+});
+
+for (const [label, rows, cursor, showCap] of [
+  ["a full list with no cursor", fullPage(), undefined, true],
+  ["a full list with a null cursor", fullPage(), null, true],
+  ["a full list with malformed cursor metadata", fullPage(), {unexpected: "fixture"}, true],
+  ["a short list with no cursor", [newer], undefined, false],
+  ["a short list with unexpected cursor metadata", [newer], boundary, false],
+]) test("optional pagination metadata never invalidates valid rows: " + label, async t => {
+  const q=await launch(t);
+  await resolvePage(q,0,rows,cursor);
+  assert.equal(await q.row(rows.at(-1).ref).count(),1);
+  assert.equal(await q.page.getByRole("alert").count(),0);
+  assert.equal(await q.page.getByText(capText).count(),Number(showCap));
+});
+
+test("a malformed current list after a full page removes both warning and stale rows", async t => {
+  const q=await launch(t);
+  await resolvePage(q,0,fullPage(),boundary);
+  await q.page.getByRole("button",{name:"Refresh"}).click();
+  await q.waitReads(2);
+  await resolvePage(q,1,[...fullPage().slice(0,99),null],boundary);
+  assert.equal(await q.page.getByText(capText).count(),0);
+  assert.equal(await q.row("synthetic-report-99").count(),0);
+  assert.equal(await q.page.getByRole("alert").textContent(),"Could not load feedback: invalid response.");
+});
