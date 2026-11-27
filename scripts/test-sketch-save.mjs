@@ -432,3 +432,37 @@ test('the existing desktop page drain finishes the exact active image gesture be
  f.event('pointermove',{clientX:600,clientY:300});f.event('pointerup');await drain();assert.deepEqual(f.data().board.images,expected);
  hook.release('synthetic-image-drain');assert.equal(p.el('save').disabled,false);assert.deepEqual(selectedImages(p),[1]);
 });
+
+test('Delete removes the last-selected placed image, not a previously selected drawing, and Undo restores it', async t=>{
+ const images=identityImages();images[1].id=images[0].id;
+ const board={...savedBoard,images},f=await fixture(t,board),p=await f.mount();
+ p.tools.find(el=>el.getAttribute('data-tool')==='select').click();
+ p.el('board').dispatch('pointerdown',{clientX:145,clientY:68,pointerId:1});
+ imageStart(p,1);f.event('pointerup');assert.deepEqual(selectedImages(p),[1]);
+ let prevented=false;
+ f.event('keydown',{key:'Delete',target:p.el('board'),preventDefault(){prevented=true;}});
+ await p.save();assert.equal(prevented,true);
+ assert.deepEqual(f.data().board.strokes,savedBoard.strokes,'an older drawing selection is untouched');
+ assert.deepEqual(f.data().board.images,[images[0]],'only the selected image is removed');
+ p.el('undo').click();await p.save();
+ assert.deepEqual(f.data().board.strokes,savedBoard.strokes);
+ assert.deepEqual(f.data().board.images,images);assert.deepEqual(selectedImages(p),[1]);
+});
+test('Backspace while editing a prompt does not change the selected board object',async t=>{
+ const board={...savedBoard,images:identityImages()},f=await fixture(t,board),p=await f.mount();
+ p.tools.find(el=>el.getAttribute('data-tool')==='select').click();
+ p.el('board').dispatch('pointerdown',{clientX:145,clientY:68,pointerId:1});
+ const input=p.el('prompt');Object.defineProperty(input,'tagName',{value:'TEXTAREA'});
+ let prevented=false;
+ f.event('keydown',{key:'Backspace',target:input,preventDefault(){prevented=true;}});
+ await p.save();assert.equal(prevented,false);assert.deepEqual(f.data().board,board);assert.equal(f.posts().length,0);
+});
+test('a canvas drawing selection clears the previous image and Delete preserves its anchored note',async t=>{
+ const images=identityImages(),f=await fixture(t,{...savedBoard,images}),p=await f.mount();
+ imageStart(p,0);f.event('pointerup');assert.deepEqual(selectedImages(p),[0]);
+ p.el('board').dispatch('pointerdown',{clientX:145,clientY:68,pointerId:1});
+ assert.deepEqual(selectedImages(p),[]);
+ f.event('keydown',{key:'Delete',target:p.el('board')});await p.save();
+ assert.deepEqual(f.data().board.images,images);
+ assert.deepEqual(f.data().board.strokes,[{...savedBoard.strokes[1],anchor:null}]);
+});

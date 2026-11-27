@@ -297,6 +297,7 @@
       // Rebind only the selection captured with these records. Retire a drag
       // whose object belonged to the replaced snapshot.
       selected = Number.isInteger(d.selectedImage) && d.selectedImage >= 0 ? images[d.selectedImage] || null : null;
+      selectedStroke = null;
       drag = null;
       renderImages();
       redraw();
@@ -464,6 +465,7 @@
       if (tool === "select") {
         var hit = hitTest(pt(e));
         selectedStroke = hit ? hit.id : null;
+        if (selected) { selected = null; renderImages(); }
         redraw();
         return;
       }
@@ -550,6 +552,7 @@
           if (tool !== "select" || !editable() || !wrap.isConnected || images.indexOf(im) < 0) return;
           e.stopPropagation();
           selected = im;
+          if (selectedStroke) { selectedStroke = null; redraw(); }
           drag = { image: im, mode: e.target === handle ? "resize" : "move", sx: e.clientX, sy: e.clientY, ox: im.x, oy: im.y, ow: im.w, oh: im.h };
           renderImages();
         });
@@ -610,18 +613,29 @@
     window.addEventListener("keydown", function (e) {
       if (!editable()) return;
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (tool === "select" && selectedStroke) {
-          e.preventDefault();
-          snapshot();
-          strokes = strokes.filter(function (x) { return x.id !== selectedStroke; });
-          // Notes anchored to a deleted mark keep their fallback position, so the
-          // comment survives the mark it described.
-          strokes.forEach(function (x) { if (x.anchor === selectedStroke) x.anchor = null; });
-          selectedStroke = null;
-          redraw();
-          changed();
-          setStatus("Deleted.");
+        var target = e.target;
+        if (e.defaultPrevented || target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || "")) return;
+        if (tool !== "select") return;
+        var imageIndex = images.indexOf(selected);
+        var strokeId = selectedStroke;
+        if (imageIndex < 0 && (!strokeId || !strokes.some(function (x) { return x.id === strokeId; }))) return;
+        e.preventDefault();
+        snapshot();
+        if (imageIndex >= 0) {
+          // The selected object is this exact entry, even if legacy IDs repeat.
+          if (drag?.image === selected) drag = null;
+          images.splice(imageIndex, 1);
+          selected = null;
+          renderImages();
+        } else {
+          strokes = strokes.filter(function (x) { return x.id !== strokeId; });
+          // Notes anchored to a deleted mark keep their fallback position.
+          strokes.forEach(function (x) { if (x.anchor === strokeId) x.anchor = null; });
         }
+        selectedStroke = null;
+        redraw();
+        changed();
+        setStatus("Deleted.");
         return;
       }
       var meta = e.metaKey || e.ctrlKey;
