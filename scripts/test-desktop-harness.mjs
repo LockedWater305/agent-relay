@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import test from "node:test";
 import {
   configureDesktopTestApp, createDesktopSandbox, desktopLaunchPlan,
-  desktopLaunchStatus, desktopTestEnv, runDesktopLaunch, withDesktopSandbox,
+  desktopLaunchStatus, desktopFirstRunSettingsStatus, desktopTestEnv, runDesktopLaunch, withDesktopSandbox,
 } from "./lib/desktop-test-harness.mjs";
 
 const fixturePaths = Object.fromEntries([
@@ -297,4 +298,71 @@ test("successful load evidence expires when a different runtime becomes current"
   assert.equal(desktopLaunchStatus(result({ out: stale + pageLine(12346) })).ok, true);
   assert.equal(desktopLaunchStatus(result({ out: readyLine(12345) + pageLine(12345) +
     "[desktop] runtime ready on malformed\n" })).ok, false);
+});
+
+const settingsUrl = (port) => "http://127.0.0.1:" + port + "/buzzy/settings";
+const ownedSettingsLine = (port) => "[desktop-test] owned first-run Settings loaded " + settingsUrl(port) + "\n";
+const genericSettingsLine = (port) => "[desktop] settings window opened " + settingsUrl(port) + "\n" +
+  "[desktop-test] page loaded " + settingsUrl(port) + "\n";
+
+test("first-run Settings must be owned by the current ready runtime, not an older window", () => {
+  const retired = readyLine(12345) + genericSettingsLine(12345) + ownedSettingsLine(12345);
+  const current = readyLine(12346) + pageLine(12346);
+  assert.equal(desktopLaunchStatus(result({ out: retired + current })).ok, true);
+  assert.equal(desktopFirstRunSettingsStatus(result({ out: retired + current })).ok, false);
+  assert.equal(desktopFirstRunSettingsStatus(result({ out: retired + current + ownedSettingsLine(12345) })).ok, false);
+  assert.equal(desktopFirstRunSettingsStatus(result({ out: retired + current + ownedSettingsLine(12346) })).ok, true);
+});
+test("generic events, prefixed relayed output and stderr don't prove owned Settings", () => {
+  const active = readyLine(12345) + pageLine(12345);
+  assert.equal(desktopFirstRunSettingsStatus(result({ out: active + genericSettingsLine(12345) })).ok, false);
+  assert.equal(desktopFirstRunSettingsStatus(result({ out: active + "[renderer] " + ownedSettingsLine(12345) })).ok, false);
+  assert.equal(desktopFirstRunSettingsStatus(result({
+    stdout: active, stderr: ownedSettingsLine(12345), out: active + ownedSettingsLine(12345),
+  })).ok, false);
+  assert.equal(desktopFirstRunSettingsStatus(result({
+    stdout: active + ownedSettingsLine(12345), stderr: "[desktop-test] renderer failed crashed",
+    out: active + ownedSettingsLine(12345) + "[desktop-test] renderer failed crashed",
+  })).ok, false);
+});
+
+const mainSource = readFileSync(new URL("../desktop/main.mjs", import.meta.url), "utf8");
+const settingsLoader = mainSource.slice(mainSource.indexOf("async function loadSettingsPage("), mainSource.indexOf("\nfunction settingsWindowFor("));
+async function simulateSettingsCompletion({ committed, change, firstrun = true } = {}) {
+  let resolveLoad;
+  const url = settingsUrl(12345);
+  const base = new URL(url).origin;
+  let binding = { base };
+  const lines = [];
+  const win = Object.assign(new EventEmitter(), {
+    isDestroyed: () => false,
+    webContents: { getURL: () => committed ?? url },
+    loadURL(target) { assert.equal(target, url); return new Promise(resolve => { resolveLoad = resolve; }); },
+  });
+  const ctx = {
+    process: { env: firstrun ? { BZ_FIRSTRUN_TEST: "1" } : {} },
+    currentRuntimeBinding: () => binding, supervisor: { runtime: {} },
+    settingsWindow: win, settingsPagesToRetry: new WeakSet(), quitting: false,
+    setTimeout: () => ({ unref() {} }), clearTimeout() {},
+    reportSettingsLoadProblem: () => assert.fail("fixture did not fail or time out"),
+    console: { log: line => lines.push(line) },
+  };
+  const load = runInNewContext(settingsLoader + "\nloadSettingsPage", ctx);
+  const pending = load(win, url);
+  if (change === "same-port-rebind") binding = { base };
+  if (change === "retire-binding") binding = null;
+  if (change === "replace-window") ctx.settingsWindow = {};
+  if (change === "quit") ctx.quitting = true;
+  resolveLoad();
+  await pending;
+  return lines.filter(line => line.startsWith("[desktop-test]"));
+}
+test("Settings evidence requires actual committed route of the current owned window and binding", async () => {
+  const expected = ownedSettingsLine(12345).trimEnd();
+  assert.deepEqual(await simulateSettingsCompletion(), [expected]);
+  for (const change of ["same-port-rebind", "retire-binding", "replace-window", "quit"]) {
+    assert.deepEqual(await simulateSettingsCompletion({ change }), [], change);
+  }
+  assert.deepEqual(await simulateSettingsCompletion({ committed: "http://127.0.0.1:12345/buzzy/landing" }), []);
+  assert.deepEqual(await simulateSettingsCompletion({ firstrun: false }), []);
 });

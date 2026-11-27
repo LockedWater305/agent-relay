@@ -656,6 +656,7 @@ function reportSettingsLoadProblem(win, slow = false) {
 }
 
 async function loadSettingsPage(win, url) {
+  const openingBinding = process.env.BZ_FIRSTRUN_TEST ? currentRuntimeBinding(supervisor.runtime) : null;
   settingsPagesToRetry.delete(win);
   let timer, onClose, result;
   try {
@@ -678,7 +679,16 @@ async function loadSettingsPage(win, url) {
     clearTimeout(timer);
     if (onClose) win.removeListener("closed", onClose);
   }
-  if (result === "loaded") console.log(`[desktop] settings window opened ${url}`);
+  if (result === "loaded") {
+    console.log(`[desktop] settings window opened ${url}`);
+    // The observer in the dev test entry sees every window. Use only this
+    // owned window's real committed URL, and retire proof on same-port rebind too.
+    if (openingBinding && !quitting && settingsWindow === win && !win.isDestroyed() &&
+        openingBinding === currentRuntimeBinding(supervisor.runtime) &&
+        url === `${openingBinding.base}/buzzy/settings` && win.webContents.getURL() === url) {
+      console.log(`[desktop-test] owned first-run Settings loaded ${url}`);
+    }
+  }
   if (result === "failed" || result === "waiting") reportSettingsLoadProblem(win, result === "waiting");
 }
 

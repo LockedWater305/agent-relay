@@ -18,7 +18,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { saveInference } from "./lib/inference.mjs";
-import { desktopLaunchPlan, desktopLaunchStatus, runDesktopLaunch, withDesktopSandbox } from "./lib/desktop-test-harness.mjs";
+import { desktopFirstRunSettingsStatus, desktopLaunchPlan, desktopLaunchStatus, runDesktopLaunch, withDesktopSandbox } from "./lib/desktop-test-harness.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 let failures = 0;
@@ -38,8 +38,8 @@ await withDesktopSandbox("firstrun", async (paths) => {
   const status = desktopLaunchStatus(result);
   check("a fresh install launches and exits cleanly", status.ok, status.detail);
   check("a fresh install reports no inference", status.ok && /onboarding: no inference configured/.test(result.out));
-  check("a fresh install opens the Settings window", status.ok && /settings window opened .*\/buzzy\/settings(?:\s|$)/.test(result.out));
-  check("the first-run Settings page finishes loading", status.ok && /\[desktop-test\] page loaded .*\/buzzy\/settings(?:\s|$)/.test(result.out));
+  const settings = desktopFirstRunSettingsStatus(result);
+  check("the owned first-run Settings window loads on the same ready runtime", status.ok && settings.ok, settings.detail);
 });
 
 // ── 2. configured install is left alone ─────────────────────────────────────

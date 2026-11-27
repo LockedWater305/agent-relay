@@ -185,6 +185,14 @@ export async function runDesktopLaunch(plan, {
 }
 
 export function desktopLaunchStatus(result, page = "/buzzy/talk") {
+  return launchStatus(result, page, /^\[desktop\] loadURL resolved (\S+)$/);
+}
+
+export function desktopFirstRunSettingsStatus(result) {
+  return launchStatus(result, "/buzzy/settings", /^\[desktop-test\] owned first-run Settings loaded (\S+)$/);
+}
+
+function launchStatus(result, page, loadMarker) {
   const reasons = [];
   if (result.error) reasons.push(`process error: ${result.error}`);
   if (result.timedOut) reasons.push("launch timed out");
@@ -192,7 +200,9 @@ export function desktopLaunchStatus(result, page = "/buzzy/talk") {
   if (result.code !== 0) reasons.push(`exit code ${result.code ?? "unknown"}`);
   if (result.signal) reasons.push(`signal ${result.signal}`);
   let readyPort = null, sawReady = false, loaded = false;
-  for (const line of result.out.split(/\r?\n/)) {
+  // Consume positive lifecycle evidence from stdout, never from stderr
+  // concatenated after the last stdout line. Keep both for failure diagnosis.
+  for (const line of (result.stdout ?? result.out).split(/\r?\n/)) {
     // The production launcher binds exactly this IPv4 loopback authority.
     // Encountering another ready line retires the prior binding evidence.
     if (line.startsWith("[desktop] runtime ready on ")) {
@@ -202,7 +212,7 @@ export function desktopLaunchStatus(result, page = "/buzzy/talk") {
       if (readyPort) sawReady = true;
       continue;
     }
-    const resolved = /^\[desktop\] loadURL resolved (\S+)$/.exec(line);
+    const resolved = loadMarker.exec(line);
     if (!readyPort || !resolved) continue;
     try {
       const url = new URL(resolved[1]);
