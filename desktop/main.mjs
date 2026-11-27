@@ -477,8 +477,11 @@ function registerSettingsIpc() {
     // Diagnostics from the UI: one click to the folder that holds main.log.
     ipcMain.handle("beezilla:app:openLogs", wrap(async () => {
       const { dir } = logPaths();
-      if (dir) await shell.openPath(dir);
-      return { dir, file: logPaths().file };
+      if (!dir) throw new Error("No logs folder is available for this session.");
+      try {
+        if (await shell.openPath(dir) === "") return { opened: true };
+      } catch { /* report both native failure forms without filesystem details */ }
+      throw new Error("Could not open the logs folder. Check that BeeZilla can access it.");
     }));
     ipcMain.handle("beezilla:app:logPath", wrap(async () => logPaths()));
     // The page knows things the shell cannot see: which device it got, what the

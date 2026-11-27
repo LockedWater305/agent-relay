@@ -48,7 +48,7 @@ function syntheticCipher() {
   };
 }
 
-async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDir, libraryStorage = new Map(), libraryFetch = null } = {}) {
+async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDir, libraryStorage = new Map(), libraryFetch = null, diagnosticPaths = {}, openLogFolder = null } = {}) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(tmpdir(), "bz-settings-provenance-"));
   const cipher = syntheticCipher();
   if (stored) saveInference(dir, stored, cipher);
@@ -78,14 +78,14 @@ async function fixture(t, { env: initialEnv = {}, stored = null, dir: existingDi
       app: { getVersion: () => "test", commandLine: { appendSwitch() {} }, requestSingleInstanceLock: () => true,
         on(name, fn) { appEvents.set(name, fn); }, whenReady: () => new Promise(() => {}), exit: () => lifecycle.push("exit"), quit: unexpected("app quit") },
       BrowserWindow: unexpected("native window"), Menu: {}, session: {},
-      shell: { openExternal: unexpected("external page"), openPath: unexpected("open path") },
+      shell: { openExternal: unexpected("external page"), openPath: openLogFolder ?? unexpected("open path") },
       dialog: { showErrorBox: (...args) => dialogs.push(args) },
       safeStorage: { encryptString: cipher.encrypt, decryptString: cipher.decrypt },
       ipcMain: { handle: (name, fn) => ipc.set(name, fn) }, systemPreferences: {},
     },
     "node:fs": fs, "node:path": path, "node:url": url, "node:crypto": crypto,
     "./supervisor.mjs": { RuntimeSupervisor: FakeSupervisor },
-    "./logger.mjs": { installLogging() {}, logLine() {}, logPaths: () => ({}) },
+    "./logger.mjs": { installLogging() {}, logLine() {}, logPaths: () => diagnosticPaths },
     "./connect.mjs": { ...connect, managedAccountConnectCapability: () => connect.managedAccountConnectCapability?.(env), connectAccount: unexpected("Connect"), cloudBaseUrl: unexpected("cloud URL") },
     "./csp.mjs": { createDesktopCsp: unexpected("CSP install"), loadCspManifest: unexpected("manifest") },
     "./document-transition.mjs": { createDocumentTransition },
@@ -181,7 +181,7 @@ export const testApi = {
   const result = {
     dir, env, cipher, starts, notifications, responses, lifecycle, dialogs, appEvents, libraryStorage,
     setStopFailure: (value) => { stopFailure = value; }, api: main.namespace.testApi,
-    bridge: settingsWindow.bridge.settings, mainWindow, settingsWindow,
+    bridge: settingsWindow.bridge.settings, appBridge: settingsWindow.bridge.app, mainWindow, settingsWindow,
     flush: () => { mainWindow.flush(); settingsWindow.flush(); },
     status: async () => {
       const res = await settingsWindow.bridge.settings.get();
@@ -199,7 +199,7 @@ export const testApi = {
   return result;
 }
 
-function renderer(bridge) {
+function renderer(bridge, app) {
   const html = read("public/buzzy/settings.html");
   const nodes = new Map([...html.matchAll(/<([a-z]+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)].map((match) => {
     const [, tag, attrs, id] = match;
@@ -225,7 +225,7 @@ function renderer(bridge) {
       : radios.find((radio) => selector.includes(`value="${radio.value}"`)),
     querySelectorAll: (selector) => selector === "button" ? [...nodes.values()].filter((node) => node.tag === "button") : radios,
   };
-  const context = vm.createContext({ document, window: { beezilla: { settings: bridge } }, navigator: {}, console: quiet });
+  const context = vm.createContext({ document, window: { beezilla: { settings: bridge, app }, addEventListener() {}, removeEventListener() {} }, navigator: {}, console: quiet });
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
   assert.equal(scripts.length, 1);
   vm.runInContext(scripts[0][1], context);
@@ -736,3 +736,35 @@ test('Settings keeps Library retry guidance without forwarding local fault conte
   assert.match(result.data.reason, /Library history/i);
   for (const marker of [hiddenSettingEmail,hiddenProviderDetail]) assert.ok(!JSON.stringify(result).includes(marker));
 });
+
+for (const mode of ["resolved-failure", "rejected-failure", "unavailable", "opened"]) {
+  test(`Settings open logs reports only the verified ${mode} outcome`, async (t) => {
+    const privateFolder = "/synthetic/profile/fixture-owner@example.invalid/logs";
+    const opened = [];
+    const f = await fixture(t, {
+      diagnosticPaths: mode === "unavailable" ? { dir: null, file: null } : { dir: privateFolder, file: privateFolder + "/main.log" },
+      openLogFolder: async (target) => {
+        opened.push(target);
+        if (mode === "rejected-failure") throw new Error("No access: " + target);
+        return mode === "resolved-failure" ? "No access: " + target : "";
+      },
+    });
+    const ui = renderer(f.bridge, f.appBridge);
+    await ui.idle();
+    assert.deepEqual(opened, [], "loading Settings must not open a folder");
+    await ui.click("open-logs");
+    const label = ui.nodes.get("logs-path").textContent;
+    const status = ui.nodes.get("logs-status").textContent;
+    if (mode === "unavailable") {
+      assert.deepEqual(opened, []);
+      assert.match(label, /no log file is available/i);
+    } else {
+      assert.deepEqual(opened, [privateFolder]);
+      assert.match(label, /main\.log/);
+    }
+    if (mode === "opened") assert.equal(status, "Opened.");
+    else assert.match(status, /could not open.*logs folder/i);
+    assert.ok(!status.includes(privateFolder));
+    assert.ok(!JSON.stringify(f.responses.at(-1).result).includes(privateFolder), "open reply does not repeat private path");
+  });
+}

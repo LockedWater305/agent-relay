@@ -531,16 +531,26 @@
       const appBridge = window.beezilla?.app;
       if (appBridge?.logs) {
         $("diagnostics").hidden = false;
+        const pathLabel = $("logs-path");
+        const unavailable = () => { pathLabel.textContent = "No log file is available for this session."; };
+        pathLabel.textContent = "Checking for a log file…";
         appBridge
           .logs()
           .then((res) => {
-            if (res?.ok && res.data?.file) $("logs-path").textContent = `Log: ${res.data.file}`;
+            if (res?.ok && res.data?.file) pathLabel.textContent = `Log: ${res.data.file}`;
+            else unavailable();
           })
-          .catch(() => {});
+          .catch(unavailable);
         $("open-logs").addEventListener("click", async () => {
-          const res = await appBridge.openLogs();
-          if (!res?.ok) say($("logs-status"), res?.error || "Could not open the folder.", "err");
-          else say($("logs-status"), "Opened.", "ok");
+          const status = $("logs-status");
+          try {
+            const res = await appBridge.openLogs();
+            if (res?.ok && res.data?.opened === true) {
+              say(status, "Opened.", "ok");
+              return;
+            }
+          } catch { /* transport failure is reported without native details */ }
+          say(status, "Could not open the logs folder. Check that BeeZilla can access it.", "err");
         });
       }
 
