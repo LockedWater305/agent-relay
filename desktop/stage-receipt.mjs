@@ -41,7 +41,7 @@ export function finishCheckout(before, after) {
 // staging completed. Missing/unexpected entries do not get a partial digest.
 export function observeStagedRuntime(app) {
   const digest = createHash("sha256");
-  let files = 0;
+  let files = 0, bytes = 0;
   function visit(directory, prefix) {
     for (const name of readdirSync(directory).sort()) {
       const disk = join(directory, name);
@@ -51,7 +51,9 @@ export function observeStagedRuntime(app) {
         digest.update(JSON.stringify(["d", path]) + "\n");
         visit(disk, path);
       } else if (stat.isFile()) {
-        const content = createHash("sha256").update(readFileSync(disk)).digest("hex");
+        const data = readFileSync(disk);
+        const content = createHash("sha256").update(data).digest("hex");
+        bytes += data.length;
         digest.update(JSON.stringify(["f", path, Boolean(stat.mode & 0o111), content]) + "\n");
         files++;
       } else {
@@ -65,8 +67,8 @@ export function observeStagedRuntime(app) {
     if (!lstatSync(app).isDirectory()) throw new Error("missing staged runtime directory");
     visit(app, "");
     if (!files) throw new Error("empty staged runtime directory");
-    return { scope, algorithm, sha256: digest.digest("hex"), files };
+    return { scope, algorithm, sha256: digest.digest("hex"), files, bytes };
   } catch {
-    return { scope, algorithm, sha256: null, files: null };
+    return { scope, algorithm, sha256: null, files: null, bytes: null };
   }
 }

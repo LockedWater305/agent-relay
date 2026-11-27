@@ -161,16 +161,19 @@ async function stage() {
   // checks and why the failure is invisible in a dev run.
   assertPackagedImports();
 
-  const size = du(APP);
+  const stagedRuntime = observeStagedRuntime(APP);
+  // Logical file bytes, not filesystem block allocation. No platform command
+  // (du is normally absent on Windows) or bogus zero if reading fails.
+  const megabytes = stagedRuntime.bytes === null ? null : Math.round(stagedRuntime.bytes / 1e6);
   writeFileSync(join(STAGE, "MANIFEST.json"), JSON.stringify({
     stagedAt: new Date().toISOString(),
     version: JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version,
     productionPackages: copied,
-    megabytes: Math.round(size / 1e6),
+    megabytes,
     source: finishCheckout(checkoutBefore, observeCheckout(ROOT)),
-    stagedRuntime: observeStagedRuntime(APP),
+    stagedRuntime,
   }, null, 2) + "\n");
-  log(`staged tree: ${Math.round(size / 1e6)} MB at ${APP}`);
+  log(`staged tree: ${megabytes === null ? "size unavailable" : `${megabytes} MB`} at ${APP}`);
 }
 
 /**
@@ -309,15 +312,6 @@ function assertPackagedImports() {
     );
   }
   log(`packaged imports: ok (${asarFiles.length} shell files, ${REQUIRED_RUNTIME_FILES.length} runtime libs)`);
-}
-
-function du(dir) {
-  try {
-    // -k is accepted by both GNU and BSD/macOS du; -b is GNU-only and made macOS report 0 MB.
-    return Number(execFileSync("du", ["-sk", dir], { encoding: "utf8" }).split("\t")[0]) * 1024;
-  } catch {
-    return 0;
-  }
 }
 
 const LOCAL_TEST = "LOCAL TEST BUILD — not a release, unsigned, no publisher pins";

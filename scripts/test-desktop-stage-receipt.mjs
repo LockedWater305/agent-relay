@@ -61,6 +61,7 @@ test("staged runtime hash is deterministic, detects same-size changed bytes and 
   const dir=scratch(t), a=join(dir,"a"), b=join(dir,"b");
   const unavailable=observeStagedRuntime(a);
   assert.equal(unavailable.sha256,null);
+  assert.equal(unavailable.bytes,null);
   mkdirSync(a); mkdirSync(b);
   assert.deepEqual(observeStagedRuntime(a),unavailable);
   for (const [folder, names] of [[a,["one","two"]],[b,["two","one"]]]) {
@@ -70,10 +71,15 @@ test("staged runtime hash is deterministic, detects same-size changed bytes and 
   assert.equal(first.scope,"desktop/stage/app");
   assert.equal(first.algorithm,"sha256-tree-v1");
   assert.equal(first.files,2);
+  assert.equal(first.bytes,6);
   assert.match(first.sha256,/^[0-9a-f]{64}$/);
   assert.deepEqual(observeStagedRuntime(b),first);
   writeFileSync(join(b,"two"),"new");
-  assert.notEqual(observeStagedRuntime(b).sha256,first.sha256);
+  const changed=observeStagedRuntime(b);
+  assert.notEqual(changed.sha256,first.sha256);
+  assert.equal(changed.bytes,first.bytes);
+  writeFileSync(join(b,"two"),"longer");
+  assert.equal(observeStagedRuntime(b).bytes,9);
 });
 
 test("Git directory and worktree environment do not relabel the local checkout", {skip:!gitAvailable}, t=>{
@@ -103,4 +109,5 @@ test("runtime link does not bless content outside the stage or return a partial 
   const scope=observeStagedRuntime(app);
   assert.equal(scope.sha256,null);
   assert.equal(scope.files,null);
+  assert.equal(scope.bytes,null);
 });
