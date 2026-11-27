@@ -273,3 +273,20 @@ test("uncertain process cleanup fails and retains only its temporary data", asyn
   t.after(() => rmSync(root, { recursive: true, force: true }));
   assert.equal(existsSync(join(root, "data")), true);
 });
+
+const readyLine = (port) => `[desktop] runtime ready on 127.0.0.1:${port}\n`;
+const pageLine = (port) => `[desktop] loadURL resolved http://127.0.0.1:${port}/buzzy/talk\n`;
+for (const [name, out] of [
+  ["different port", readyLine(12345) + pageLine(12346)],
+  ["old port after runtime replacement", readyLine(12345) + readyLine(12346) + pageLine(12345)],
+  ["page logged before readiness", pageLine(12345) + readyLine(12345)],
+  ["invalid ready port", readyLine(70000) + pageLine(12345)],
+  ["unverified ready authority", "[desktop] runtime ready on remote.invalid:12345\n" + pageLine(12345)],
+]) test(`desktop launch cannot pass with ${name}`, () => {
+  assert.equal(desktopLaunchStatus(result({ out })).ok, false);
+});
+
+test("a newly ready runtime can supply its own exact subsequent page load", () => {
+  const out = readyLine(12345) + readyLine(12346) + pageLine(12346);
+  assert.equal(desktopLaunchStatus(result({ out })).ok, true);
+});

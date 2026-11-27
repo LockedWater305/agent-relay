@@ -191,14 +191,26 @@ export function desktopLaunchStatus(result, page = "/buzzy/talk") {
   if (result.outputLimit) reasons.push("launch output exceeded limit");
   if (result.code !== 0) reasons.push(`exit code ${result.code ?? "unknown"}`);
   if (result.signal) reasons.push(`signal ${result.signal}`);
-  if (!/^\[desktop\] runtime ready on /m.test(result.out)) reasons.push("no runtime-ready evidence");
-  const loaded = [...result.out.matchAll(/^\[desktop\] loadURL resolved (\S+)/gm)].some((match) => {
+  let readyPort = null, sawReady = false, loaded = false;
+  for (const line of result.out.split(/\r?\n/)) {
+    // The production launcher binds exactly this IPv4 loopback authority.
+    // Encountering another ready line retires the prior binding evidence.
+    if (line.startsWith("[desktop] runtime ready on ")) {
+      const ready = /^\[desktop\] runtime ready on 127\.0\.0\.1:([1-9]\d{0,4})$/.exec(line);
+      readyPort = ready && Number(ready[1]) <= 65535 ? ready[1] : null;
+      if (readyPort) sawReady = true;
+      continue;
+    }
+    const resolved = /^\[desktop\] loadURL resolved (\S+)$/.exec(line);
+    if (!readyPort || !resolved) continue;
     try {
-      const url = new URL(match[1]);
-      return url.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname) && url.pathname === page;
-    } catch { return false; }
-  });
-  if (!loaded) reasons.push(`no loaded ${page} evidence`);
+      const url = new URL(resolved[1]);
+      if (!url.username && !url.password &&
+          url.origin === new URL(`http://127.0.0.1:${readyPort}`).origin && url.pathname === page) loaded = true;
+    } catch { /* malformed receipt line is not evidence */ }
+  }
+  if (!sawReady) reasons.push("no runtime-ready evidence");
+  if (!loaded) reasons.push(`no loaded ${page} evidence for the ready runtime`);
   if (/\[desktop\] (?:failed to start:|load failed |loadURL TIMED OUT)|\[desktop-test\] (?:load failed |renderer failed )|\[supervisor\] runtime exited unexpectedly|uncaughtException|unhandledRejection/.test(result.out)) {
     reasons.push("desktop reported a launch/runtime failure");
   }
