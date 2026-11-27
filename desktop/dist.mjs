@@ -374,6 +374,36 @@ function unpackedResources() {
   return found;
 }
 
+function lockedWindowsInstaller() {
+  const { version, build } = JSON.parse(readFileSync(join(DESKTOP, "package.json"), "utf8"));
+  // Same NSIS > Windows > global artifactName precedence as the locked
+  // builder. This entry point does not support custom output or app metadata.
+  const pattern = build?.nsis?.artifactName || build?.win?.artifactName || build?.artifactName;
+  if (pattern !== "BeeZilla-Setup-${version}.${ext}" || build?.directories?.output !== "../dist-desktop" ||
+      build.extends != null || build.extraMetadata?.version != null || build.directories.app != null ||
+      ["app", "www"].some(name => lstatSync(join(DESKTOP, name, "package.json"), { throwIfNoEntry: false })) ||
+      typeof version !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version)) {
+    throw new Error("desktop/package.json does not use the pinned Windows installer output");
+  }
+  return join(OUT, `BeeZilla-Setup-${version}.exe`);
+}
+
+function checkInstallerOutputDirectory() {
+  const directory = lstatSync(OUT, { throwIfNoEntry: false });
+  if (directory && !directory.isDirectory()) throw new Error("dist-desktop must be a real directory for Windows installer output");
+}
+
+function requireUnoccupiedInstallerPath(installer) {
+  checkInstallerOutputDirectory();
+  // Preserve existing same-version outputs; absence also lets a deterministic
+  // rebuild prove freshness without requiring different bytes or timestamps.
+  for (const file of [installer, `${installer}.blockmap`]) {
+    if (lstatSync(file, { throwIfNoEntry: false })) {
+      throw new Error(`move the existing ${file} aside before building this version`);
+    }
+  }
+}
+
 const mode = process.argv[2] ?? "stage";
 if (mode === "stage" || mode === "all" || mode === "dir") {
   const attempt = randomBytes(16).toString("hex");
@@ -394,16 +424,25 @@ if (mode === "stage" || mode === "all" || mode === "dir") {
     const builder = mode === "all" || mode === "dir"
       ? lockedCli(DESKTOP, "electron-builder", "cli.js")
       : null;
+    const installer = mode === "all" ? lockedWindowsInstaller() : null;
+    if (installer) requireUnoccupiedInstallerPath(installer);
     await stage(pending);
-    if (mode === "all") {
+    let installerOutput = null;
+    if (installer) {
+      requireUnoccupiedInstallerPath(installer);
       log("running electron-builder…");
       runBuilder(builder, ["--win", "nsis", "--publish", "never"], attempt);
-      log("installer written to dist-desktop/");
+      checkInstallerOutputDirectory();
+      installerOutput = lstatSync(installer, { throwIfNoEntry: false });
+      if (!installerOutput?.isFile() || installerOutput.size < 1 || installerOutput.nlink !== 1) {
+        throw new Error(`electron-builder did not produce a fresh nonempty regular Windows installer output at ${installer}`);
+      }
     }
     if (mode === "dir") packDir(builder, attempt);
-    // Commit the receipt atomically only after the stage and any requested
-    // packaging succeed. A hard stop cannot publish a provisional receipt.
+    // Commit the stage-only receipt atomically after any requested packaging.
+    // Windows output presence is reported separately, not an installer trust receipt.
     renameSync(pending, RECEIPT);
+    if (installerOutput) log(`fresh Windows installer output present at ${installer} (${installerOutput.size} bytes; presence only)`);
   } catch (error) {
     // A later failure (including afterPack/packager failure) cannot leave
     // successful evidence from this attempt either.
