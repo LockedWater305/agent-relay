@@ -198,3 +198,32 @@ test('successful retired-origin release unlocks coordinator without reopening th
 test('same-origin successful restart resumes the still-current document',async()=>{
  const s=setup();const hold=await s.acquire();await hold.release({keepRetiredFrozen:true});assert.equal(s.ui[0].state.frozen,false);
 });
+
+test('local Library storage errors do not echo private response contents',async()=>{
+ const marker='fixture-owner@example.invalid',raw=legacy([record()]),s=setup({[LEGACY_KEY]:raw});
+ s.intercept=()=>Response.json({ok:false,error:'storage unavailable for '+marker},{status:503});
+ await assert.rejects(s.acquire(),err=>/storage unavailable/i.test(err.message)&&!err.message.includes(marker));
+ assert.equal(s.ui[0].data.get(LEGACY_KEY),raw);
+ assert.equal(s.ui[0].state.frozen,false);
+});
+test('malformed Library cache stays intact without quoting parser excerpts',async()=>{
+ const marker='private-note';
+ for(const [key,expected] of [[LEGACY_KEY,/older Library cache cannot be read/],[PENDING_PREFIX+'fixture',/pending Library save cannot be read/]]){
+  const s=setup({[key]:marker});
+  await assert.rejects(s.acquire(),err=>expected.test(err.message)&&!err.message.includes(marker));
+  assert.equal(s.ui[0].data.get(key),marker);
+  assert.equal(s.ui[0].state.frozen,false);
+  assert.equal(s.requests.length,0);
+ }
+});
+test('Library cancels the outstanding response when the local binding is retired',async()=>{
+ const raw=legacy([record()]),s=setup({[LEGACY_KEY]:raw});
+ let cancelled=false;
+ const body=new ReadableStream({start(c){c.enqueue(Uint8Array.of(65));},cancel(){cancelled=true;}});
+ s.intercept=()=>{s.runtime={...s.runtime,port:7332};return new Response(body);};
+ await assert.rejects(s.acquire(),/runtime changed during Library migration/);
+ await Promise.resolve();
+ assert.equal(cancelled,true);
+ assert.equal(s.ui[0].data.get(LEGACY_KEY),raw);
+ assert.equal(s.ui[0].state.frozen,false);
+});

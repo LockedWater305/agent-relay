@@ -25,12 +25,17 @@ export function canonicalRecord(record) {
   return { record: normalized, text, hash: createHash("sha256").update(text).digest("hex") };
 }
 
+function parsePrivateJson(value, message) {
+  try { return JSON.parse(value); }
+  catch { throw new Error(message); }
+}
+
 export function decodeSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== "object" || !Array.isArray(snapshot.pending) || snapshot.pending.length > 10000) throw new Error("The Library snapshot is invalid.");
   const legacy = [];
   if (snapshot.legacy !== null) {
     if (typeof snapshot.legacy !== "string") throw new Error("The older Library cache is invalid.");
-    const folders = JSON.parse(snapshot.legacy);
+    const folders = parsePrivateJson(snapshot.legacy, "The older Library cache cannot be read.");
     if (!folders || typeof folders !== "object" || Array.isArray(folders)) throw new Error("The older Library cache cannot be read.");
     for (const [jobId, docs] of Object.entries(folders)) {
       if (!Array.isArray(docs)) throw new Error("A saved Library folder is invalid.");
@@ -39,7 +44,7 @@ export function decodeSnapshot(snapshot) {
   }
   const pending = snapshot.pending.map(({ key, raw }) => {
     if (typeof key !== "string" || !key.startsWith(PENDING_PREFIX) || typeof raw !== "string") throw new Error("A pending Library key is invalid.");
-    const envelope = JSON.parse(raw);
+    const envelope = parsePrivateJson(raw, "A pending Library save cannot be read.");
     if (!envelope || envelope.version !== 1 || typeof envelope.storeId !== "string" || typeof envelope.generation !== "string" || !/^\d+$/.test(envelope.generation)) throw new Error("A pending Library save cannot be read.");
     return { key, raw, envelope, ...canonicalRecord(envelope.record) };
   });
@@ -113,23 +118,30 @@ export function createLibraryTransition({ getContents, getBase, getRuntime, fetc
         headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}),
       });
-      verifyAll();
-      // Bound the response as it streams, including an unexpected/error body.
-      if (Number(response.headers.get("content-length")) > 10 * 1024 * 1024 || !response.body) throw new Error("The Library response is invalid or too large.");
-      const reader = response.body.getReader(), chunks = []; let bytes = 0;
+      const reader = response.body?.getReader(), chunks = [];
+      let bytes = 0;
       try {
+        verifyAll();
+        if (!response.ok) throw new Error("Local Library storage unavailable. Keep BeeZilla open and retry.");
+        // Bound successful responses by size even without a content-length header.
+        if (Number(response.headers.get("content-length")) > 10 * 1024 * 1024 || !reader) throw new Error("The Library response is invalid or too large.");
         for (;;) {
           const { value, done } = await reader.read();
           verifyAll();
           if (done) break;
           bytes += value.byteLength;
-          if (bytes > 10 * 1024 * 1024) { await reader.cancel(); throw new Error("The Library response is too large."); }
+          if (bytes > 10 * 1024 * 1024) throw new Error("The Library response is too large.");
           chunks.push(value);
         }
-      } finally { reader.releaseLock(); }
-      const data = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+      } catch (error) {
+        // Refused or invalidated work must not leave its response streaming.
+        void reader?.cancel().catch(() => {});
+        throw error;
+      } finally { reader?.releaseLock(); }
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+      const data = parsePrivateJson(text, "The local Library response could not be read. Keep BeeZilla open and retry.");
       verifyAll();
-      if (!response.ok || !data?.ok) throw new Error(typeof data?.error === "string" ? data.error : "The local Library could not save its history.");
+      if (!data?.ok) throw new Error("Local Library storage unavailable. Keep BeeZilla open and retry.");
       return data;
     }
     async function flush(rt = getRuntime()) {
