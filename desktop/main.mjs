@@ -553,6 +553,8 @@ function registerSettingsIpc() {
 
 let canReopenMainWindow = false;
 let openingMainWindow = null;
+const mainPagesLoaded = new WeakSet();
+const mainPagesToRetry = new WeakMap();
 // One install, one runtime: a second launch must focus or reopen the window,
 // not open a second server against the same PGLite data directory.
 if (!app.requestSingleInstanceLock()) {
@@ -563,19 +565,51 @@ if (!app.requestSingleInstanceLock()) {
 
 function focusOrReopenMainWindow() {
   if (quitting) return;
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    if (mainWindow.isVisible()) mainWindow.focus();
-    else mainWindow.show(); // Showing also focuses a window hidden without minimization.
-    return;
+  const win = mainWindow;
+  if (win) {
+    if (win.isMinimized()) win.restore();
+    if (win.isVisible()) win.focus();
+    else win.show(); // Showing also focuses a window hidden without minimization.
+    if (!mainPagesToRetry.has(win)) return;
   }
   // The first window is created by startup after Electron and the local
   // handlers are ready. Later activation and launch events share a reopen.
   if (!canReopenMainWindow || acquireLibraryTransition.held()) return;
   if (!openingMainWindow) {
-    openingMainWindow = createWindow().catch((err) => {
+    openingMainWindow = (win ? retryMainPage(win) : createWindow()).catch((err) => {
       if (!quitting) dialog.showErrorBox("BeeZilla could not reopen", String(err?.message ?? err));
     }).finally(() => { openingMainWindow = null; });
+  }
+}
+
+async function retryMainPage(win) {
+  const target = mainPagesToRetry.get(win);
+  if (!target || win !== mainWindow || win.isDestroyed()) return;
+  const binding = currentRuntimeBinding(supervisor.runtime);
+  if (!binding) throw new Error("The local connection is not ready. Open Settings to reconnect, then open BeeZilla again.");
+  await loadMainPage(win, retargetAppPage(target.url, target.base, binding.base));
+}
+
+async function loadMainPage(win, url) {
+  const base = runtimeBase;
+  mainPagesToRetry.delete(win);
+  let timer;
+  try {
+    const loaded = await Promise.race([
+      win.loadURL(url).then(() => true),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(false), 30_000); }),
+    ]);
+    console.log(`[desktop] loadURL ${loaded ? "resolved" : "TIMED OUT"} ${url}`);
+    if (!loaded && canReopenMainWindow) throw new Error("Main page timed out");
+    return true;
+  } catch (error) {
+    if (!canReopenMainWindow) throw error;
+    if (quitting || mainWindow !== win || win.isDestroyed()) return false;
+    if (mainPagesLoaded.has(win)) return true;
+    mainPagesToRetry.set(win, { url, base });
+    throw new Error("The main page did not load. Open BeeZilla again to retry.", { cause: error });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -931,14 +965,21 @@ async function createWindow() {
     },
   });
 
-  mainWindow.once("ready-to-show", () => mainWindow.show());
-  mainWindow.on("closed", () => {
-    mainWindow = null;
+  const win = mainWindow;
+  win.once("ready-to-show", () => { if (mainWindow === win) win.show(); });
+  win.on("closed", () => {
+    if (mainWindow === win) mainWindow = null;
   });
 
   confineAppWindow(mainWindow);
   guardLibraryWindowClose(mainWindow);
 
+  win.webContents.on("did-navigate", (_event, url, status) => {
+    if (status >= 200 && status < 300 && isAppPage(url, runtimeBase)) {
+      mainPagesLoaded.add(win);
+      mainPagesToRetry.delete(win);
+    }
+  });
   mainWindow.webContents.on("did-fail-load", (_e, code, desc, url) =>
     console.log(`[desktop] load failed ${code} ${desc} ${url}`),
   );
@@ -967,11 +1008,7 @@ async function createWindow() {
     (probePath ? `${base}${probePath}` : null) ||
     (probe && testPageUrl ? testPageUrl : reopenTarget);
   if (typeof target !== "string" || (!isAppPage(target, base) && target !== testPageUrl)) throw new Error("The desktop entry point must be a local BeeZilla app page.");
-  const loaded = await Promise.race([
-    mainWindow.loadURL(target).then(() => true),
-    new Promise((r) => setTimeout(() => r(false), 30_000)),
-  ]);
-  console.log(`[desktop] loadURL ${loaded ? "resolved" : "TIMED OUT"} ${target}`);
+  if (!await loadMainPage(win, target)) return;
 
   // Headless smoke hook: render, capture what the user would see, exit. Lets CI
   // prove the window actually paints instead of only proving the process boots.
@@ -1184,7 +1221,10 @@ app.whenReady().then(async () => {
   app.on("activate", (_event, hasVisibleWindows) => {
     // An existing window can be hidden or minimized; an empty window list is
     // not the only time an explicit activation needs to surface BeeZilla.
-    if (hasVisibleWindows === false || BrowserWindow.getAllWindows().length === 0) focusOrReopenMainWindow();
+    const windows = BrowserWindow.getAllWindows();
+    const retryMain = mainWindow && mainPagesToRetry.has(mainWindow) &&
+      !windows.some((win) => win !== mainWindow && win.isVisible());
+    if (hasVisibleWindows === false || windows.length === 0 || retryMain) focusOrReopenMainWindow();
   });
 });
 

@@ -897,3 +897,76 @@ test('a stalled Settings navigation gives one retry path and does not strand the
   assert.equal(d.windows.length, 2);
   assert.equal(d.starts, 1);
 });
+
+for (const callback of ['second-instance', 'activate']) {
+  test(`main-page retry: ${callback} retries a failed resident reopen in the same window`, async t => {
+    const f = await fixture(t); await f.mount();
+    const g = await fixture(t); g.h.location.href = 'about:blank';
+    let reopened = false, attempts = 0;
+    const d = await desktop(t, [f, g], { bootProbeOnly: true, beforeLoad: async () => {
+      if (reopened && ++attempts === 1) throw Error('fixture: first reopened main page refused the connection');
+    } });
+    const target = d.main.url;
+    await d.close(); reopened = true;
+    d.app.emit('second-instance'); await drain();
+    assert.equal(d.windows.length, 2);
+    assert.equal(d.errors.length, 1);
+    const win = d.api.currentMain();
+    assert.equal(win.url, 'about:blank');
+    assert.equal(win.isDestroyed(), false);
+    d.app.emit(callback, {}, true); d.app.emit(callback, {}, true); await drain();
+    assert.equal(attempts, 2, 'explicit activation must retry instead of only focusing the blank window');
+    assert.match(d.errors[0].message, /open BeeZilla.*retry/i);
+    assert.equal(d.errors.length, 1);
+    assert.equal(d.windows.length, 2);
+    assert.equal(d.api.currentMain(), win);
+    assert.equal(win.url, target);
+    assert.equal(d.starts, 1);
+    assert.equal(d.didExit(), false);
+  });
+}
+
+test('main-page retry: timed-out resident main can reload without stale follow-up', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t); g.h.location.href = 'about:blank';
+  const gate = f.defer();
+  let reopening = false, attempts = 0;
+  const d = await desktop(t, [f, g], { bootProbeOnly: true, timerDelay: ms => ms === 30_000 ? 5 : ms, beforeLoad: async () => {
+    if (reopening && ++attempts === 1) {
+      await gate.promise;
+      throw Error('fixture: timed-out first load settled late');
+    }
+  } });
+  const target = d.main.url;
+  await d.close(); reopening = true;
+  d.app.emit('second-instance');
+  try {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(d.errors.length, 1);
+    assert.equal(d.api.currentMain().url, 'about:blank');
+    d.app.emit('second-instance'); await drain();
+    assert.equal(attempts, 2);
+    assert.equal(d.api.currentMain().url, target);
+  } finally { gate.resolve(); await drain(); }
+  assert.equal(d.errors.length, 1);
+  assert.equal(d.windows.length, 2);
+  assert.equal(d.starts, 1);
+});
+
+test('main-page retry: app activation leaves an already visible secondary window alone', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t); g.h.location.href = 'about:blank';
+  const secondary = await fixture(t);
+  let fail = false;
+  const d = await desktop(t, [f, g, secondary], { bootProbeOnly: true, beforeLoad: async url => {
+    if (fail && !url.includes('/buzzy/settings')) throw Error('fixture: page unavailable');
+  } });
+  await d.close(); fail = true;
+  d.app.emit('second-instance'); await drain();
+  d.api.settingsWindowFor(new URL('/buzzy/settings', f.h.location.href).href); await drain();
+  const requests = d.requests.length;
+  d.app.emit('activate', {}, true); await drain();
+  assert.equal(d.requests.length, requests);
+  assert.equal(d.api.currentMain().url, 'about:blank');
+  assert.equal(d.errors.length, 1);
+});
