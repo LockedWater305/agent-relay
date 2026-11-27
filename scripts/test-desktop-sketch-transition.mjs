@@ -21,7 +21,7 @@ export async function desktop(t,fixtures,options={}) {
  assert.ok(fixtures.length,'an actual page fixture is required');
  const errors=[],logs=[],windows=[],requests=[],messages=[],timers=new Set(),ipc=new Map(),menu={};
  let ready=null,exitCode=null,requestHandler=null,headersHandler=null,nextId=1,currentRuntime=null,starts=0,stops=0;
- const proc=new EventEmitter();proc.platform='darwin';proc.env={BZ_CHAT_KEY:'synthetic-fixture-only-no-provider',BZ_PROBE_PATH:new URL(fixtures[0].h.location.href).pathname+new URL(fixtures[0].h.location.href).search};
+ const proc=new EventEmitter();proc.platform=options.platform||'darwin';proc.env={BZ_CHAT_KEY:'synthetic-fixture-only-no-provider',BZ_PROBE_PATH:new URL(fixtures[0].h.location.href).pathname+new URL(fixtures[0].h.location.href).search};
  const app=new EventEmitter();
  Object.assign(app,{isPackaged:true,getVersion:()=> 'synthetic-reconstruction',requestSingleInstanceLock:()=>true,
   commandLine:{appendSwitch(){}},whenReady:()=>({then(fn){ready=fn;return Promise.resolve();}}),
@@ -78,7 +78,7 @@ export async function desktop(t,fixtures,options={}) {
   }
   isDestroyed(){return this.destroyed;}
   loadURL(url){return this.webContents.loadURL(url);}
-  show(){} focus(){} isMinimized(){return false;} restore(){}
+  show(){} focus(){} isVisible(){return true;} isMinimized(){return false;} restore(){}
   close(){
    const closing=event();this.emit('close',closing);if(closing.prevented)return;
    let refused=this.preventUnload;
@@ -334,6 +334,44 @@ test('second-instance restores and focuses an existing minimized main window wit
   assert.equal(focused, 1);
   assert.equal(d.starts, 1);
   assert.equal(d.windows.length, 1);
+});
+
+for (const [platform, signal] of [['darwin', 'activate'], ['win32', 'second-instance']]) {
+  for (const initial of ['hidden', 'minimized']) {
+    test(`main visibility: ${signal} from ${initial} on ${platform} does not start another runtime`, async t => {
+      const f = await fixture(t); await f.mount();
+      const d = await desktop(t, [f], { platform });
+      let visible = false, minimized = initial === 'minimized';
+      const calls = [];
+      d.main.isVisible = () => visible;
+      d.main.isMinimized = () => minimized;
+      d.main.show = () => { calls.push('show'); visible = true; };
+      d.main.restore = () => { calls.push('restore'); minimized = false; visible = true; };
+      d.main.focus = () => { calls.push('focus'); };
+      // Electron's activate callback carries the OS's hasVisibleWindows bit.
+      d.app.emit(signal, {}, false);
+      assert.equal(visible, true);
+      assert.equal(minimized, false);
+      assert.deepEqual(calls, initial === 'hidden' ? ['show'] : ['restore', 'focus']);
+      assert.equal(d.windows.length, 1);
+      assert.equal(d.starts, 1);
+    });
+  }
+}
+
+test('main visibility: activate preserves another visible window without surfacing the hidden main', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t);
+  const d = await desktop(t, [f, g]);
+  d.api.settingsWindowFor(new URL('/buzzy/settings', d.main.url).href); await drain();
+  const calls = [];
+  d.main.isVisible = () => false;
+  d.main.show = () => { calls.push('show'); };
+  d.main.focus = () => { calls.push('focus'); };
+  d.app.emit('activate', {}, true);
+  assert.deepEqual(calls, []);
+  assert.equal(d.windows.length, 2);
+  assert.equal(d.starts, 1);
 });
 
 test('second-instance reopens a closed main window without spawning another runtime', async t => {

@@ -509,7 +509,8 @@ function focusOrReopenMainWindow() {
   if (quitting) return;
   if (mainWindow) {
     if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+    if (mainWindow.isVisible()) mainWindow.focus();
+    else mainWindow.show(); // Showing also focuses a window hidden without minimization.
     return;
   }
   // The first window is created by startup after Electron and the local
@@ -1046,8 +1047,10 @@ app.whenReady().then(async () => {
   }
 
   canReopenMainWindow = true;
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) focusOrReopenMainWindow();
+  app.on("activate", (_event, hasVisibleWindows) => {
+    // An existing window can be hidden or minimized; an empty window list is
+    // not the only time an explicit activation needs to surface BeeZilla.
+    if (hasVisibleWindows === false || BrowserWindow.getAllWindows().length === 0) focusOrReopenMainWindow();
   });
 });
 
