@@ -254,7 +254,11 @@ export async function connectAccount(deps) {
   try {
     await bounded(() => deps.open(`${base}${CONNECT_PATH}`), operationTimeout);
   } catch (err) {
+    // Own cleanup also destroys the window; distinguish the user's close
+    // before cleanup from a genuine navigation or network failure.
+    const cancelled = deps.isOpen?.() === false;
     await close();
+    if (cancelled) return cancelledOutcome;
     // The likely case for a shipped app: the host does not resolve yet, or the user is
     // offline. Say that in words a non-technical user can act on, and stop.
     if (isUnreachable(err)) return { ok: false, unreachable: true, error: unreachableMessage(base) };
@@ -277,10 +281,11 @@ export async function connectAccount(deps) {
     const deadline = performance.now() + duration(deps.signInDeadlineMs, 180_000);
     const pollMs = duration(deps.pollMs, 2_000);
     while (!outcome.ok && !outcome.cancelled && outcome.needsSignIn && performance.now() < deadline) {
-      if (deps.isOpen && !deps.isOpen()) break;
+      if (deps.isOpen?.() === false) return cancelledOutcome;
       await wait(Math.min(pollMs, deadline - performance.now()));
+      if (deps.isOpen?.() === false) return cancelledOutcome;
       const remaining = deadline - performance.now();
-      if (remaining <= 0 || (deps.isOpen && !deps.isOpen())) break;
+      if (remaining <= 0) break;
       try {
         outcome = await mintWhileOpen(Math.min(operationTimeout, remaining));
       } catch (err) {
@@ -292,6 +297,8 @@ export async function connectAccount(deps) {
         break; // the window went away mid-poll
       }
     }
+
+    if (outcome?.needsSignIn && deps.isOpen?.() === false) return cancelledOutcome;
 
     // Inference is in hand; now the search half. It runs while the window is still
     // open (the session lives there), and its problems never undo the sign-in.

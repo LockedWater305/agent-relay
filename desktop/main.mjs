@@ -113,7 +113,17 @@ function guardLibraryWindowClose(win) {
         transition = await acquireLibraryTransition();
         if (win.isDestroyed() || contents.isDestroyed()) return;
         const closingMain = win === mainWindow;
-        const savedPage = closingMain ? transition.targets.find((item) => item.wc === contents) : null;
+        let reopenPage = null;
+        if (closingMain) {
+          const savedPage = transition.targets.find((item) => item.wc === contents);
+          // After a verified port change, preload may still be awaiting IPC.
+          // The old document is no longer trusted at the new origin; keep its
+          // already-validated replacement, never navigate the retired URL.
+          const retarget = pendingRuntimeRetargets.get(contents);
+          const binding = retarget && currentRuntimeBinding(supervisor.runtime);
+          const page = savedPage ?? (retarget && binding && binding.rt === retarget.rt && binding.base === retarget.base ? retarget : null);
+          if (page && isAppPage(page.url, page.base)) reopenPage = { url: page.url, base: page.base };
+        }
         // close() can be prevented by the renderer. Do not skip its lease
         // cleanup merely because close() returned or override unload security.
         closed = await new Promise((resolve) => {
@@ -123,12 +133,8 @@ function guardLibraryWindowClose(win) {
             contents.removeListener("render-process-gone", didLoseRenderer);
           };
           const didClose = () => {
-            // Remember only the verified local document from a completed close,
-            // not a cancelled close, a request in flight, or another window.
-            if (closingMain) {
-              mainReopenPage = savedPage && isAppPage(savedPage.url, savedPage.base)
-                ? { url: savedPage.url, base: savedPage.base } : null;
-            }
+            // A cancelled native close must not change the next reopen.
+            if (closingMain) mainReopenPage = reopenPage;
             cleanup();
             resolve(true);
           };
@@ -822,9 +828,12 @@ async function performConnect() {
   });
 
   if (!outcome.ok) {
-    console.warn(`[desktop] connect: ${outcome.error}`);
     // Never leave a blank BeeZilla window behind after a failed load.
     if (!win.isDestroyed()) win.destroy();
+    // An intentional close is ordinary. Settings shows its cancellation
+    // status inline; a failure modal would interrupt the user's next action.
+    if (outcome.cancelled) return outcome;
+    console.warn(`[desktop] connect: ${outcome.error}`);
     if (!process.env.BZ_CONNECT_TEST && mainWindow && !mainWindow.isDestroyed()) {
       void dialog.showMessageBox(mainWindow, {
         type: "info",

@@ -188,3 +188,53 @@ test("normal owned cleanup after successful optional results does not cancel Con
   assert.equal(result.search.token, optionalSearch.body.token);
   assert.deepEqual(result.account, optionalProfile.user);
 });
+
+test("closing an initial navigation reports cancellation, not a connection error", async () => {
+  let open = true, closes = 0, calls = 0;
+  const result = await within(connectAccount({
+    baseUrl, operationTimeoutMs: 100,
+    open: async () => {
+      open = false; // Window destroyed while its original loadURL rejects.
+      throw new Error("ERR_ABORTED");
+    },
+    isOpen: () => open,
+    evaluate: () => { calls++; },
+    close: () => { closes++; },
+  }));
+  assert.equal(result.cancelled, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.unreachable, undefined);
+  assert.match(result.error, /cancelled/i);
+  assert.equal(calls, 0);
+  assert.equal(closes, 1);
+});
+
+test("closing the waiting sign-in window between polls stays cancelled and an immediate new Connect succeeds", async () => {
+  let open = true, checks = 0, mints = 0, closes = 0, waiting;
+  const pollDelayReached = new Promise((resolve) => { waiting = resolve; });
+  const first = connectAccount({
+    baseUrl, operationTimeoutMs: 100, signInDeadlineMs: 500, pollMs: 45,
+    open: async () => {},
+    isOpen: () => {
+      if (++checks === 2) waiting(); // Initial 401 was observed; poll sleep is about to start.
+      return open;
+    },
+    evaluate: async () => { mints++; return signIn; },
+    close: () => { closes++; },
+  });
+  await within(pollDelayReached);
+  open = false;
+  const cancelled = await within(first);
+  assert.equal(cancelled.cancelled, true);
+  assert.match(cancelled.error, /cancelled/i);
+  assert.equal(cancelled.token, undefined);
+  assert.equal(mints, 1, "closing during the delay must not start another mint");
+  assert.equal(closes, 1);
+  const retried = await within(connectAccount({
+    baseUrl, operationTimeoutMs: 100, open: async () => {}, isOpen: () => true, close: () => {},
+    evaluate: async (script) => script === MINT_SCRIPT ? mint : script === SEARCH_MINT_SCRIPT ? optionalSearch : optionalProfile,
+  }));
+  assert.equal(retried.ok, true);
+  assert.equal(retried.token, mint.body.token);
+  assert.deepEqual(retried.account, optionalProfile.user);
+});

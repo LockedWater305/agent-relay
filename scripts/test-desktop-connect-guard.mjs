@@ -79,8 +79,8 @@ async function mainFixture(flag, connect = async () => ({ ok: false, error: "fix
   class FakeWindow {
     constructor() { trace.push("window"); this.webContents = new EventEmitter(); this.webContents.setWindowOpenHandler = () => {}; }
     setMenuBarVisibility() {}
-    isDestroyed() { return false; }
-    destroy() { trace.push("destroy"); }
+    isDestroyed() { return this.destroyed === true; }
+    destroy() { trace.push("destroy"); this.destroyed = true; }
   }
   class FakeSupervisor {
     constructor() { this.dataDir = "/unused-in-memory-fixture"; this.runtime = runtime; }
@@ -106,7 +106,7 @@ async function mainFixture(flag, connect = async () => ({ ok: false, error: "fix
         on() {}, whenReady: () => new Promise(() => {}), exit: unexpected("app-exit"), quit: unexpected("app-quit") },
       BrowserWindow: FakeWindow, Menu: { buildFromTemplate: (value) => value, setApplicationMenu: (value) => menu.push(...value) },
       session, shell: { openExternal: unexpected("external"), openPath: unexpected("open-path") },
-      dialog: { showMessageBox() {}, showErrorBox: unexpected("error-box") },
+      dialog: { showMessageBox() { trace.push("connect-dialog"); }, showErrorBox: unexpected("error-box") },
       safeStorage: {}, ipcMain: { handle: (name, fn) => ipc.set(name, fn) }, systemPreferences: {},
     },
     "node:fs": { existsSync: () => false, mkdirSync: unexpected("mkdir"), readFileSync: unexpected("read"), writeFileSync: unexpected("write") },
@@ -418,4 +418,27 @@ test("Connect reports saved credentials without disclosing private restart detai
   assert.ok(!visible.includes(email));
   assert.ok(!JSON.stringify(wire).includes(email));
   assert.ok(!JSON.stringify(wire).includes(token));
+});
+
+test("cancelled Connect shows status in Settings without a failure dialog and can be retried immediately", async () => {
+  let attempts = 0;
+  const ctx = await mainFixture(undefined, async (deps) => {
+    if (++attempts === 1) {
+      deps.close();
+      return { ok: false, needsSignIn: true, cancelled: true, error: "BeeZilla account connection was cancelled." };
+    }
+    return { ok: true, token: "fixture-managed", account: { name: "Fixture Beta", email: "beta@example.invalid" } };
+  });
+  const bridge = preloadFixture((channel, payload) => ctx.ipc.get(channel)(ctx.event, payload));
+  const page = rendererFixture(bridge.settings);
+  await page.idle();
+  await page.click();
+  assert.match(page.nodes.get("connect-hint").textContent, /cancelled/i);
+  assert.equal(page.nodes.get("connect-account").disabled, false);
+  assert.ok(!ctx.trace.includes("connect-dialog"));
+  assert.ok(!ctx.trace.includes("save:inference"));
+  await page.click();
+  assert.equal(attempts, 2);
+  assert.ok(ctx.trace.includes("save:inference"));
+  assert.equal(page.nodes.get("connect-hint").textContent, "Connected.");
 });

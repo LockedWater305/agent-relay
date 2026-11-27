@@ -1176,3 +1176,81 @@ test('main-page retry after runtime exit leaves a late successful Sketch commit 
     await drain();
   }
 });
+
+test('saved Sketch survives native close before its owned runtime retarget reaches the renderer', async t => {
+  const f = await fixture(t), page = await f.mount();
+  const d = await desktop(t, [f], { bootProbeOnly: true });
+  const originalUrl = new URL(d.main.url);
+  await page.draw(); await page.save();
+  const saved = clone(f.data().board);
+  assert.equal(saved.strokes.length, 3);
+  assert.equal(f.posts().length, 1);
+
+  // The actual preload holds a runtime-change navigation while a normal IPC
+  // call is outstanding. Model its reply, not the renderer navigation decision.
+  const gate = f.defer();
+  d.ipc.set('beezilla:app:log', () => gate.promise);
+  const pendingIPC = d.main.preloadBridge.app.log('Synthetic pending desktop callback');
+  try {
+    d.replaceRuntime(null);
+    d.app.emit('second-instance');
+    await drain();
+    const current = d.runtime(), target = d.api.retargets().get(d.main.webContents);
+    assert.ok(current && target);
+    assert.equal(target.rt, current);
+    assert.notEqual(String(current.port), originalUrl.port);
+    assert.equal(d.main.url, originalUrl.href, 'old document remains while preload awaits IPC');
+    assert.equal(d.main.preloadTimers.length, 0);
+    assert.equal(d.errors.length, 0);
+
+    await d.close();
+    assert.equal(d.main.isDestroyed(), true);
+    assert.equal(d.stops, 0);
+    assert.equal(d.didExit(), false);
+    d.app.emit('activate', {}, false); await drain();
+    const reopened = d.api.currentMain(), url = new URL(reopened.url);
+    assert.notEqual(reopened, d.main);
+    assert.equal(url.port, String(current.port));
+    assert.equal(url.pathname + url.search, originalUrl.pathname + originalUrl.search, 'return to the actually saved Sketch, not Talk');
+    reopened.replaceFrame();
+    const hydrated = await reopened.replacementReady; await drain();
+    assert.match(hydrated.el('status').textContent, /Board loaded/);
+    assert.deepEqual(f.reads().at(-1).response.board, saved, 'the fresh renderer retrieved the original saved data');
+    assert.equal(f.posts().length, 1, 'reopening never writes a replacement board');
+  } finally {
+    gate.resolve();
+    await pendingIPC;
+  }
+});
+
+test('resident reopen never restores a stale pending target when the runtime binding was revoked', async t => {
+  const f = await fixture(t); await f.mount();
+  const d = await desktop(t, [f], { bootProbeOnly: true });
+  d.replaceRuntime(null);
+  d.app.emit('second-instance'); await drain();
+  assert.ok(d.api.retargets().get(d.main.webContents));
+  d.api.clearBinding();
+  await d.close();
+  assert.equal(d.main.isDestroyed(), true);
+  d.app.emit('activate', {}, false); await drain();
+  assert.equal(new URL(d.api.currentMain().url).pathname, '/buzzy/talk', 'revoked retarget must not choose the route');
+  assert.equal(d.errors.length, 0);
+});
+
+test('native close first saves a cold Sketch and resident reopen uses its new job', async t => {
+  const f = await fixture(t), page = await f.mount(null);
+  const d = await desktop(t, [f], { bootProbeOnly: true });
+  await page.draw();
+  await d.close();
+  const creates = f.requests.filter(request => request.url === '/api/buzzy/jobs');
+  assert.equal(creates.length, 1);
+  assert.equal(d.main.isDestroyed(), true);
+  assert.equal(d.stops, 0);
+  d.app.emit('activate', {}, false); await drain();
+  const window = d.api.currentMain(), target = new URL(window.url);
+  assert.equal(target.pathname, '/buzzy/sketch');
+  assert.equal(target.searchParams.get('job'), creates[0].body.id);
+  window.replaceFrame(); await window.replacementReady; await drain();
+  assert.equal(f.reads().at(-1).response.board.strokes.length, 1);
+  assert.equal(f.posts().length, 1);
+});
