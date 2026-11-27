@@ -546,14 +546,16 @@ function focusOrReopenMainWindow() {
     if (win.isMinimized()) win.restore();
     if (win.isVisible()) win.focus();
     else win.show(); // Showing also focuses a window hidden without minimization.
-    if (!mainPagesToRetry.has(win)) return;
+    if (!mainPagesToRetry.has(win) && currentRuntimeBinding(supervisor.runtime)) return;
   }
   // The first window is created by startup after Electron and the local
   // handlers are ready. Later activation and launch events share a reopen.
   if (!canReopenMainWindow || acquireLibraryTransition.held()) return;
   if (!openingMainWindow) {
-    openingMainWindow = (win ? retryMainPage(win) : createWindow()).catch((err) => {
-      if (!quitting) dialog.showErrorBox("BeeZilla could not reopen", String(err?.message ?? err));
+    const reconnecting = win && !mainPagesToRetry.has(win);
+    const open = reconnecting ? reconnectWindowRuntime() : win ? retryMainPage(win) : createWindow();
+    openingMainWindow = open.catch((err) => {
+      if (!quitting) dialog.showErrorBox(reconnecting ? "BeeZilla could not reconnect" : "BeeZilla could not reopen", String(err?.message ?? err));
     }).finally(() => { openingMainWindow = null; });
   }
 }
@@ -861,30 +863,41 @@ async function performConnect() {
 }
 
 let openingSettings = null;
-let pendingSettingsRuntime = null;
-function pendingSettingsRuntimeMatches(rt) {
-  return rt && pendingSettingsRuntime?.rt === rt && pendingSettingsRuntime.host === rt.host &&
-    pendingSettingsRuntime.port === rt.port && pendingSettingsRuntime.token === rt.token &&
-    pendingSettingsRuntime.generation === runtimeBindingGeneration;
+let reconnectingWindowRuntime = null;
+let pendingWindowRuntime = null;
+
+function reconnectWindowRuntime() {
+  // Native activation and Settings can both notice the same exit. Share the
+  // replacement and its document barrier, not merely the supervisor launch.
+  if (!reconnectingWindowRuntime) {
+    reconnectingWindowRuntime = recoverWindowRuntime().finally(() => { reconnectingWindowRuntime = null; });
+  }
+  return reconnectingWindowRuntime;
 }
 
-async function recoverRuntimeForSettings() {
+function pendingWindowRuntimeMatches(rt) {
+  return rt && pendingWindowRuntime?.rt === rt && pendingWindowRuntime.host === rt.host &&
+    pendingWindowRuntime.port === rt.port && pendingWindowRuntime.token === rt.token &&
+    pendingWindowRuntime.generation === runtimeBindingGeneration;
+}
+
+async function recoverWindowRuntime() {
   const existing = supervisor.runtime;
-  // Retry only a replacement started by this menu action. Another failed
+  // Retry only a replacement started by this window recovery. Another failed
   // handoff can leave a live but unbound runtime and must keep its own guards.
-  if (existing && !pendingSettingsRuntimeMatches(existing)) {
+  if (existing && !pendingWindowRuntimeMatches(existing)) {
     throw new Error("The local connection is not ready in this window. Keep BeeZilla open if you have unsaved work.");
   }
   const rt = existing ?? await supervisor.start();
   if (currentRuntimeBinding(supervisor.runtime) && supervisor.runtime === rt) return true;
-  pendingSettingsRuntime = { rt, host: rt.host, port: rt.port, token: rt.token, generation: runtimeBindingGeneration };
+  pendingWindowRuntime = { rt, host: rt.host, port: rt.port, token: rt.token, generation: runtimeBindingGeneration };
   if (quitting || acquireLibraryTransition.held()) return false;
-  if (!pendingSettingsRuntimeMatches(supervisor.runtime)) throw new Error("The local connection changed. Open Settings to try again.");
+  if (!pendingWindowRuntimeMatches(supervisor.runtime)) throw new Error("The local connection changed. Open BeeZilla again to retry.");
 
   // Same-origin recovery restores access without discarding any open document.
   if (!runtimeBase || runtimeOrigin(rt) === runtimeBase) {
     bindRuntime(rt, true);
-    pendingSettingsRuntime = null;
+    pendingWindowRuntime = null;
     return true;
   }
   let transition, rebound = false;
@@ -893,10 +906,10 @@ async function recoverRuntimeForSettings() {
     // barrier before sending any replacement navigation, not afterwards.
     transition = await acquireLibraryTransition();
     if (quitting) return false;
-    if (!pendingSettingsRuntimeMatches(supervisor.runtime)) throw new Error("The local connection changed.");
+    if (!pendingWindowRuntimeMatches(supervisor.runtime)) throw new Error("The local connection changed.");
     bindRuntime(rt, true);
     rebound = true;
-    pendingSettingsRuntime = null;
+    pendingWindowRuntime = null;
     return true;
   } catch {
     throw new Error("BeeZilla kept your window open because it could not finish saving before reconnecting. Keep it open if you have unsaved work. In Sketch, Export PNG can keep a copy of your drawing.");
@@ -925,7 +938,7 @@ function openSettings() {
 
 async function openSettingsWindow() {
   if (!currentRuntimeBinding(supervisor.runtime)) {
-    if (!await recoverRuntimeForSettings()) return;
+    if (!await reconnectWindowRuntime()) return;
     if (quitting || acquireLibraryTransition.held()) return;
   }
   if (settingsWindow) {
@@ -1219,9 +1232,9 @@ app.whenReady().then(async () => {
     // An existing window can be hidden or minimized; an empty window list is
     // not the only time an explicit activation needs to surface BeeZilla.
     const windows = BrowserWindow.getAllWindows();
-    const retryMain = mainWindow && mainPagesToRetry.has(mainWindow) &&
+    const resumeMain = mainWindow && (mainPagesToRetry.has(mainWindow) || !currentRuntimeBinding(supervisor.runtime)) &&
       !windows.some((win) => win !== mainWindow && win.isVisible());
-    if (hasVisibleWindows === false || windows.length === 0 || retryMain) focusOrReopenMainWindow();
+    if (hasVisibleWindows === false || windows.length === 0 || resumeMain) focusOrReopenMainWindow();
   });
 });
 

@@ -970,3 +970,114 @@ test('main-page retry: app activation leaves an already visible secondary window
   assert.equal(d.api.currentMain().url, 'about:blank');
   assert.equal(d.errors.length, 1);
 });
+
+test('reopening a hidden main window after runtime exit restores an unsaved Sketch without a reload', async t => {
+  const f = await fixture(t), page = await f.mount(), g = await fixture(t), d = await desktop(t, [f, g]);
+  const original = d.runtime(), oldRoute = d.main.url;
+  await page.draw();
+  let visible = false, attempts = 0;
+  d.main.isVisible = () => visible;
+  d.main.show = () => { visible = true; };
+  const replacement = { ...original, token: 'synthetic_reopen_recovery_token'.padEnd(43, 'r') };
+  const gate = f.defer();
+  d.replaceRuntime(null);
+  d.api.supervisor().start = async () => {
+    attempts++;
+    await gate.promise;
+    d.replaceRuntime(replacement);
+    return replacement;
+  };
+  d.app.emit('activate', {}, false);
+  assert.equal(visible, true, 'the native callback surfaces the original window immediately');
+  d.app.emit('second-instance');
+  const settings = d.menu.template.flatMap(item => item.submenu || []).find(item => item.accelerator === 'CmdOrCtrl+,');
+  assert.equal(attempts, 1, 'opening the app requests a single replacement runtime');
+  settings.click();
+  gate.resolve();
+  await drain();
+  assert.equal(attempts, 1, 'the concurrent Settings action shares this recovery');
+  assert.equal(d.runtime(), replacement);
+  assert.equal(d.main.url, oldRoute);
+  assert.equal(d.requests.filter(item => item.kind === 'loadURL' && item.url === oldRoute).length, 1);
+  assert.equal(d.messages.filter(item => item.wc === d.main.webContents && item.channel === 'beezilla:runtime:changed').length, 0);
+  assert.equal(d.errors.length, 0);
+  await page.save();
+  assert.equal(f.data().board.strokes.length, 3, 'the existing unsaved draft is still usable with the replacement');
+});
+
+test('second launch after runtime exit reconnects a clean main window on the replacement port', async t => {
+  const f = await fixture(t); await f.mount();
+  const d = await desktop(t, [f], { bootProbeOnly: true }), original = d.runtime();
+  const target = new URL('/buzzy/library?view=work#pinned', d.main.url);
+  assert.equal(d.main.webContents.windowOpenHandler({ url: target.href }).action, 'deny');
+  await drain();
+  d.replaceRuntime(null);
+  d.app.emit('second-instance');
+  await drain(); await d.nextNavigation();
+  assert.ok(d.runtime(), 'a native second launch reconnects the stopped runtime');
+  assert.notEqual(d.runtime().port, original.port);
+  assert.equal(d.windows.length, 1);
+  assert.equal(d.api.currentMain(), d.main);
+  const reopened = new URL(d.main.url);
+  assert.equal(reopened.port, String(d.runtime().port));
+  assert.equal(reopened.pathname + reopened.search + reopened.hash, '/buzzy/library?view=work#pinned');
+  assert.equal(d.errors.length, 0);
+});
+
+test('activation does not adopt an unrelated unbound runtime or discard a dirty Sketch on a changed port', async t => {
+  const f = await fixture(t), page = await f.mount(), d = await desktop(t, [f]);
+  const original = d.runtime(), oldRoute = d.main.url;
+  await page.draw();
+  d.api.clearBinding();
+  d.replaceRuntime({ ...original, port: 7459, token: 'synthetic_other_unbound_token'.padEnd(43, 'q') });
+  d.app.emit('activate', {}, true);
+  await drain(); await d.nextNavigation();
+  assert.equal(d.api.bindingState().present, false, 'unrelated custody is not accepted');
+  assert.equal(d.errors.length, 1);
+  assert.match(d.errors[0].message, /not ready.*window/i);
+  assert.equal(d.starts, 1);
+  d.replaceRuntime(null);
+  d.app.emit('activate', {}, true);
+  await drain(); await d.nextNavigation();
+  assert.equal(d.starts, 2);
+  assert.equal(d.api.bindingState().present, false);
+  assert.equal(d.main.url, oldRoute);
+  assert.equal(d.api.retargets().size, 0);
+  assert.equal(d.stops, 0);
+  assert.equal(page.el('save').disabled, false);
+  assert.match(page.el('savedFlag').textContent, /Unsaved|Could not save|Not saved/);
+  assert.equal(d.errors.length, 2);
+  assert.match(d.errors[1].message, /kept your window open.*could not finish saving/i);
+});
+
+test('reopen after runtime exit waits for the previous launcher to drain and allows an explicit retry', async t => {
+  const f = await fixture(t); await f.mount();
+  const d = await desktop(t, [f]), sup = d.api.supervisor(), original = d.runtime();
+  const start = sup.start.bind(sup);
+  let draining = true, attempts = 0;
+  sup.start = async () => {
+    attempts++;
+    if (draining) throw Error('The previous local runtime is still stopping. Wait before trying again.');
+    return start();
+  };
+  d.replaceRuntime(null);
+  d.app.emit('second-instance');
+  d.app.emit('activate', {}, true);
+  await drain();
+  assert.equal(attempts, 1);
+  assert.equal(d.runtime(), null);
+  assert.equal(d.errors.length, 1);
+  assert.equal(d.errors[0].title, 'BeeZilla could not reconnect');
+  assert.match(d.errors[0].message, /still stopping.*wait/i);
+  assert.equal(d.starts, 1, 'no replacement started while prior ownership remained');
+  assert.equal(d.didExit(), false);
+  draining = false;
+  d.app.emit('second-instance');
+  await drain(); await d.nextNavigation();
+  assert.equal(attempts, 2);
+  assert.ok(d.runtime());
+  assert.notEqual(d.runtime().port, original.port);
+  assert.equal(new URL(d.main.url).port, String(d.runtime().port));
+  assert.equal(d.windows.length, 1);
+  assert.equal(d.errors.length, 1);
+});
