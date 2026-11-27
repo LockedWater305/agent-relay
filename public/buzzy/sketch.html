@@ -1079,10 +1079,14 @@
     // nav sent you here, so a lap of the site left a heap of empty "Sketch board"
     // projects (BZ-13, Nov 2026). One promise, so a burst of strokes still makes one.
     var jobPromise = null;
+    function useSavedBoardAddress(id) {
+      history.replaceState({}, "", "/buzzy/sketch?job=" + encodeURIComponent(id));
+      window.BeeZillaShell?.syncMountedAddress?.();
+    }
     function ensureJob() {
       if (!ownsPage() || !hydrated) return Promise.reject(new Error("Board is not ready."));
       if (jobId) {
-        if (!initialJobId && currentPage()) history.replaceState({}, "", "/buzzy/sketch?job=" + encodeURIComponent(jobId));
+        if (!initialJobId && currentPage()) useSavedBoardAddress(jobId);
         return Promise.resolve(jobId);
       }
       if (jobPromise) return jobPromise;
@@ -1096,7 +1100,7 @@
         if (!r.ok) throw new Error("could not open a board");
         var active = currentPage();
         jobId = id;
-        if (active) history.replaceState({}, "", "/buzzy/sketch?job=" + encodeURIComponent(id));
+        if (active) useSavedBoardAddress(id);
         return id;
       }).catch(function (e) {
         // One failed attempt must not become one POST per brush stroke: retry on a

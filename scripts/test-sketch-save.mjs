@@ -748,3 +748,74 @@ test('canvas-focused keyboard Undo and Redo still persist the board revisions',a
  f.event('keydown',{target,key:'y',ctrlKey:true,preventDefault});await p.save();
  assert.deepEqual(f.data().board,after);assert.equal(f.posts().length,before+2);assert.equal(prevented,2);
 });
+
+for (const target of ['/buzzy/talk', '/buzzy/library']) {
+  test('first saved Sketch keeps its job URL when ' + target + ' is blocked by a failed save', async t => {
+    const f = await fixture(t);
+    const page = await f.mount(null);
+    await page.draw();
+    await page.save();
+    const creation = f.requests.find(request => request.url === '/api/buzzy/jobs');
+    assert.ok(creation);
+    const id = creation.body.id;
+    const canonical = '/buzzy/sketch?job=' + id;
+    assert.equal(f.h.location.pathname + f.h.location.search, canonical, 'the first successful save gives a new board a job URL');
+    assert.equal(f.data(id).board.strokes.length, 1);
+
+    await page.draw();
+    f.failSave(true);
+    assert.equal(await f.h.shell.go(target), false, 'navigation really was blocked');
+    assert.equal(page.stage.isConnected, true, 'the failed draft remains');
+    assert.match(page.el('savedFlag').textContent, /Not saved/);
+    assert.equal(f.data(id).board.strokes.length, 1, 'last confirmed save has not changed');
+    assert.equal(f.h.location.pathname + f.h.location.search, canonical, 'the address must still locate that draft and saved job');
+    assert.equal(f.h.shell.currentKey, canonical, 'history/cache identity tracks the active board');
+
+    f.failSave(false);
+    await page.save();
+    assert.equal(f.data(id).board.strokes.length, 2);
+    assert.equal(await f.h.shell.go(target), true, 'explicit retry still allows the same navigation');
+    f.h.history.back(); await f.h.idle();
+    assert.equal(f.h.location.pathname + f.h.location.search, canonical);
+    await f.mount(id);
+    assert.equal(f.reads().at(-1).response.board.strokes.length, 2, 'the exact last save hydrates on return');
+    assert.equal(f.requests.filter(request => request.url === '/api/buzzy/jobs').length, 1);
+  });
+}
+
+test('a blocked Back from a newly saved Sketch retains its exact address without rewriting the prior Library entry', async t => {
+  const f = await fixture(t);
+  await f.h.shell.go('/buzzy/library?job=unrelated_library_fixture');
+  const page = await f.mount(null);
+  await page.draw(); await page.save(); await page.draw();
+  const canonical = f.h.location.pathname + f.h.location.search;
+  assert.match(canonical, /^\/buzzy\/sketch\?job=job_art_/);
+  f.failSave(true);
+  f.h.history.back();
+  await f.h.idle();
+  assert.equal(f.h.location.pathname + f.h.location.search, canonical);
+  assert.equal(page.stage.isConnected, true);
+  assert.ok(f.h.entries.some(entry => new URL(entry.href).searchParams.get('job') === 'unrelated_library_fixture'));
+  f.failSave(false); await page.save();
+  f.h.history.back(); await f.h.idle();
+  assert.equal(f.h.location.pathname + f.h.location.search, '/buzzy/library?job=unrelated_library_fixture');
+});
+
+test('rapid Talk then Library clicks cannot replace a newly saved Sketch address with an older route', async t => {
+  const f = await fixture(t);
+  const page = await f.mount(null);
+  await page.draw(); await page.save(); await page.draw();
+  const canonical = f.h.location.pathname + f.h.location.search;
+  assert.match(canonical, /^\/buzzy\/sketch\?job=job_art_/);
+  f.failSave(true);
+  f.h.heldFetches.add('/buzzy/talk');
+  const first = f.h.shell.go('/buzzy/talk');
+  const second = f.h.shell.go('/buzzy/library');
+  assert.equal(await second, false, 'the later navigation cannot leave when saving fails');
+  f.h.requests.find(request => request.key === '/buzzy/talk').resolve();
+  assert.equal(await first, false, 'the older navigation was superseded before any commit');
+  await f.h.idle();
+  assert.equal(f.h.location.pathname + f.h.location.search, canonical);
+  assert.equal(page.stage.isConnected, true);
+  assert.equal(f.posts().filter(request => request.response?.saved === true).length, 1);
+});

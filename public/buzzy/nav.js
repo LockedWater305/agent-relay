@@ -1309,9 +1309,7 @@
     return page;
   }
 
-  function finish(key, title, scrollY) {
-    // Talk consumes ?job / ?expert with replaceState during bootstrap. Adopt
-    // that same-page canonical URL, or Back later misses its live DOM cache.
+  function adoptSamePageAddress(key) {
     var canonicalKey = keyOf(location.href);
     if (canonicalKey !== key && canonicalKey.replace(/\?.*$/, "") === key.replace(/\?.*$/, "")) {
       var page = document.getElementById("bzPage");
@@ -1328,7 +1326,20 @@
       if (page) page.setAttribute("data-bz-path", canonicalKey);
       key = canonicalKey;
     }
-    currentKey = key;
+    return key;
+  }
+
+  function syncMountedAddress() {
+    // A mounted page may gain its durable job through replaceState after
+    // bootstrap. Don't mistake a pending navigation's URL for that page.
+    if (busy || !currentReady) return;
+    currentKey = adoptSamePageAddress(currentKey);
+  }
+
+  function finish(key, title, scrollY) {
+    // Talk consumes ?job / ?expert with replaceState during bootstrap. Adopt
+    // that same-page canonical URL, or Back later misses its live DOM cache.
+    currentKey = key = adoptSamePageAddress(key);
     currentReady = true;
     adoptStyles(null, key);
     setTitle(title);
@@ -1512,5 +1523,5 @@
     go(location.href, { push: false });
   });
 
-  window.BeeZillaShell = { go: go, cache: cache, get busy() { return busy; }, get currentKey() { return currentKey; }, get navigationEpoch() { return navigationId; } };
+  window.BeeZillaShell = { go: go, syncMountedAddress: syncMountedAddress, cache: cache, get busy() { return busy; }, get currentKey() { return currentKey; }, get navigationEpoch() { return navigationId; } };
 })();
