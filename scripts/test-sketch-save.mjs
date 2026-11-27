@@ -819,3 +819,62 @@ test('rapid Talk then Library clicks cannot replace a newly saved Sketch address
   assert.equal(page.stage.isConnected, true);
   assert.equal(f.posts().filter(request => request.response?.saved === true).length, 1);
 });
+
+test('a stationary Brush mark paints a round dot and retains its exact one-point record through Undo and Redo',async t=>{
+ const f=await fixture(t,{version:1,strokes:[],images:[]});
+ const notes=[];
+ const create=f.h.document.createElement.bind(f.h.document);
+ f.h.document.createElement=tag=>{
+  const el=create(tag);
+  if(tag==='canvas'){
+   let path, prior;
+   const real={
+    globalAlpha:0.6,globalCompositeOperation:'multiply',
+    save(){prior=this.fillStyle;},restore(){this.fillStyle=prior;},beginPath(){path=null;},
+    arc(...args){path=args;},
+    fill(){notes.push({path,paint:this.fillStyle,alpha:this.globalAlpha,composition:this.globalCompositeOperation});},
+   };
+   el.getContext=()=>new Proxy(real,{get:(o,k)=>Object.hasOwn(o,k)?o[k]:()=>{}});
+  }
+  return el;
+ };
+ const p=await f.mount();
+ p.tools.find(node=>node.getAttribute('data-tool')==='pen').click();
+ p.el('board').dispatch('pointerdown',{clientX:126,clientY:167,pointerId:1,pointerType:'pen',pressure:0.21});
+ p.el('board').dispatch('pointerup',{pointerId:1,pointerType:'pen',pressure:0});
+ await p.save();
+ const stored=plain(f.data().board);
+ assert.deepEqual(stored.strokes.map(({id,...s})=>s),[{tool:'pen',color:'#ffd40d',width:3,points:[{x:126,y:167}]}]);
+ assert.deepEqual(notes.at(-1),{path:[126,167,1.5,0,Math.PI*2],paint:'#ffd40d',alpha:0.6,composition:'multiply'});
+ const paintCount=notes.length;
+ p.el('undo').click();await p.save();
+ assert.deepEqual(f.data().board.strokes,[]);assert.equal(notes.length,paintCount);
+ p.el('redo').click();await p.save();
+ assert.deepEqual(f.data().board,stored);assert.ok(notes.length>paintCount);
+ p.tools.find(node=>node.getAttribute('data-tool')==='select').click();
+ p.el('board').dispatch('pointerdown',{clientX:126,clientY:167,pointerId:1});
+ f.event('keydown',{key:'Delete',target:p.el('board')});await p.save();
+ assert.deepEqual(f.data().board.strokes,[],'the visible dot can also be selected and deleted');
+});
+
+test('the SVG Brush dot keeps benign attribute text literal and skips an invalid circle width',async t=>{
+ const board={version:1,images:[],strokes:[
+  {id:'dot-literal',tool:'pen',points:[{x:81.5,y:110.25}],width:5,color:'var(--ink) /* "Blue & gold" */'},
+  {id:'dot-invalid-width',tool:'pen',points:[{x:52,y:96}],width:-2,color:'#ffd40d'},
+  {id:'prior-pen-path',tool:'pen',points:[{x:90,y:30},{x:105,y:40}],width:3,color:'#ffd40d'},
+ ]};
+ const f=await fixture(t,board);let result;
+ f.h.context.Blob=Blob;
+ f.h.context.URL=class extends URL{
+  static createObjectURL(blob){result=blob.text();return 'blob:synthetic-svg';}
+  static revokeObjectURL(){}
+ };
+ const p=await f.mount();p.el('svg').click();
+ assert.ok(result,'the actual SVG control exported');
+ const svg=await result;
+ assert.equal((svg.match(/<circle\b/g)||[]).length,1);
+ assert.ok(svg.includes('<circle cx="81.5" cy="110.25" r="2.5" fill="var(--ink) /* &quot;Blue &amp; gold&quot; */"/>'),svg);
+ assert.ok(svg.includes('<path d="M90 30 L105 40" fill="none" stroke="#ffd40d" stroke-width="3"'));
+ assert.deepEqual(f.data().board,board);
+ assert.equal(f.posts().length,0);
+});

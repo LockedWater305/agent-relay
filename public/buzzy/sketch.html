@@ -376,6 +376,10 @@
           return;
         }
         if (st.tool === "pen" && st.points) {
+          if (st.points.length === 1) {
+            var dotD = segDist(p, st.points[0], st.points[0]);
+            if (dotD < bestD) { bestD = dotD; best = st; }
+          }
           for (var i = 1; i < st.points.length; i++) {
             var d = segDist(p, st.points[i - 1], st.points[i]);
             if (d < bestD) { bestD = d; best = st; }
@@ -411,6 +415,17 @@
       if (draft) drawStroke(draft, true);
     }
 
+    function drawBrushDot(context, point) {
+      // With no segment, Canvas cannot stroke a round cap. Fill the same
+      // radius with the brush's color and leave its compositing state alone.
+      context.save();
+      context.fillStyle = context.strokeStyle;
+      context.beginPath();
+      context.arc(point.x, point.y, context.lineWidth / 2, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+    }
+
     function drawStroke(s, isDraft) {
       ctx.strokeStyle = s.color || color;
       ctx.fillStyle = s.color || color;
@@ -418,22 +433,31 @@
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.setLineDash(isDraft ? [6, 4] : []);
+      var brushDot = s.tool === "pen" && s.points.length === 1;
       if (s === selectedStroke) {
         ctx.lineWidth = (s.width || 3) + 6;
         ctx.strokeStyle = "rgba(255,212,13,0.25)";
-        ctx.beginPath();
-        if (s.tool === "pen" && s.points) { ctx.moveTo(s.points[0].x, s.points[0].y);
-          for (var i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y); }
-        else if (s.tool !== "text") { ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); }
-        ctx.stroke();
+        if (brushDot) {
+          drawBrushDot(ctx, s.points[0]);
+          ctx.strokeStyle = s.color || color;
+        } else {
+          ctx.beginPath();
+          if (s.tool === "pen" && s.points) { ctx.moveTo(s.points[0].x, s.points[0].y);
+            for (var i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y); }
+          else if (s.tool !== "text") { ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); }
+          ctx.stroke();
+        }
         ctx.lineWidth = s.width || 3;
       }
       if (s.tool === "pen") {
         if (!s.points.length) return;
-        ctx.beginPath();
-        ctx.moveTo(s.points[0].x, s.points[0].y);
-        for (var i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
-        ctx.stroke();
+        if (brushDot) drawBrushDot(ctx, s.points[0]);
+        else {
+          ctx.beginPath();
+          ctx.moveTo(s.points[0].x, s.points[0].y);
+          for (var i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+          ctx.stroke();
+        }
       } else if (s.tool === "line" || s.tool === "arrow") {
         ctx.beginPath();
         ctx.moveTo(s.x1, s.y1);
@@ -735,7 +759,8 @@
         captureStrokes.forEach(function (st) {
           c.strokeStyle = st.color || captureColor; c.fillStyle = st.color || captureColor;
           c.lineWidth = st.width || 3; c.lineCap = "round"; c.lineJoin = "round";
-          if (st.tool === "pen") { c.beginPath(); c.moveTo(st.points[0].x, st.points[0].y);
+          if (st.tool === "pen" && st.points.length === 1) drawBrushDot(c, st.points[0]);
+          else if (st.tool === "pen") { c.beginPath(); c.moveTo(st.points[0].x, st.points[0].y);
             for (var i = 1; i < st.points.length; i++) c.lineTo(st.points[i].x, st.points[i].y); c.stroke(); }
           else if (st.tool === "line" || st.tool === "arrow") { c.beginPath(); c.moveTo(st.x1, st.y1); c.lineTo(st.x2, st.y2); c.stroke();
             if (st.tool === "arrow") { var a = Math.atan2(st.y2 - st.y1, st.x2 - st.x1), h = 12;
@@ -795,10 +820,18 @@
       function esc(t) {
         return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       }
+      function xmlAttribute(value) {
+        return esc(value).replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+      }
       strokes.forEach(function (st) {
         var c = st.color || "#ffd40d";
         var w = st.width || 3;
-        if (st.tool === "pen" && st.points && st.points.length) {
+        if (st.tool === "pen" && st.points && st.points.length === 1) {
+          var point = st.points[0];
+          if (Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(w) && w > 0) {
+            parts.push('<circle cx="' + xmlAttribute(point.x) + '" cy="' + xmlAttribute(point.y) + '" r="' + xmlAttribute(w / 2) + '" fill="' + xmlAttribute(c) + '"/>');
+          }
+        } else if (st.tool === "pen" && st.points && st.points.length) {
           var d = st.points.map(function (p, i) { return (i ? "L" : "M") + p.x + " " + p.y; }).join(" ");
           parts.push('<path d="' + d + '" fill="none" stroke="' + c + '" stroke-width="' + w +
             '" stroke-linecap="round" stroke-linejoin="round"/>');
