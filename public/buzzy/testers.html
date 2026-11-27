@@ -214,6 +214,11 @@
 
     document.getElementById("grant").addEventListener("click", function () {
       var btn = this;
+      function currentGrantPanel() {
+        return btn.isConnected && !testerBody.hidden && testerBody.contains(btn) &&
+          document.getElementById("body") === testerBody && !testerBody.closest("#bzPageCache");
+      }
+      if (!currentGrantPanel() || btn.disabled) return;
       var email = document.getElementById("email").value.trim();
       var plan = document.getElementById("plan").value;
       var until = document.getElementById("until").value;
@@ -229,9 +234,13 @@
         headers: { "content-type": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify(body),
-      }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; }); })
+      }).then(function (r) {
+        if (accessDenied(r) || !currentGrantPanel()) return null;
+        return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
+      })
         .then(function (out) {
           btn.disabled = false;
+          if (!out || !currentGrantPanel()) return;
           if (out.ok && out.j && out.j.ok) {
             status.className = "status good";
             status.textContent = email + " is on " + (out.j.plan || plan) + (out.j.planUntil ? " until " + new Date(out.j.planUntil).toLocaleDateString() : "") + ".";
@@ -240,7 +249,12 @@
             status.textContent = (out.j && out.j.error) || "Could not set that plan.";
           }
         })
-        .catch(function () { btn.disabled = false; status.className = "status bad"; status.textContent = "Could not set that plan — check your connection."; });
+        .catch(function () {
+          btn.disabled = false;
+          if (!currentGrantPanel()) return;
+          status.className = "status bad";
+          status.textContent = "Could not set that plan — check your connection.";
+        });
     });
   })();
   </script>
