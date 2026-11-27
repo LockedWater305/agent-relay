@@ -218,7 +218,7 @@ async function bounded(work, ms) {
  */
 /**
  * @param {{open: (url: string) => Promise<void>, evaluate: (script: string) => Promise<unknown>, close: () => Promise<void>|void, isOpen?: () => boolean, baseUrl?: string, signInDeadlineMs?: number, pollMs?: number, operationTimeoutMs?: number}} deps
- * @returns {Promise<{ok: boolean, token?: string, expiresAt?: string, baseUrl?: string, model?: string, error?: string, needsSignIn?: boolean}>}
+ * @returns {Promise<{ok: boolean, token?: string, expiresAt?: string, baseUrl?: string, model?: string, error?: string, needsSignIn?: boolean, cancelled?: boolean}>}
  */
 export async function connectAccount(deps) {
   let base;
@@ -233,6 +233,21 @@ export async function connectAccount(deps) {
 
   const operationTimeout = duration(deps.operationTimeoutMs, 15_000);
   const evaluate = (script, ms = operationTimeout) => bounded(() => deps.evaluate(script), ms);
+  const cancelledMint = { ok: false, needsSignIn: true, cancelled: true, error: "BeeZilla account connection was cancelled." };
+  const mintWhileOpen = async (ms) => {
+    let raw;
+    try {
+      raw = await evaluate(MINT_SCRIPT, ms);
+    } catch (error) {
+      // A destroyed window can reject or never resolve its borrowed JavaScript.
+      // Do not turn a user close into a network diagnosis when the bound expires.
+      if (deps.isOpen?.() === false) return cancelledMint;
+      throw error;
+    }
+    // A result arriving after the owner closed the window is not permission to
+    // accept its credentials, even if the server minted them successfully.
+    return deps.isOpen?.() === false ? cancelledMint : interpretMintResult(raw);
+  };
   // The BrowserWindow owns the pending browser work. Closing it also ends
   // a slow navigation or an evaluation whose response missed its deadline.
   const close = async () => { try { await bounded(() => deps.close(), operationTimeout); } catch { /* best effort */ } };
@@ -250,7 +265,7 @@ export async function connectAccount(deps) {
   let search = null;
   try {
     try {
-      outcome = interpretMintResult(await evaluate(MINT_SCRIPT));
+      outcome = await mintWhileOpen();
     } catch (err) {
       if (isUnreachable(err)) return { ok: false, unreachable: true, error: unreachableMessage(base) };
       throw err;
@@ -261,13 +276,13 @@ export async function connectAccount(deps) {
     // land. The user closes the window to give up.
     const deadline = performance.now() + duration(deps.signInDeadlineMs, 180_000);
     const pollMs = duration(deps.pollMs, 2_000);
-    while (!outcome.ok && outcome.needsSignIn && performance.now() < deadline) {
+    while (!outcome.ok && !outcome.cancelled && outcome.needsSignIn && performance.now() < deadline) {
       if (deps.isOpen && !deps.isOpen()) break;
       await wait(Math.min(pollMs, deadline - performance.now()));
       const remaining = deadline - performance.now();
       if (remaining <= 0 || (deps.isOpen && !deps.isOpen())) break;
       try {
-        outcome = interpretMintResult(await evaluate(MINT_SCRIPT, Math.min(operationTimeout, remaining)));
+        outcome = await mintWhileOpen(Math.min(operationTimeout, remaining));
       } catch (err) {
         // Running out of sign-in time is not a connectivity diagnosis.
         if (remaining <= operationTimeout && err instanceof ConnectDeadlineError) break;

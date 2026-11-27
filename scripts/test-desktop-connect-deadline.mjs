@@ -95,3 +95,37 @@ test("sign-in still proceeds through optional search and profile after an initia
   assert.equal(result.search.notDeployed, true);
   assert.equal(result.account.name, "Fixture");
 });
+
+for (const stage of ["first", "retry"]) {
+  for (const completion of ["timeout", "rejected transport", "late valid token"]) {
+    test(`window closed during ${stage} mint (${completion}) stays cancelled, not unreachable or authenticated`, async () => {
+      let open = true, closes = 0, mints = 0;
+      const scripts = [];
+      const result = await within(connectAccount({
+        baseUrl, operationTimeoutMs: 35, signInDeadlineMs: 200, pollMs: 1,
+        open: async () => {},
+        isOpen: () => open,
+        evaluate(script) {
+          scripts.push(script);
+          if (script !== MINT_SCRIPT) return {};
+          if (++mints === 1 && stage === "retry") return signIn;
+          return Promise.resolve().then(() => {
+            open = false;
+            if (completion === "timeout") return never();
+            if (completion === "rejected transport") throw new Error("ERR_CONNECTION_REFUSED");
+            return mint;
+          });
+        },
+        close: () => { closes++; return never(); },
+      }));
+      assert.equal(result.ok, false);
+      assert.equal(result.cancelled, true);
+      assert.equal(result.needsSignIn, true);
+      assert.equal(result.unreachable, undefined);
+      assert.equal(result.token, undefined);
+      assert.match(result.error, /cancelled/i);
+      assert.deepEqual(scripts, stage === "first" ? [MINT_SCRIPT] : [MINT_SCRIPT, MINT_SCRIPT]);
+      assert.equal(closes, 1);
+    });
+  }
+}
