@@ -1014,8 +1014,9 @@
 
     var text, diagBox, diagSee, mic, hint, send, status;
     var shot = null;
+    var shotGeneration = 0;
     function refs() {
-      if (text) return;
+      if (text && body.contains(text)) return;
       text = body.querySelector("#bzFbText");
       diagBox = body.querySelector("#bzFbDiagBox");
       diagSee = body.querySelector("#bzFbSee");
@@ -1203,6 +1204,7 @@
       } else if (el.id === "bzFbSend") {
         submit();
       } else if (el.id === "bzFbShotDrop") {
+        shotGeneration += 1;
         shot = null;
         var row = body.querySelector("#bzFbShotRow");
         var input = body.querySelector("#bzFbShot");
@@ -1226,6 +1228,7 @@
       var img = body.querySelector("#bzFbShotImg");
       var file = input.files && input.files[0];
       if (!file) return;
+      var readGeneration = ++shotGeneration;
       if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
         if (h) h.textContent = "Pick a PNG, JPEG or WebP picture.";
         input.value = "";
@@ -1233,6 +1236,7 @@
       }
       var reader = new FileReader();
       reader.onload = function () {
+        if (!body.contains(input) || readGeneration !== shotGeneration) return;
         var data = String(reader.result || "");
         if (data.length > SHOT_MAX) {
           shot = null;
@@ -1273,10 +1277,15 @@
       sending = true;
       send.disabled = true;
       status.textContent = "Sending\u2026";
+      // Bound both the request and receipt read, not just time to headers.
+      // A lost receipt is ambiguous: let the person choose, never auto-retry.
+      var controller = new AbortController();
+      var deadline = setTimeout(function () { controller.abort(); }, 45000);
       fetch("/api/buzzy/feedback", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       }).then(function (res) {
         return res.json().then(function (j) { return { res: res, j: j }; });
       }).then(function (out) {
@@ -1289,6 +1298,7 @@
             '<button type="button" class="bz-fb-link" id="bzFbAgain">Send another</button></div>';
           body.querySelector("#bzFbAgain").addEventListener("click", function () {
             mounted = false;
+            shot = null;
             body.innerHTML = "";
             mount();
             refs();
@@ -1296,13 +1306,15 @@
           });
         } else {
           send.disabled = false;
+          send.textContent = "Try again";
           status.textContent = (out.j && out.j.error) || "Could not send \u2014 try again in a moment.";
         }
       }).catch(function () {
         sending = false;
         send.disabled = false;
-        status.textContent = "Could not send \u2014 check your connection and try again.";
-      });
+        send.textContent = "Try again";
+        status.textContent = "We could not confirm that your report arrived. Your draft is still here. Retrying could send it twice.";
+      }).finally(function () { clearTimeout(deadline); });
     }
   }
 
