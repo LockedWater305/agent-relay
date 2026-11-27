@@ -201,9 +201,14 @@ if (existing) {
 // server-computed digest when exporting assets via "release view --json".
 const remote = run("gh", ["api", `repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`], { capture: true });
 const parsed = JSON.parse(remote);
+if (parsed.prerelease !== prerelease) {
+  console.error(`FAILED: expected prerelease=${prerelease}, GitHub now reports prerelease=${parsed.prerelease}; check the release channel`);
+  process.exit(1);
+}
 const wanted = `BeeZilla-Setup-${version}.exe`;
-const legacy = `BeeZilla.Setup.${version}.exe`; // GitHub turns spaces into dots
-const asset = parsed.assets.find((a) => a.name === wanted || a.name === legacy);
+// This invocation uploads the canonical basename, not the dotted legacy file.
+// A different asset with matching bytes does not verify the file just posted.
+const asset = parsed.assets.find((a) => a.name === wanted);
 if (!asset) {
   console.error(`FAILED: ${tag} has no installer asset`);
   process.exit(1);

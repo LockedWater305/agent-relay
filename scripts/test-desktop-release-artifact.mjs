@@ -43,7 +43,7 @@ function run(t, assets, prerelease = true, opts = {}) {
       }
       if(cmd==="gh" && args[0]==="release" && ["create","upload"].includes(args[1])) return "";
       if(cmd==="gh" && args[0]==="api" && args[1].endsWith("/releases/tags/desktop-v0.0.1"))
-        return JSON.stringify({assets, prerelease, html_url:"fixture://release"});
+        return JSON.stringify({assets, prerelease:process.env.BZ_FIXTURE_FINAL_CHANNEL === "stable" ? false : prerelease, html_url:"fixture://release"});
       throw Error("Unexpected fixture command: "+[cmd,...args].join(" "));
     };
     require("node:module").syncBuiltinESMExports();
@@ -100,4 +100,19 @@ test("a missing release is created as a prerelease rather than clobbered",t=>{
   assert.equal(r.code,0,r.text);
   const writes=r.calls.filter(changed); assert.equal(writes.length,1);
   assert.deepEqual(writes[0].slice(0,3),["gh","release","create"]); assert.ok(writes[0].includes("--prerelease"));
+});
+
+test("an old dotted-name installer cannot stand in for the named upload",t=>{
+  const r=run(t,[{name:"BeeZilla.Setup.0.0.1.exe",size:file.length,digest:"sha256:"+sha}]);
+  assert.notEqual(r.code,0,r.text);assert.doesNotMatch(r.text,/verified on GitHub/i);
+});
+test("verify the canonical upload even when a legacy asset precedes it",t=>{
+  const legacy={name:"BeeZilla.Setup.0.0.1.exe",size:file.length,digest:"sha256:"+sha};
+  const r=run(t,[legacy,{name,size:file.length,digest:"sha256:"+"0".repeat(64)}]);
+  assert.notEqual(r.code,0,r.text);assert.doesNotMatch(r.text,/verified on GitHub/i);
+});
+
+test("do not report success if the release channel changed after preflight",t=>{
+  const r=run(t,expected,true,{BZ_FIXTURE_FINAL_CHANNEL:"stable"});
+  assert.notEqual(r.code,0,r.text);assert.doesNotMatch(r.text,/verified on GitHub/i);
 });
