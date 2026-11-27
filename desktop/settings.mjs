@@ -38,7 +38,35 @@ const {
   resolveMusicKey,
   saveMusicKey,
   clearMusicKey,
+  describeElevenKeyProblem,
 } = await runtimeLib("scripts/lib/music-keys.mjs");
+
+// Send actionable, fixed text to the renderer, not native errors (which may
+// contain document responses, credentials, or private filesystem locations).
+export function publicSettingsResult({ reason, restartFault, ...result }) {
+  if (reason === undefined) return result;
+  return {
+    ...result,
+    reason: restartFault === "document"
+      ? "Library history or Sketch changes are not safely saved yet."
+      : "The local runtime did not restart. Retry the change from Settings.",
+  };
+}
+
+export function publicSettingsFailure(action, payload) {
+  const key = typeof payload?.key === "string" ? payload.key : "";
+  if (action === "saveInference" && !key.trim()) return "a key is required";
+  if (action === "saveSearch" && !key.trim()) return "a search key is required";
+  if (action === "saveMusic") {
+    const problem = describeElevenKeyProblem(key);
+    if (problem) return problem;
+  }
+  if (action === "clear" && !["search", "inference", "music"].includes(payload)) {
+    return "Select a credential to remove.";
+  }
+  if (action === "get") return "BeeZilla could not read Settings. Reopen Settings to try again.";
+  return "BeeZilla could not confirm the Settings change. Check that its local data folder is writable, then reopen Settings to check and retry.";
+}
 
 /**
  * @param {{ dataDir: () => string, supervisor?: any, cipher?: {encrypt?:Function, decrypt?:Function}, beforeRestart?: Function, afterRestart?: Function, afterRestartFinally?: Function, isStoredInferenceApplied?: Function, hasInjectedInferenceKey?: Function }} deps
@@ -95,20 +123,23 @@ export function createSettingsHandlers({ dataDir, supervisor, cipher = {}, befor
 
   const restart = async () => {
     if (!supervisor) return { restarted: false, reason: "no supervisor" };
+    let restartFault = "document";
     try {
       // The runtime inherits credentials from the parent environment, so the new
       // key must be decrypted into process.env BEFORE the child is spawned.
       if (beforeRestart) await beforeRestart();
+      restartFault = "runtime";
       // Always start afterwards, even if nothing was running: a user who saves a
       // key on a stopped (or crashed) runtime must end up with a working app, not
       // a "saved" dialog over a dead window.
       const wasRunning = await supervisor.isHealthy(supervisor.runtime);
       await supervisor.stop();
       const rt = await supervisor.start();
+      restartFault = "document";
       if (afterRestart) await afterRestart(rt);
       return { restarted: wasRunning, started: !wasRunning, port: rt?.port ?? null };
     } catch (err) {
-      return { restarted: false, reason: err instanceof Error ? err.message : String(err) };
+      return { restarted: false, restartFault, reason: err instanceof Error ? err.message : String(err) };
     } finally {
       if (afterRestartFinally) await afterRestartFinally();
     }

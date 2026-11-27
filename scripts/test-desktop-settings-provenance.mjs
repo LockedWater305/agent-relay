@@ -692,3 +692,47 @@ test('a second Quit while saving cannot bypass the first pending barrier', async
   assert.equal(prevented, 2); assert.equal(fx.lifecycle.includes('exit'), false);
   release(); await first; assert.equal(db.rows.size, 2); assert.equal(fx.lifecycle.filter(x => x === 'exit').length, 1);
 });
+
+const hiddenSettingEmail = 'fixture-owner@example.invalid';
+test('Settings storage failure does not disclose its local profile path', async (t) => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), hiddenSettingEmail + '-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'inference.json'));
+  const fx = await fixture(t, { dir });
+  const rejected = await fx.bridge.saveInference({key:'synthetic-key-storage-fault-123456'});
+  assert.equal(rejected.ok, false);
+  assert.ok(!JSON.stringify(rejected).includes(hiddenSettingEmail));
+  assert.match(rejected.error, /check.*local data folder/i);
+  for (const [method,payload,message] of [
+    ['saveInference',{key:''},/key is required/i],
+    ['saveMusic',{key:''},/Paste your ElevenLabs API key/i],
+    ['saveMusic',{key:'f'.repeat(64)},/key ID, not the key/i],
+  ]) {
+    const invalid = await fx.bridge[method](payload);
+    assert.equal(invalid.ok, false);
+    assert.match(invalid.error, message);
+  }
+});
+test('Settings runtime stop fault keeps saved status and hides private detail', async (t) => {
+  const fx = await fixture(t);
+  fx.setStopFailure(true);
+  const result = await fx.bridge.saveSearch({key:'synthetic-key-search-fault-123456'});
+  assert.equal(result.ok, true);
+  assert.equal(result.data.restarted, false);
+  assert.equal(result.data.status.search.provider, 'brave');
+  assert.equal(fx.starts.length, 1);
+  assert.match(result.data.reason, /local runtime did not restart/i);
+  assert.doesNotMatch(result.data.reason, /synthetic safe-stop failure/);
+});
+test('Settings keeps Library retry guidance without forwarding local fault contents', async (t) => {
+  const hiddenProviderDetail = 'fixture-provider-credential-body';
+  const libraryFetch = async () => Response.json({ok:false,error:`Read timed out for ${hiddenSettingEmail} (${hiddenProviderDetail})`}, {status:503});
+  const fx = await fixture(t, { libraryStorage: historyMap(), libraryFetch });
+  const result = await fx.bridge.saveSearch({key:'synthetic-key-search-library-123456'});
+  assert.equal(result.ok, true);
+  assert.equal(result.data.restarted, false);
+  assert.equal(fx.starts.length, 1);
+  assert.equal(fx.lifecycle.includes('stop'), false);
+  assert.match(result.data.reason, /Library history/i);
+  for (const marker of [hiddenSettingEmail,hiddenProviderDetail]) assert.ok(!JSON.stringify(result).includes(marker));
+});

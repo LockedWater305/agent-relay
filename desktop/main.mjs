@@ -407,7 +407,7 @@ function registerSettingsIpc() {
   // Imported here, not at the top: settings.mjs loads the runtime's credential
   // libraries, so a broken install must fail inside this try/catch (logged, and
   // shown as a sentence) rather than at module-link time before logging exists.
-  return import("./settings.mjs").then(({ createSettingsHandlers }) => {
+  return import("./settings.mjs").then(({ createSettingsHandlers, publicSettingsResult, publicSettingsFailure }) => {
     const handlers = createSettingsHandlers({
       dataDir: () => supervisor.dataDir,
       supervisor,
@@ -453,23 +453,24 @@ function registerSettingsIpc() {
       },
     });
 
-    const wrap = (fn) => async (event, payload) => {
+    const wrap = (fn, settingsAction = null) => async (event, payload) => {
       try {
         if (!isTrustedSender(event, { base: runtimeBase, contents: trustedContents(), testPageUrl })) {
           return { ok: false, error: "This action is available only from the BeeZilla app window." };
         }
-        return { ok: true, data: await fn(payload) };
+        const data = await fn(payload);
+        return { ok: true, data: settingsAction ? publicSettingsResult(data) : data };
       } catch (err) {
-        // The page shows this text, so it must be a sentence a user can act on.
+        if (settingsAction) return { ok: false, error: publicSettingsFailure(settingsAction, payload) };
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     };
 
-    ipcMain.handle("beezilla:settings:get", wrap(() => handlers.status()));
-    ipcMain.handle("beezilla:settings:saveInference", wrap((cfg) => handlers.saveInference(cfg)));
-    ipcMain.handle("beezilla:settings:saveSearch", wrap((cfg) => handlers.saveSearch(cfg)));
-    ipcMain.handle("beezilla:settings:saveMusic", wrap((cfg) => handlers.saveMusic(cfg)));
-    ipcMain.handle("beezilla:settings:clear", wrap((kind) => handlers.clear(kind)));
+    ipcMain.handle("beezilla:settings:get", wrap(() => handlers.status(), "get"));
+    ipcMain.handle("beezilla:settings:saveInference", wrap((cfg) => handlers.saveInference(cfg), "saveInference"));
+    ipcMain.handle("beezilla:settings:saveSearch", wrap((cfg) => handlers.saveSearch(cfg), "saveSearch"));
+    ipcMain.handle("beezilla:settings:saveMusic", wrap((cfg) => handlers.saveMusic(cfg), "saveMusic"));
+    ipcMain.handle("beezilla:settings:clear", wrap((kind) => handlers.clear(kind), "clear"));
     ipcMain.handle("beezilla:app:version", wrap(() => ({ version: app.getVersion() })));
     // "Connect BeeZilla account" from the Settings screen: same flow as the menu item.
     ipcMain.handle("beezilla:settings:connect", wrap(() => connectManagedAccount()));
