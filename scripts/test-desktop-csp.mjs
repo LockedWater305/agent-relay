@@ -1,6 +1,7 @@
 /** Portable CSP regressions. No Electron/browser, network, credentials, or user data. */
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -277,12 +278,56 @@ test("tracking is bounded without evicting the authorization for delayed request
   assert.equal(authorize({ ...request, id: 129 }).cancel, undefined);
 });
 
+test("the complete-build CLI requires the server entry; CSP-only mode stays renderer-only", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "beezilla-postbuild-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const tree of ["public", ".output/public"]) {
+    cpSync(join(fixture, tree), join(root, tree), { recursive: true });
+  }
+  for (const dir of ["scripts", "desktop"]) mkdirSync(join(root, dir), { recursive: true });
+  const cli = join(root, "scripts/build-desktop-csp.mjs");
+  copyFileSync(join(ROOT, "scripts/build-desktop-csp.mjs"), cli);
+  for (const file of ["csp.mjs", "security.mjs"]) {
+    copyFileSync(join(ROOT, "desktop", file), join(root, "desktop", file));
+  }
+  const run = (...args) => {
+    const result = spawnSync(process.execPath, [cli, ...args], { cwd: tmpdir(), encoding: "utf8", timeout: 10_000 });
+    assert.ifError(result.error);
+    return result;
+  };
+  const target = join(root, CSP_MANIFEST_PATH);
+  const entry = join(root, ".output/server/index.mjs");
+  const runComplete = () => run("--require-server-entry");
+  const rejects = () => {
+    const result = runComplete();
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /complete build requires a nonempty regular \.output\/server\/index\.mjs/);
+    assert.equal(existsSync(target), false, "do not generate a fresh success manifest on incomplete output");
+  };
+  rejects();
+  const rendererOnly = run();
+  assert.equal(rendererOnly.status, 0, rendererOnly.stderr);
+  assert.ok(existsSync(target));
+  rmSync(target);
+  mkdirSync(join(root, ".output/server"));
+  writeFileSync(entry, "");
+  rejects();
+  rmSync(entry);
+  mkdirSync(entry);
+  rejects();
+  rmSync(entry, { recursive: true });
+  writeFileSync(entry, "export {};\n");
+  const complete = runComplete();
+  assert.equal(complete.status, 0, complete.stderr);
+  assert.deepEqual(loadCspManifest(root), manifest);
+});
+
 test("build/package/start wiring includes the manifest and never suppresses warnings", () => {
   const main = read("desktop/main.mjs");
   const dist = read("desktop/dist.mjs");
   const pkg = JSON.parse(read("package.json"));
   const desktopPkg = JSON.parse(read("desktop/package.json"));
-  assert.match(pkg.scripts.postbuild, /node scripts\/build-desktop-csp\.mjs/);
+  assert.match(pkg.scripts.postbuild, /node scripts\/build-desktop-csp\.mjs --require-server-entry\b/);
   assert.match(pkg.scripts["test:desktop-boundaries"], /test-desktop-csp\.mjs/);
   assert.ok(desktopPkg.build.files.includes("csp.mjs"));
   assert.ok(!desktopPkg.build.files.includes("build-desktop-csp.mjs"));

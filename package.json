@@ -55,7 +55,7 @@
     "start": "node scripts/migrate.mjs && node scripts/start-server.mjs",
     "local": "node scripts/beezilla-local.mjs",
     "test:local": "node scripts/test-local-e2e.mjs",
-    "postbuild": "node scripts/build-desktop-csp.mjs && echo build complete",
+    "postbuild": "node scripts/build-desktop-csp.mjs --require-server-entry && echo build complete",
     "test:history": "npx tsx scripts/test-history.ts",
     "test:build-order": "npx tsx scripts/test-build-order.ts",
     "test:refresh-scope": "npx tsx scripts/test-refresh-scope.ts",

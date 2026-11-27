@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
  * Build a desktop CSP manifest from shipped bytes, without running page code.
+ * Complete app builds pass --require-server-entry; the default is CSP-only.
  * The shell's ACTUAL runScripts implementation emits its inline batches into
  * an inert DOM adapter. No duplicated wrapping/joining algorithm can drift.
  * This VM is build/test-only; neither it nor this generator ships in app.asar.
@@ -8,7 +9,7 @@
  * host callbacks can expose host capabilities to modified navigation code.
  * Never use this adapter to process untrusted/user-supplied navigation code.
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { lstatSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createContext, Script } from "node:vm";
@@ -163,6 +164,12 @@ export async function writeCspManifest(root) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  if (process.argv.slice(2).includes("--require-server-entry")) {
+    const entry = lstatSync(join(root, ".output/server/index.mjs"), { throwIfNoEntry: false });
+    if (!entry?.isFile() || entry.size === 0) {
+      fail("complete build requires a nonempty regular .output/server/index.mjs");
+    }
+  }
   const manifest = await writeCspManifest(root);
   console.log(`[desktop-csp] ${manifest.scriptHashes.length} inline hashes, ${manifest.scriptPaths.length} exact script paths; both public trees verified`);
 }
