@@ -710,3 +710,29 @@ test('runtime recovery UX: Settings does not assume ownership of an unrelated un
   assert.equal(d.didExit(), false);
   assert.match(d.errors[0].message, /not ready.*window/i);
 });
+
+for (const platform of ['darwin', 'win32']) {
+  test(`keyboard Settings shows an existing hidden window on ${platform} without reloading its controls`, async t => {
+    const f = await fixture(t); await f.mount();
+    const g = await fixture(t);
+    const d = await desktop(t, [f, g], { platform });
+    const command = d.menu.template.flatMap(item => item.submenu || []).find(item => item.accelerator === 'CmdOrCtrl+,');
+    command.click(); await drain();
+    const win = d.api.currentSettings();
+    let visible = false;
+    const calls = [];
+    win.isVisible = () => visible;
+    win.isMinimized = () => false;
+    win.show = () => { calls.push('show'); visible = true; };
+    win.focus = () => { calls.push('focus'); };
+    const requests = d.requests.length;
+    command.click(); await drain();
+    assert.equal(visible, true, 'keyboard command must actually show the hidden Settings');
+    assert.deepEqual(calls, ['show']);
+    assert.equal(d.windows.length, 2);
+    assert.equal(d.api.currentSettings(), win);
+    assert.equal(d.requests.length, requests, 'keep the same Settings document and keyboard state');
+    assert.equal(d.starts, 1);
+    assert.equal(d.errors.length, 0);
+  });
+}

@@ -799,7 +799,8 @@ function openSettings() {
   if (quitting || acquireLibraryTransition.held()) return;
   if (settingsWindow) {
     if (settingsWindow.isMinimized()) settingsWindow.restore();
-    settingsWindow.focus();
+    if (settingsWindow.isVisible()) settingsWindow.focus();
+    else settingsWindow.show();
     if (!settingsPagesToRetry.has(settingsWindow) && currentRuntimeBinding(supervisor.runtime)) return;
   }
   // The supervisor shares startup, but each awaiting menu click would still
