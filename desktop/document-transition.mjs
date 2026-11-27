@@ -3,9 +3,22 @@
 import { randomUUID } from "node:crypto";
 import { isTrustedSender } from "./security.mjs";
 
-function pageScript(nonce, action) {
+const DOCUMENT_ID = "__bzSketchTransitionDocumentId";
+
+function captureDocumentScript(url, proposedId) {
+  return `(() => {
+    if (location.href !== ${JSON.stringify(url)}) return null;
+    if (!Object.hasOwn(document, ${JSON.stringify(DOCUMENT_ID)})) {
+      Object.defineProperty(document, ${JSON.stringify(DOCUMENT_ID)}, { value: ${JSON.stringify(proposedId)} });
+    }
+    return document[${JSON.stringify(DOCUMENT_ID)}];
+  })()`;
+}
+
+function pageScript(nonce, action, documentId) {
   return `(async () => {
     const nonce = ${JSON.stringify(nonce)};
+    if (document[${JSON.stringify(DOCUMENT_ID)}] !== ${JSON.stringify(documentId)}) throw new Error("The app document changed during saving");
     let item = window.__bzDesktopDocumentLease;
     ${action === "begin" ? `
     if (item && item.nonce !== nonce) throw new Error("Another desktop transition owns this document");
@@ -19,14 +32,15 @@ function pageScript(nonce, action) {
     if (!item || item.nonce !== nonce || item.document !== document) throw new Error("The app document changed during saving");`}
     if (item.stage && (!item.stage.isConnected || document.getElementById("stage") !== item.stage || item.stage.bzDesktopSketch !== item.hook)) throw new Error("The Sketch page changed during saving");
     ${action === "drain" ? `if (item.hook && await item.hook.drain(nonce) !== true) throw new Error("Sketch changes are not safely saved. Use Save to retry");` : ""}
-    if (window.__bzDesktopDocumentLease !== item || item.document !== document) throw new Error("The app document changed during saving");
+    if (window.__bzDesktopDocumentLease !== item || item.document !== document || document[${JSON.stringify(DOCUMENT_ID)}] !== ${JSON.stringify(documentId)}) throw new Error("The app document changed during saving");
     const state = item.hook ? item.hook.state(nonce) : null;
     return { href: location.href, sketch: Boolean(item.hook), state };
   })()`;
 }
 
-function releaseScript(nonce) {
+function releaseScript(nonce, documentId) {
   return `(() => {
+    if (document[${JSON.stringify(DOCUMENT_ID)}] !== ${JSON.stringify(documentId)}) return;
     const item = window.__bzDesktopDocumentLease;
     if (item?.nonce !== ${JSON.stringify(nonce)} || item.document !== document) return;
     if (item.stage && document.getElementById("stage") === item.stage && item.stage.bzDesktopSketch === item.hook) item.hook.release(item.nonce);
@@ -36,12 +50,14 @@ function releaseScript(nonce) {
 
 export function createDocumentTransition({ getContents, getBase, getRuntime, acquireLibrary, onIdle = () => {}, testPageUrl = null, timeoutMs = 15_000 }) {
   let tail = Promise.resolve(), active = null, waiting = 0;
-  const registered = new WeakSet();
+  const navigation = new WeakMap();
   const held = () => Boolean(active || waiting);
   const owns = (wc) => getContents().includes(wc) && !wc.isDestroyed();
   function register(wc) {
-    if (registered.has(wc)) return;
-    registered.add(wc);
+    if (navigation.has(wc)) return;
+    navigation.set(wc, 0);
+    // A committed main-frame navigation can replace the DOM at the same URL.
+    wc.on("did-navigate", () => navigation.set(wc, navigation.get(wc) + 1));
     const refuse = (event) => { if (held() && owns(wc)) event.preventDefault(); };
     for (const name of ["before-input-event", "before-mouse-event", "will-navigate", "will-frame-navigate", "will-redirect"]) wc.on(name, refuse);
   }
@@ -67,7 +83,7 @@ export function createDocumentTransition({ getContents, getBase, getRuntime, acq
     const runtimeUnchanged = () => getRuntime() === rt && (!rt || [rt.host, rt.port, rt.token].every((value, i) => value === runtimeFields[i]));
     const trusted = (wc, origin) => isTrustedSender({ sender: wc, senderFrame: wc.mainFrame }, { base: origin, contents: getContents(), testPageUrl });
     function verifyOwner(item) {
-      if (!owns(item.wc) || item.wc.mainFrame !== item.frame || item.wc.getURL() !== item.url || !trusted(item.wc, item.base)) throw new Error("The app window changed while saving. Retry from the current window.");
+      if (!owns(item.wc) || item.wc.mainFrame !== item.frame || navigation.get(item.wc) !== item.navigation || item.wc.getURL() !== item.url || !trusted(item.wc, item.base)) throw new Error("The app window changed while saving. Retry from the current window.");
     }
     function acceptState(item, result) {
       // Only the first Save's own generated job may canonicalize a cold board.
@@ -86,12 +102,15 @@ export function createDocumentTransition({ getContents, getBase, getRuntime, acq
     }
     async function evaluate(item, action) {
       verifyOwner(item);
-      const pending = item.wc.executeJavaScript(pageScript(lease.nonce, action));
+      const capture = action === "capture";
+      const pending = item.wc.executeJavaScript(capture
+        ? captureDocumentScript(item.url, randomUUID())
+        : pageScript(lease.nonce, action, item.documentId));
       // A timed-out begin may still execute and reject after installing its
       // nonce. Both settlements need matching cleanup after release, never
       // while this lease is active or against a later lease/document.
       const cleanupLate = () => {
-        if (released && owns(item.wc) && item.wc.mainFrame === item.frame && trusted(item.wc, item.base)) return item.wc.executeJavaScript(releaseScript(lease.nonce)).catch(() => {});
+        if (!capture && released && owns(item.wc) && item.wc.mainFrame === item.frame && trusted(item.wc, item.base)) return item.wc.executeJavaScript(releaseScript(lease.nonce, item.documentId)).catch(() => {});
       };
       void pending.then(cleanupLate, cleanupLate).catch(() => {});
       let timer;
@@ -100,6 +119,14 @@ export function createDocumentTransition({ getContents, getBase, getRuntime, acq
           timer = setTimeout(() => reject(new Error("Saving the app document timed out. Keep BeeZilla open and retry.")), timeoutMs);
         })]);
         if (released || active !== lease) throw new Error("This desktop transition is no longer current.");
+        if (capture) {
+          verifyOwner(item);
+          if (typeof result !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(result)) {
+            throw new Error("The app document changed during saving");
+          }
+          item.documentId = result;
+          return;
+        }
         return acceptState(item, result);
       } finally { clearTimeout(timer); }
     }
@@ -110,13 +137,13 @@ export function createDocumentTransition({ getContents, getBase, getRuntime, acq
       }
     }
     async function releaseWindow(item, skip, keepRetiredFrozen) {
-      if (skip.includes(item.wc) || !owns(item.wc) || item.wc.mainFrame !== item.frame || !trusted(item.wc, item.base) || (keepRetiredFrozen && getBase() !== item.base)) return;
+      if (!item.documentId || skip.includes(item.wc) || !owns(item.wc) || item.wc.mainFrame !== item.frame || !trusted(item.wc, item.base) || (keepRetiredFrozen && getBase() !== item.base)) return;
       let timer;
       try {
         // A hung renderer must not keep the main-process input guard or the
         // transition queue locked. A late cleanup still matches only its nonce.
         await Promise.race([
-          item.wc.executeJavaScript(releaseScript(lease.nonce)),
+          item.wc.executeJavaScript(releaseScript(lease.nonce, item.documentId)),
           new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
         ]);
       } catch { /* retired documents have no matching writer to resume */ }
@@ -137,8 +164,10 @@ export function createDocumentTransition({ getContents, getBase, getRuntime, acq
     try {
       for (const wc of getContents()) {
         if (!trusted(wc, base)) continue;
-        const url = wc.getURL(), item = { wc, frame: wc.mainFrame, url, base, cold: !new URL(url).searchParams.has("job") };
+        register(wc);
+        const url = wc.getURL(), item = { wc, frame: wc.mainFrame, navigation: navigation.get(wc), url, base, cold: !new URL(url).searchParams.has("job") };
         windows.push(item);
+        await evaluate(item, "capture");
         await evaluate(item, "begin");
       }
       for (const item of windows) await evaluate(item, "drain");

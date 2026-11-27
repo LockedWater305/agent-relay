@@ -206,3 +206,33 @@ test('stalled renderer cleanup does not hold main input or block other windows',
   assert.equal(p.state.lease, nextNonce);
   await next.release();
 });
+
+for(const when of ['before retry','during retry','after retry']) test('same-URL fresh document '+when+' never acquires the expired Sketch writer lease', async t => {
+ const s=setup({timeoutMs:40}),p=s.pages[0],g=gate(),execute=p.wc.executeJavaScript.bind(p.wc);
+ let expired,first=true,h;
+ p.wc.executeJavaScript=source=>{if(first&&source.includes('hook?.begin(nonce)')){first=false;expired=g.promise.then(()=>execute(source));return expired;}return execute(source);};
+ t.after(async()=>{g.resolve();await h?.release();p.wc.executeJavaScript=execute;});
+ await assert.rejects(s.acquire(),/timed out/);assert.equal(s.acquire.held(),false);
+ const oldContext=p.context,originalFrame=p.wc.mainFrame,originalUrl=p.wc.getURL(),replacement=setup().pages[0];
+ p.context=replacement.context;
+ assert.notEqual(p.context.document,oldContext.document);assert.equal(p.wc.mainFrame,originalFrame);assert.equal(p.wc.getURL(),originalUrl);
+ let expected=null;
+ if(when!=='before retry'){h=await s.acquire();expected=replacement.state.lease;assert.ok(expected);if(when==='after retry'){await h.release();expected=null;}}
+ const begins=replacement.state.begins;g.resolve();await expired.catch(()=>{});await drain();
+ assert.equal(replacement.state.begins,begins,'a retired operation must not enter Sketch on a fresh document');assert.equal(replacement.state.lease,expected);
+ if(when==='before retry'){h=await s.acquire();assert.ok(replacement.state.lease);}
+ await h?.release();assert.equal(replacement.state.lease,null);
+});
+test('a committed same-URL navigation during identity capture cancels instead of draining the fresh Sketch document',async t=>{
+ const s=setup({timeoutMs:100}),p=s.pages[0],g=gate(),execute=p.wc.executeJavaScript.bind(p.wc);let first=true;
+ p.wc.executeJavaScript=source=>{if(first){first=false;return g.promise.then(()=>execute(source));}return execute(source);};
+ t.after(()=>{g.resolve();p.wc.executeJavaScript=execute;});
+ const pending=s.acquire();await drain();const replacement=setup().pages[0];p.context=replacement.context;p.wc.emit('did-navigate',{},p.wc.getURL(),200,'OK');g.resolve();
+ await assert.rejects(pending,/window changed/);assert.equal(replacement.state.begins,0);assert.equal(s.library.acquires,0);assert.equal(s.acquire.held(),false);
+});
+test('cold Sketch still canonicalizes its own newly generated job during a same-document Save',async()=>{
+ const s=setup(),p=s.pages[0];p.location.pathname='/buzzy/sketch.html';p.location.search='';p.wc.mainFrame.url=p.location.href;
+ const drainSketch=p.stage.bzDesktopSketch.drain;
+ p.stage.bzDesktopSketch.drain=async nonce=>{const result=await drainSketch(nonce);p.location.pathname='/buzzy/sketch';p.location.search='?job=job_art_local123';p.wc.mainFrame.url=p.location.href;p.wc.emit('did-navigate-in-page',{isMainFrame:true},p.location.href,true);return result;};
+ const h=await s.acquire();assert.equal(h.targets[0].url,p.location.href);assert.equal(s.library.acquires,1);await h.verify();await h.release();assert.equal(p.state.lease,null);
+});
