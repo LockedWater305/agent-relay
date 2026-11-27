@@ -974,6 +974,8 @@
     var mounted = false;
     var sending = false;
     var recorder = null;
+    var voiceGeneration = 0;
+    var pendingVoicePermission = null;
 
     function signedIn() {
       try {
@@ -1070,18 +1072,58 @@
       return out;
     }
 
+    function ownsVoiceDraft(generation) {
+      return generation === voiceGeneration && panel.isConnected &&
+        panel.classList.contains("open") && text && body.contains(text);
+    }
+
+    function stopVoiceTracks(stream) {
+      if (stream) stream.getTracks().forEach(function (track) {
+        try { track.stop(); } catch (e) { /* already stopped */ }
+      });
+    }
+
+    function releaseVoice(r) {
+      if (!r) return;
+      if (r.proc) {
+        r.proc.onaudioprocess = null;
+        try { r.proc.disconnect(); } catch (e) { /* already disconnected */ }
+      }
+      if (r.src) { try { r.src.disconnect(); } catch (e) { /* already disconnected */ } }
+      stopVoiceTracks(r.stream);
+      if (r.ctx && r.ctx.state !== "closed") {
+        try { r.ctx.close().catch(function () {}); } catch (e) { /* already closed */ }
+      }
+    }
+
+    function resetVoiceButton() {
+      mic.setAttribute("aria-pressed", "false");
+      mic.innerHTML = "&#127908; Speak";
+    }
+
+    function invalidateVoiceDraft() {
+      voiceGeneration += 1;
+      pendingVoicePermission = null;
+      var r = recorder;
+      recorder = null;
+      releaseVoice(r);
+      if (mic && body.contains(mic)) {
+        resetVoiceButton();
+        hint.textContent = "Up to 60 seconds.";
+      }
+    }
+
     function stopRecording() {
       if (!recorder) return;
       var r = recorder;
+      var generation = voiceGeneration;
       recorder = null;
-      try { r.stop(); } catch (e) { /* already stopped */ }
-      mic.setAttribute("aria-pressed", "false");
-      mic.innerHTML = "&#127908; Speak";
+      releaseVoice(r);
+      if (!ownsVoiceDraft(generation)) return;
+      resetVoiceButton();
       hint.textContent = "Transcribing\u2026";
       var chunks = r.chunks;
       var rate = r.rate;
-      if (r.ctx && r.ctx.state !== "closed") { try { r.ctx.close(); } catch (e) { /* nothing to do */ } }
-      if (r.stream) { r.stream.getTracks().forEach(function (t) { t.stop(); }); }
       var total = 0;
       chunks.forEach(function (c) { total += c.length; });
       if (total < rate * 0.4) {
@@ -1098,6 +1140,7 @@
         body: wav,
       }).then(function (res) { return res.json().then(function (j) { return { res: res, j: j }; }); })
         .then(function (out) {
+          if (!ownsVoiceDraft(generation)) return;
           if (out.res.ok && out.j && out.j.text) {
             var t = out.j.text.trim();
             text.value = (text.value ? text.value.replace(/\s*$/, " ") : "") + t;
@@ -1106,36 +1149,58 @@
             hint.textContent = (out.j && out.j.error) || "Could not transcribe \u2014 type it instead.";
           }
         })
-        .catch(function () { hint.textContent = "Could not transcribe \u2014 type it instead."; });
+        .catch(function () {
+          if (ownsVoiceDraft(generation)) hint.textContent = "Could not transcribe \u2014 type it instead.";
+        });
     }
 
     function startRecording() {
-      if (recorder) return;
+      if (recorder || pendingVoicePermission !== null) return;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         hint.textContent = "This browser will not record \u2014 type your feedback.";
         return;
       }
+      var generation = voiceGeneration;
+      pendingVoicePermission = generation;
       navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
-        var AC = window.AudioContext || window.webkitAudioContext;
-        var ctx = new AC();
-        var src = ctx.createMediaStreamSource(stream);
-        var proc = ctx.createScriptProcessor(4096, 1, 1);
-        var chunks = [];
-        var started = Date.now();
-        proc.onaudioprocess = function (ev) {
-          chunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
-          if (Date.now() - started > 60000) stopRecording();
-        };
-        src.connect(proc);
-        proc.connect(ctx.destination);
-        recorder = { ctx: ctx, stream: stream, proc: proc, chunks: chunks, rate: ctx.sampleRate, stop: function () {
-          try { proc.disconnect(); } catch (e) { /* nothing to do */ }
-          try { src.disconnect(); } catch (e) { /* nothing to do */ }
-        } };
+        if (pendingVoicePermission !== generation) {
+          stopVoiceTracks(stream);
+          return;
+        }
+        pendingVoicePermission = null;
+        if (!ownsVoiceDraft(generation)) {
+          stopVoiceTracks(stream);
+          return;
+        }
+        var r = { stream: stream, ctx: null, src: null, proc: null, chunks: [] };
+        try {
+          var AC = window.AudioContext || window.webkitAudioContext;
+          r.ctx = new AC();
+          r.rate = r.ctx.sampleRate;
+          r.src = r.ctx.createMediaStreamSource(stream);
+          r.proc = r.ctx.createScriptProcessor(4096, 1, 1);
+          var started = Date.now();
+          r.proc.onaudioprocess = function (ev) {
+            if (recorder !== r) return;
+            if (!ownsVoiceDraft(generation)) { invalidateVoiceDraft(); return; }
+            r.chunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+            if (Date.now() - started > 60000) stopRecording();
+          };
+          r.src.connect(r.proc);
+          r.proc.connect(r.ctx.destination);
+        } catch (e) {
+          releaseVoice(r);
+          hint.textContent = "Could not start the microphone \u2014 type your feedback instead.";
+          return;
+        }
+        recorder = r;
         mic.setAttribute("aria-pressed", "true");
         mic.innerHTML = "&#9632; Stop";
         hint.textContent = "Listening\u2026 up to 60 seconds.";
       }).catch(function () {
+        if (pendingVoicePermission !== generation) return;
+        pendingVoicePermission = null;
+        if (!ownsVoiceDraft(generation)) return;
         hint.textContent = "Microphone blocked \u2014 type your feedback instead.";
       });
     }
@@ -1161,6 +1226,7 @@
       text.focus();
     }
     function shut() {
+      invalidateVoiceDraft();
       panel.classList.remove("open");
       panel.classList.remove("min");
       btn.setAttribute("aria-expanded", "false");
@@ -1291,6 +1357,7 @@
       }).then(function (out) {
         sending = false;
         if (out.res.ok && out.j && out.j.ok) {
+          invalidateVoiceDraft();
           body.innerHTML =
             '<div class="bz-fb-done"><p><strong>Thank you \u2014 that reached us.</strong></p>' +
             '<p>Your reference is <code>' + out.j.ref + "</code>.</p>" +
