@@ -181,11 +181,12 @@
       if (loading) finishInitialRead(loading, true);
     });
     function resumeLoad() {
-      // Back can retain this DOM after the shell temporarily changed the URL.
-      // Retry only its initial read; never replay cold-project creation POSTs.
+      // Back can retain this DOM after a read completed off-route without a
+      // result. Recover that read, but keep a visible failure for explicit Retry:
+      // a cold initial pageshow can also arrive after an early failed response.
       if (!jobId || state || !currentPage()) return;
       if (loading) armInitialDeadline(loading);
-      else load();
+      else if (retryLoad.hidden) load();
     }
     window.addEventListener("pageshow", function () { pageHidden = false; resumeLoad(); });
     window.addEventListener("popstate", resumeLoad);

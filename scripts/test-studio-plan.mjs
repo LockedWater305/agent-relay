@@ -343,10 +343,10 @@ test('a retry pending after discarded initial GET is single-flight and cannot pa
  const old=await f.mount('job_track',{wait:false});await drain();f.navigate();firstHeld.resolve();await drain();f.returnToTrack();await drain();f.returnToTrack();f.pageshow();await drain();assert.equal(trackGets,2);
  const newer=await f.mount('job_other');newer.set({prompt:'New track draft'});retryHeld.resolve();await drain();assert.equal(newer.el('prompt').value,'New track draft');assert.equal(newer.el('title').textContent,'job_other');assert.equal(old.el('prompt').value,'');assert.equal(f.mounts.length,1);
 });
-for(const failure of ['HTTP error','malformed JSON','transport'])test('initial recovery '+failure+' remains honest and can retry on a later restore',async t=>{
+for(const failure of ['HTTP error','malformed JSON','transport'])test('initial recovery '+failure+' remains honest and preserves explicit retry on a later restore',async t=>{
  const f=await fixture(t),held=f.defer();let gets=0;
  f.transport=async(req,next)=>{gets++;const r=await next();if(gets===1){await held.promise;return r;}if(gets===2){if(failure==='HTTP error')return new Response(JSON.stringify({error:'Synthetic load outage'}),{status:503});if(failure==='malformed JSON')return new Response('{',{status:200});throw Error('Synthetic connection loss');}return r;};
- const p=await f.mount('job_track',{wait:false});await drain();f.navigate();held.resolve();await drain();f.returnToTrack();await drain();assert.equal(p.el('prompt').value,'');assert.equal(p.el('savePlan').disabled,true);assert.equal(p.el('status').className,'status bad');assert.equal(f.intervalCount(),0);await drain();assert.equal(gets,2,'no automatic failure loop');f.pagehide();f.pageshow();await drain();assert.equal(p.el('prompt').value,original.prompt);assert.equal(gets,3);assert.equal(p.el('savePlan').disabled,false);
+ const p=await f.mount('job_track',{wait:false});await drain();f.navigate();held.resolve();await drain();f.returnToTrack();await drain();assert.equal(p.el('prompt').value,'');assert.equal(p.el('savePlan').disabled,true);assert.equal(p.el('status').className,'status bad');assert.equal(f.intervalCount(),0);await drain();assert.equal(gets,2,'no automatic failure loop');f.pagehide();f.pageshow();await drain();assert.equal(gets,2,'restore keeps a visible failed read for explicit Retry');assert.equal(p.el('retryLoad').hidden,false);p.el('retryLoad').click();await drain();assert.equal(p.el('prompt').value,original.prompt);assert.equal(gets,3);assert.equal(p.el('savePlan').disabled,false);
 });
 test('restore events from a detached initial owner never retry or paint a same-job replacement',async t=>{
  const f=await fixture(t),held=f.defer();let first=true;f.transport=async(req,next)=>{const r=await next();if(first){first=false;await held.promise;}return r;};const old=await f.mount('job_track',{wait:false});await drain();const newer=await f.mount('job_track');newer.set({prompt:'Same-job replacement draft'});f.returnToTrack();f.pageshow();held.resolve();await drain();assert.equal(f.requests.length,2);assert.equal(newer.el('prompt').value,'Same-job replacement draft');assert.equal(old.el('prompt').value,'');assert.equal(f.mounts.length,1);
@@ -361,7 +361,7 @@ for(const field of ['tempo','key'])for(const [kind,bad]of malformedOptionalValue
  const f=await fixture(t);let p;
  const corrupt=async(req,next)=>{const r=await next();const body=await r.json();body.plan[field]=bad;return new Response(JSON.stringify(body),{status:r.status});};
  if(stage==='initial'){
-  f.transport=corrupt;p=await f.mount();assert.equal(p.el('prompt').value,'');assert.equal(p.el(field).value,'');assert.equal(p.el('savePlan').disabled,true);assert.equal(p.el('status').className,'status bad');assert.equal(f.data().music[field],original[field]);f.transport=null;f.returnToTrack();await drain();assert.equal(p.el(field).value,original[field]);assert.equal(p.el('savePlan').disabled,false);
+  f.transport=corrupt;p=await f.mount();assert.equal(p.el('prompt').value,'');assert.equal(p.el(field).value,'');assert.equal(p.el('savePlan').disabled,true);assert.equal(p.el('status').className,'status bad');assert.equal(f.data().music[field],original[field]);f.transport=null;f.returnToTrack();await drain();assert.equal(p.el('retryLoad').hidden,false);p.el('retryLoad').click();await drain();assert.equal(p.el(field).value,original[field]);assert.equal(p.el('savePlan').disabled,false);
  }else if(stage==='refresh'){
   p=await f.mount();p.set({lyrics:'Keep local lyrics'});await f.serverSave({prompt:'Remote clean brief',tempo:'112 BPM',key:'D minor'});f.transport=corrupt;await p.refresh();assert.equal(p.el(field).value,original[field]);assert.equal(p.el('prompt').value,original.prompt,'reject the whole malformed plan, not just one field');assert.equal(p.el('lyrics').value,'Keep local lyrics');f.transport=null;await p.refresh();assert.equal(p.el('tempo').value,'112 BPM');assert.equal(p.el('key').value,'D minor');assert.equal(p.el('prompt').value,'Remote clean brief');assert.equal(p.el('lyrics').value,'Keep local lyrics');
  }else{
@@ -495,5 +495,42 @@ for(const status of [401,403,404])test('Studio initial HTTP '+status+' is reflec
  assert.doesNotMatch(p.el('status').textContent,/too long|password|cookie|signed in|denied/i);
  p.el('retryLoad').click();await f.drain();
  assert.equal(p.el('prompt').value,original.prompt);
+ assert.equal(postCount(f),0);
+});
+
+for(const kind of ['cold pageshow','same-mounted Back','pagehide and restore'])test('Studio keeps visible Retry on '+kind+' after a finished read error',async t=>{
+ const f=await fixture(t);let attempts=0;
+ f.transport=async(req,next)=>++attempts===1?new Response('{"error":"fixture temporarily unavailable"}',{status:503}):next();
+ const p=await f.mount('job_track');
+ const shown=p.el('status').textContent;
+ assert.match(shown,/could not load this track/i);
+ assert.equal(p.el('retryLoad').hidden,false);
+ assert.equal(p.el('prompt').disabled,true);
+ if(kind==='same-mounted Back'){f.navigate();f.returnToTrack();}
+ else if(kind==='pagehide and restore'){f.pagehide();f.pageshow();}
+ else f.pageshow(); // normal first pageshow can follow a very fast failed fetch
+ await f.drain();
+ assert.equal(attempts,1,'a visible failure needs the user to choose Retry');
+ assert.equal(p.el('status').textContent,shown);
+ assert.equal(p.el('retryLoad').hidden,false);
+ assert.equal(p.el('prompt').disabled,true);
+ p.el('retryLoad').click();await f.drain();
+ assert.equal(attempts,2);
+ assert.equal(p.el('prompt').value,original.prompt);
+ assert.equal(p.el('retryLoad').hidden,true);
+ assert.equal(postCount(f),0);
+});
+
+test('Studio retries on same-mounted Back if an off-route failure was never displayed',async t=>{
+ const f=await fixture(t),held=f.defer();let attempts=0;
+ f.transport=async(req,next)=>{if(++attempts!==1)return next();await held.promise;return new Response('{"error":"not shown off-route"}',{status:503});};
+ const p=await f.mount('job_track',{wait:false});await f.drain();
+ f.navigate();held.resolve();await f.drain();
+ assert.equal(p.el('retryLoad').hidden,true);
+ assert.equal(p.el('prompt').value,'');
+ f.returnToTrack();await f.drain();
+ assert.equal(attempts,2);
+ assert.equal(p.el('prompt').value,original.prompt);
+ assert.equal(p.el('retryLoad').hidden,true);
  assert.equal(postCount(f),0);
 });
