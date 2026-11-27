@@ -3617,7 +3617,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
-    function submitPaper(payload) {
+    function submitPaper(payload, onConfirmed) {
       var note = document.getElementById("paperNote");
       var co = activeCompanyId();
       if (!co) {
@@ -3687,6 +3687,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         var file = document.getElementById("paperFile");
         if (file) file.value = "";
         if (note) note.textContent = "These lines are proposed. Nothing is confirmed until you accept one.";
+        if (typeof onConfirmed === "function") onConfirmed();
       }).catch(function (e) {
         if (!ownsPaperResponse() || (e && e.message === "signed_out")) return;
         if (note) note.textContent = e?.message === "fresh_session_timeout"
@@ -7478,7 +7479,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     var pendingExecute = false;
     async function sendChatMessage() {
       const input = document.getElementById("chatInput");
-      const text = input.value.trim();
+      const draft = input.value;
+      const text = draft.trim();
       if (!text) return;
       // What they are looking at on the Idea Board: taken first, before sending changes
       // the board (the conversation card appears, a new conversation's board takes over):
@@ -7486,8 +7488,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       const boardView = bzTakeView();
       var pastedPaper = readThisBody(text);
       if (pastedPaper !== null) {
-        input.value = "";
         if (!pastedPaper) {
+          input.value = "";
           chatState.messages.push({ role: "user", content: text });
           chatState.messages.push({
             role: "assistant",
@@ -7496,7 +7498,20 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           renderChatMessages();
           return;
         }
-        submitPaper({ filename: "", fileKind: "paste", text: pastedPaper });
+        const draftState = chatState, draftEpoch = chatEpoch;
+        let edited = false;
+        const onEdit = () => { edited = true; };
+        const releaseDraft = () => input.removeEventListener("input", onEdit);
+        input.addEventListener("input", onEdit, { once: true });
+        try {
+          void submitPaper({ filename: "", fileKind: "paste", text: pastedPaper }, function () {
+            if (!edited && chatState === draftState && chatEpoch === draftEpoch &&
+                document.getElementById("chatInput") === input && input.value === draft) input.value = "";
+          }).then(releaseDraft, releaseDraft);
+        } catch (error) {
+          releaseDraft();
+          throw error;
+        }
         return;
       }
       const startState = chatState;

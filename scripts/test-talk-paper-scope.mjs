@@ -7,7 +7,7 @@ import test from 'node:test';
 const html=readFileSync(process.env.BZ_PAPER_TALK_FIXTURE ??
  new URL('../public/buzzy/talk.html',import.meta.url),'utf8');
 function cut(a,b){const start=html.indexOf(a),end=html.indexOf(b,start+1);assert.ok(start>=0&&end>start,a);return html.slice(start,end);}
-const code=cut('    function submitPaper(payload) {','    function readThisBody(')+'\n'+
+const code=cut('    function submitPaper(','    function readThisBody(')+'\n'+
  cut('    function ensureChatSession(','    // The composer\'s "Do it" control.')+
  '\nreturn {send:submitPaper,isBusy(){return paperBusy;},setEpoch(value){chatEpoch=value;}};';
 async function scenario(spec){
