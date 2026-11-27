@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
@@ -18,6 +19,86 @@ const token = "a".repeat(43);
 const runtime = { host: "127.0.0.1", port: 7331, token };
 const makeContents = (url = `${base}/buzzy/talk`) => ({
   id: 7, mainFrame: { url }, getURL() { return this.mainFrame.url; }, isDestroyed: () => false,
+});
+
+// Use the actual main-process logger without taking over this test runner's
+// console or writing anywhere outside a disposable, per-test profile.
+function startLogging(root, logOverride) {
+  const env = {
+    ...process.env,
+    HOME: root, USERPROFILE: root, APPDATA: root, XDG_STATE_HOME: root,
+  };
+  delete env.BZ_LOG_DIR;
+  if (logOverride) env.BZ_LOG_DIR = logOverride;
+  const logger = new URL("../desktop/logger.mjs", import.meta.url).href;
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+    import { installLogging } from ${JSON.stringify(logger)};
+    if (process.platform !== "win32") process.umask(0o022);
+    process.resourcesPath = "/fixture/app-resource-location";
+    const paths = installLogging({
+      version: "test-version",
+      facts: { workspace: "/fixture/attached-project-location" },
+    });
+    console.log("opening bundled UI");
+    console.error("could not start", new Error("Could not open bundled launcher"));
+    process.stdout.write(JSON.stringify(paths) + "\\n");
+  `, "--", "--project=fixture-private-project-argument"], {
+    cwd: root, env, encoding: "utf8", timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+  const paths = JSON.parse(result.stdout.trim().split("\n").at(-1));
+  assert.ok(paths.file, "diagnostic file is still discoverable");
+  assert.match(result.stdout, /opening bundled UI/);
+  assert.match(result.stderr, /Could not open bundled launcher/);
+  return { ...paths, log: readFileSync(paths.file, "utf8") };
+}
+
+test("desktop startup log keeps support facts without copying locations or arguments", () => {
+  const root = mkdtempSync(join(tmpdir(), "desktop-log-fixture-"));
+  try {
+    const { log } = startLogging(root, join(root, "logs"));
+    const header = JSON.parse(log.split("\n")[1].replace(/^[^{]+/, ""));
+    assert.deepEqual(Object.keys(header).sort(), ["chrome", "electron", "node", "packaged", "platform", "version"]);
+    assert.equal(header.version, "test-version");
+    assert.equal(header.node, process.versions.node);
+    assert.equal(header.platform, `${process.platform} ${process.arch}`);
+    assert.equal(typeof header.packaged, "boolean");
+    for (const marker of ["fixture-private-project-argument", "app-resource-location", "attached-project-location"]) {
+      assert.equal(log.includes(marker), false, marker);
+    }
+    assert.match(log, /INFO +opening bundled UI/);
+    assert.match(log, /ERROR +could not start Error: Could not open bundled launcher/);
+    assert.match(log, /INFO +process exit code=0/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+const mode = (path) => statSync(path).mode & 0o777;
+
+test("default desktop diagnostics start private on POSIX with an ordinary umask", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "desktop-log-fixture-"));
+  try {
+    const { dir, file } = startLogging(root);
+    assert.equal(mode(dir), 0o700);
+    assert.equal(mode(file), 0o600);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("desktop diagnostics protect the existing default log directory without touching an override", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "desktop-log-fixture-"));
+  try {
+    const defaultDir = startLogging(root).dir;
+    chmodSync(defaultDir, 0o755); // an ordinary directory created by the old logger
+    writeFileSync(join(defaultDir, "main.1.log"), "fixture archived diagnostic");
+    assert.equal(mode(startLogging(root).dir), 0o700);
+    assert.equal(readFileSync(join(defaultDir, "main.1.log"), "utf8"), "fixture archived diagnostic");
+
+    const override = join(root, "support-export");
+    mkdirSync(override);
+    chmodSync(override, 0o750);
+    const overridden = startLogging(root, override);
+    assert.equal(overridden.dir, override);
+    assert.equal(mode(override), 0o750);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("only exact loopback app pages receive privileges", () => {

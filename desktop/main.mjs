@@ -33,7 +33,6 @@ import {
 // it, and turns an uncaught exception into a readable dialog naming that file.
 installLogging({
   version: app.getVersion(),
-  facts: { resourcesRoot: ROOT },
   onFatal: (kind, err) => {
     const detail = err instanceof Error ? err.stack || err.message : String(err);
     const { file, dir } = logPaths();
@@ -41,7 +40,7 @@ installLogging({
       dialog.showErrorBox(
         `BeeZilla — ${kind}`,
         `${detail}\n\nLog file:\n${file ?? dir ?? "(logging unavailable)"}\n\n` +
-          `Send this file to support; it records what the app was doing.`,
+          `Review this log before sharing it with support.`,
       );
     } finally {
       app.exit(1);

@@ -17,15 +17,19 @@
  *     same userData root as `%APPDATA%\BeeZilla\data`. Override with BZ_LOG_DIR.
  *     Never the install folder: it sits under Program Files for an all-user
  *     install, where writing needs elevation.
+ *   - **Local by default.** On POSIX the app-managed log directory is private
+ *     and new log files are owner-only. Keep the startup header to versions
+ *     and platform facts, not users' paths or process arguments.
  *   - **Rotation, not growth.** 2 MB then `main.1.log`; a log nobody can open
  *     is not a log.
  */
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const KEEP = 2;
+const LOG_FILE_OPTIONS = { mode: 0o600 };
 
 let dir = null;
 let file = null;
@@ -66,7 +70,7 @@ export function logLine(level, args) {
   const line = `${new Date().toISOString()} ${String(level).toUpperCase().padEnd(5)} ${text}\n`;
   if (!file) return line;
   try {
-    appendFileSync(file, line);
+    appendFileSync(file, line, LOG_FILE_OPTIONS);
   } catch {
     // Disk full / permissions: keep the app running, keep printing to stdout.
   }
@@ -86,7 +90,7 @@ export const logPaths = () => ({ dir, file });
 /**
  * Install the logger. Call as the first statement of main.mjs.
  *
- * @param {{version?: string, onFatal?: (kind: string, err: unknown) => void, facts?: Record<string, unknown>}} opts
+ * @param {{version?: string, onFatal?: (kind: string, err: unknown) => void}} opts
  * @returns {{dir: string, file: string}}
  */
 export function installLogging(opts = {}) {
@@ -94,9 +98,16 @@ export function installLogging(opts = {}) {
   file = join(dir, "main.log");
   if (!installed) {
     try {
-      mkdirSync(dir, { recursive: true });
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      if (process.platform !== "win32" && !process.env.BZ_LOG_DIR) {
+        // Shield existing archives too, without touching the operator's own
+        // export directory or changing the permissions on a symlink target.
+        const info = lstatSync(dir);
+        if (!info.isDirectory() || info.uid !== process.getuid()) throw new Error("Not an app-owned log directory");
+        if (info.mode & 0o077) chmodSync(dir, 0o700);
+      }
       rotate();
-      if (!existsSync(file)) writeFileSync(file, "");
+      appendFileSync(file, "", LOG_FILE_OPTIONS);
     } catch {
       file = null; // logging degrades to stdout; it must never block a launch
     }
@@ -112,23 +123,16 @@ export function installLogging(opts = {}) {
     installed = true;
   }
 
-  const { version, facts, onFatal } = opts;
+  const { version, onFatal } = opts;
   logLine("info", ["==== session start ===="]);
   logLine("info", [
     safeJson({
       version: version ?? null,
       packaged: typeof process.resourcesPath === "string" && !process.defaultApp,
-      resourcesPath: process.resourcesPath ?? null,
-      resourcesRoot: process.resourcesPath ? join(process.resourcesPath, "app") : null,
-      execPath: process.execPath,
-      cwd: process.cwd(),
-      argv: process.argv,
       electron: process.versions?.electron ?? null,
       chrome: process.versions?.chrome ?? null,
       node: process.versions?.node ?? null,
       platform: `${process.platform} ${process.arch}`,
-      logFile: file,
-      ...(facts ?? {}),
     }),
   ]);
 

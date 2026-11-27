@@ -68,6 +68,12 @@ function runCli(cwd, entry, args, env = process.env) {
 
 async function stage() {
   const vite = lockedCli(ROOT, "vite", "bin/vite.js");
+  // Calling Vite directly bypasses npm's prebuild hooks. A clean source tree
+  // has no recipe modules yet. Use the same pinned sync and leak checks as the
+  // normal build before replacing any previous stage. With no credentials the
+  // sync uses the checked-in public stubs, unless BZ_REQUIRE_PRIVATE forbids it.
+  runCli(ROOT, join(ROOT, "scripts/sync-private.mjs"), []);
+  runCli(ROOT, join(ROOT, "scripts/assert-no-private-modules.mjs"), []);
   rmSync(STAGE, { recursive: true, force: true });
   mkdirSync(APP, { recursive: true });
 
