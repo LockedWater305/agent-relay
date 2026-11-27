@@ -9,10 +9,23 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
+import { gzipSync } from "node:zlib";
 
 const name = "BeeZilla-Setup-0.0.1.exe";
 const file = Buffer.from("test artifact");
 const sha = createHash("sha256").update(file).digest("hex");
+const blockmapName = name + ".blockmap";
+const requireHash = createRequire(new URL("../desktop/package.json",import.meta.url));
+const blake2Path = requireHash.resolve("@noble/hashes/blake2.js");
+const { blake2b } = requireHash(blake2Path);
+function makeMap(part) {
+  return gzipSync(JSON.stringify({version:"2",files:[{
+    name:"file",offset:0,sizes:[part.length],checksums:[Buffer.from(blake2b(part,{dkLen:18})).toString("base64")]
+  }]}));
+}
+const blockmap = makeMap(file);
+const remoteMap = {name:blockmapName,size:blockmap.length,digest:"sha256:"+createHash("sha256").update(blockmap).digest("hex")};
 const release = new URL("../desktop/release.mjs", import.meta.url);
 
 function run(t, assets, prerelease = true, opts = {}) {
@@ -20,8 +33,27 @@ function run(t, assets, prerelease = true, opts = {}) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(dir, "desktop")); mkdirSync(join(dir, "dist-desktop"));
   copyFileSync(release, join(dir, "desktop", "release.mjs"));
-  writeFileSync(join(dir, "desktop", "package.json"), '{"version":"0.0.1"}');
+  // Disposable tiny package tree exercises the exact desktop-scoped resolver.
+  // Its leaf delegates to the locally installed hash; no arbitrary PATH call.
+  const pkg = {version:"0.0.1",devDependencies:{"electron-builder":"26.18.0"}};
+  const locked = {"":pkg};
+  for (const [dep, version, dependencies] of [
+    ["electron-builder","26.18.0",{"app-builder-lib":"26.18.0"}],
+    ["app-builder-lib","26.18.0",{"@noble/hashes":"^1.8.0"}],
+    ["@noble/hashes","1.8.0",{}],
+  ]) {
+    const dirName=join(dir,"desktop","node_modules",dep);
+    mkdirSync(dirName,{recursive:true});
+    writeFileSync(join(dirName,"package.json"),JSON.stringify({name:dep,version,dependencies}));
+    locked["node_modules/"+dep]={version,integrity:"fixture-only"};
+  }
+  writeFileSync(join(dir,"desktop","node_modules","@noble","hashes","blake2.js"), `module.exports=require(${JSON.stringify(blake2Path)});`);
+  if (opts.BZ_FIXTURE_UNPINNED_HASH === "1") locked["node_modules/@noble/hashes"].version="0.0.0";
+  writeFileSync(join(dir,"desktop","package-lock.json"),JSON.stringify({packages:locked}));
+  if (opts.BZ_FIXTURE_NO_DIFFERENTIAL === "1") pkg.build = {nsis:{differentialPackage:false}};
+  writeFileSync(join(dir, "desktop", "package.json"), JSON.stringify(pkg));
   if (opts.BZ_FIXTURE_EXISTING !== "none") writeFileSync(join(dir, "dist-desktop", name), file);
+  if (opts.BZ_FIXTURE_PRERELEASE_MAP === "valid") writeFileSync(join(dir, "dist-desktop", blockmapName), blockmap);
   writeFileSync(join(dir, "publishers.json"), JSON.stringify({publishers:[{keyId:opts.BZ_FIXTURE_PIN ?? "fixture-dev"}]}));
   writeFileSync(join(dir, "calls.txt"), "");
   const relativePins = opts.BZ_FIXTURE_RELATIVE_PIN === "1";
@@ -37,6 +69,15 @@ function run(t, assets, prerelease = true, opts = {}) {
     const cp = require("node:child_process"), fs = require("node:fs");
     const assets=JSON.parse(process.env.BZ_FIXTURE_ASSETS);
     let built=false;
+    const lstat=fs.lstatSync;
+    fs.lstatSync=(file,...args)=>{
+      const stat=lstat(file,...args);
+      if (built && process.env.BZ_FIXTURE_BLOCKMAP==="growth" &&
+          file===process.env.BZ_FIXTURE_BUILD_OUTPUT+".blockmap" && stat?.size < 16*1024*1024) {
+        fs.truncateSync(file,16*1024*1024+1);
+      }
+      return stat;
+    };
     const prerelease=process.env.BZ_FIXTURE_PRE==="true";
     cp.execFileSync = (cmd, args, options) => {
       fs.appendFileSync(process.env.BZ_FIXTURE_LOG,JSON.stringify([cmd,...args])+"\\n");
@@ -45,6 +86,15 @@ function run(t, assets, prerelease = true, opts = {}) {
         const pins=(options.env ?? process.env).BZ_RECIPE_PUBLISHER_FILE;
         const staged=process.env.BZ_FIXTURE_STAGED_PINS;
         fs.writeFileSync(process.env.BZ_FIXTURE_BUILD_OUTPUT, "test artifact");
+        const mode=process.env.BZ_FIXTURE_BLOCKMAP;
+        if (mode && mode!=="none") {
+          const target=process.env.BZ_FIXTURE_BUILD_OUTPUT+".blockmap";
+          const data=process.env["BZ_FIXTURE_MAP_"+mode.toUpperCase()] || process.env.BZ_FIXTURE_MAP_VALID;
+          fs.writeFileSync(target, mode==="expansion"
+            ? require("node:zlib").gzipSync(Buffer.alloc(32*1024*1024+1,0x20))
+            : Buffer.from(data,"base64"));
+          if (mode==="oversize") fs.truncateSync(target,16*1024*1024+1);
+        }
         fs.mkdirSync(path.dirname(staged),{recursive:true});
         fs.writeFileSync(staged,process.env.BZ_FIXTURE_SWAPPED_PINS==="1"
           ? JSON.stringify({publishers:[{keyId:"fixture-dev"}]})
@@ -75,7 +125,12 @@ function run(t, assets, prerelease = true, opts = {}) {
   const proc = spawnSync(process.execPath, ["--require", join(dir,"mock.cjs"), join(dir,"desktop","release.mjs"), ...(opts.BZ_FIXTURE_CLI ? JSON.parse(opts.BZ_FIXTURE_CLI) : ["--skip-build","--allow-dev-pin"])], {
     cwd: caller, encoding: "utf8", timeout: 15000,
     env: { ...process.env, PATH: join(dir,"no-executables"), BZ_RECIPE_PUBLISHER_FILE: relativePins ? "publishers.json" : join(dir,"publishers.json"),
-      NODE_OPTIONS:"", BZ_FIXTURE_BUILD_OUTPUT:join(dir,"dist-desktop",name), BZ_FIXTURE_STAGED_PINS:join(dir,"desktop","stage","app","publishers.json"), BZ_FIXTURE_LOG:join(dir,"calls.txt"), BZ_FIXTURE_PRE:String(prerelease), BZ_FIXTURE_ASSETS:JSON.stringify(assets), ...opts }
+      NODE_OPTIONS:"",
+      BZ_FIXTURE_MAP_VALID:blockmap.toString("base64"),
+      BZ_FIXTURE_MAP_STALE:makeMap(Buffer.from("best artifact")).toString("base64"),
+      BZ_FIXTURE_MAP_SHORT:makeMap(file.subarray(0,-1)).toString("base64"),
+      BZ_FIXTURE_MAP_MALFORMED:"not gzip",
+      BZ_FIXTURE_BUILD_OUTPUT:join(dir,"dist-desktop",name), BZ_FIXTURE_STAGED_PINS:join(dir,"desktop","stage","app","publishers.json"), BZ_FIXTURE_LOG:join(dir,"calls.txt"), BZ_FIXTURE_PRE:String(prerelease), BZ_FIXTURE_ASSETS:JSON.stringify(assets), ...opts }
   });
   assert.ifError(proc.error);
   const calls = readFileSync(join(dir,"calls.txt"),"utf8").trim().split("\n").filter(Boolean).map(line=>JSON.parse(line));
@@ -144,7 +199,8 @@ test("do not report success if the release channel changed after preflight",t=>{
 });
 
 function stable(t, cli, opts={}) {
-  return run(t,expected,false,{BZ_FIXTURE_PIN:"fixture-production", BZ_FIXTURE_CLI:JSON.stringify(cli),...opts});
+  const {remote = [...expected,remoteMap], ...env} = opts;
+  return run(t,remote,false,{BZ_FIXTURE_PIN:"fixture-production", BZ_FIXTURE_CLI:JSON.stringify(cli),BZ_FIXTURE_BLOCKMAP:"valid",...env});
 }
 test("stable skip-build cannot treat a previously created installer as stable based on today's pins",t=>{
   const r=stable(t,["--skip-build"]);
@@ -186,5 +242,57 @@ test("stable release verifies actual staged pins match the preflight bytes",t=>{
   const r=stable(t,[],{BZ_FIXTURE_EXISTING:"none",BZ_FIXTURE_SWAPPED_PINS:"1"});
   assert.notEqual(r.code,0,r.text);
   assert.match(r.text,/staged publisher pins.*changed/i);
+  assert.deepEqual(r.calls.filter(changed),[]);
+});
+
+for (const [mode, reason] of [
+  ["none", /stable.*blockmap/i], [ "stale", /blockmap checksum/i ],
+  ["short", /blockmap.*cover/i], ["malformed", /blockmap gzip/i], ["oversize", /blockmap size.*bounds/i],
+  ["expansion", /blockmap.*expansion bound/i], ["growth", /blockmap size.*changed before read/i],
+]) {
+  test("stable release fails before writes for " + mode + " local update pair",t=>{
+    const r=stable(t,[],{BZ_FIXTURE_EXISTING:"none",BZ_FIXTURE_BLOCKMAP:mode});
+    assert.notEqual(r.code,0,r.text); assert.match(r.text,reason);
+    assert.deepEqual(r.calls.filter(changed),[]);
+  });
+}
+test("stable reports exact remote coherence with both canonical asset digests",t=>{
+  const r=stable(t,[],{BZ_FIXTURE_EXISTING:"none"});
+  assert.equal(r.code,0,r.text);
+  assert.match(r.text,/verified on GitHub: BeeZilla-Setup-0\.0\.1\.exe\.blockmap/i);
+  assert.match(r.text,/automatic update feed.*not verified/i);
+});
+for (const [label,remote] of [
+  ["missing",expected], ["wrong size",[...expected,{...remoteMap,size:remoteMap.size+1}]],
+  ["same-size wrong digest",[...expected,{...remoteMap,digest:"sha256:"+"0".repeat(64)}]],
+]) {
+  test("stable receipt cannot report verification for a " + label + " remote blockmap",t=>{
+    const r=stable(t,[],{BZ_FIXTURE_EXISTING:"none",remote});
+    assert.notEqual(r.code,0,r.text); assert.match(r.text,/FAILED:.*blockmap/i);
+    assert.doesNotMatch(r.text,/verified on GitHub/i);
+  });
+}
+test("existing prerelease blockmap is not silently retained beside a different bare installer",t=>{
+  const r=run(t,[...expected,remoteMap]);
+  assert.notEqual(r.code,0,r.text);
+  assert.match(r.text,/existing.*blockmap/i);
+  assert.deepEqual(r.calls.filter(changed),[]);
+});
+test("explicit prerelease with matching optional blockmap still succeeds",t=>{
+  const r=run(t,[...expected,remoteMap],true,{BZ_FIXTURE_PRERELEASE_MAP:"valid"});
+  assert.equal(r.code,0,r.text); assert.match(r.text,/verified on GitHub: BeeZilla-Setup-0\.0\.1\.exe\.blockmap/i);
+});
+
+test("explicit non-differential NSIS config remains a manual-download stable layout",t=>{
+  const r=stable(t,[],{BZ_FIXTURE_EXISTING:"none",BZ_FIXTURE_NO_DIFFERENTIAL:"1",BZ_FIXTURE_BLOCKMAP:"none",remote:expected});
+  assert.equal(r.code,0,r.text);
+  assert.match(r.text,/verified on GitHub: BeeZilla-Setup-0\.0\.1\.exe /i);
+  assert.doesNotMatch(r.text,/verified on GitHub: .*\.blockmap/i);
+});
+
+test("a matching blockmap must not silently verify with a different desktop dependency version",t=>{
+  const r=stable(t,[],{BZ_FIXTURE_EXISTING:"none",BZ_FIXTURE_UNPINNED_HASH:"1"});
+  assert.notEqual(r.code,0,r.text);
+  assert.match(r.text,/requires the locked desktop dependencies/i);
   assert.deepEqual(r.calls.filter(changed),[]);
 });
