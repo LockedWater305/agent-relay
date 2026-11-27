@@ -134,7 +134,16 @@ export class RuntimeSupervisor {
     let spawnError = null;
     child.stdout?.on("data", (b) => this.onLog(String(b).trimEnd()));
     child.stderr?.on("data", (b) => this.onLog(String(b).trimEnd()));
-    child.on("error", (error) => { spawnError = error; });
+    const spawnSettled = new Promise((done) => {
+      child.once("spawn", done);
+      child.on("error", (error) => {
+        spawnError = error;
+        // Node emits an error with no PID if the OS never created a launcher.
+        // A launcher with a PID still must report who owns its database process.
+        if (child.pid === undefined) launch.noServer = true;
+        done();
+      });
+    });
     child.on("message", (message) => {
       if (this.launch !== launch || !message || typeof message !== "object") return;
       if (message.type === "beezilla:launcher-ready") launch.controlReady = true;
@@ -168,6 +177,11 @@ export class RuntimeSupervisor {
     // an antivirus, or a Wine loopback limitation all look like from here. Collect
     // the facts while waiting instead of guessing at the end.
     const deadline = Date.now() + timeoutMs;
+    // Spawn errors arrive asynchronously. Do not mistake a missing PID for an
+    // exit before Node has reported whether the launch happened at all.
+    await spawnSettled;
+    if (signal.aborted) throw new Error("Local runtime startup canceled.");
+    if (spawnError) throw new Error(`Could not start the local runtime: ${spawnError.message}`);
     let lastProbe = { ok: false, error: "not attempted", code: null, ms: 0, rt: null };
     let sawRuntimeFile = false;
     while (Date.now() < deadline) {

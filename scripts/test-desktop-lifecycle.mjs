@@ -237,6 +237,40 @@ test("startup failure is prompt, cleans up and can be retried", async () => {
   } finally { await cleanup(ctx); }
 });
 
+test("a rejected OS spawn never claims database ownership and can be retried", async () => {
+  const ctx = setup();
+  const executable = process.execPath;
+  try {
+    // Node's real spawn emits an asynchronous ENOENT when no process was made.
+    process.execPath = join(ctx.root, "missing-node-executable");
+    const failed = ctx.sup.start({ timeoutMs: 3000 });
+    process.execPath = executable;
+
+    const [result] = await Promise.allSettled([failed]);
+    assert.equal(result.status, "rejected");
+    assert.equal(ctx.sup.shutdownUncertain, false, "no process means no unknown database ownership");
+    assert.equal(ctx.sup.child, null);
+    assert.equal(existsSync(join(ctx.dir, "launches")), false);
+    assert.match(result.reason.message, /Could not start the local runtime.*ENOENT/);
+    assert.ok((await ctx.sup.start({ timeoutMs: 3000 })).port);
+    await ctx.sup.stop({ timeoutMs: 3000 });
+  } finally {
+    process.execPath = executable;
+    await cleanup(ctx);
+  }
+});
+
+test("a launcher that really spawned and never reported ownership still blocks unsafe retry", async () => {
+  const ctx = setup();
+  try {
+    writeFileSync(join(ctx.root, "scripts", "beezilla-local.mjs"), "process.exit(7);");
+    await assert.rejects(ctx.sup.start({ timeoutMs: 3000 }), /exited during startup/);
+    assert.equal(ctx.sup.shutdownUncertain, true);
+    assert.equal(ctx.sup.child, null);
+    await assert.rejects(ctx.sup.start({ timeoutMs: 3000 }), /did not confirm whether its server stopped/);
+  } finally { await cleanup(ctx); }
+});
+
 test("stop cancels a startup without waiting for the readiness deadline", async () => {
   const ctx = setup();
   try {
