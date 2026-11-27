@@ -3,10 +3,12 @@
  * a fake locked Vite exits as soon as control reaches it. No bundle is built.
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import test from "node:test";
 import { CSP_PAGE_NAMES } from "../desktop/csp.mjs";
 
@@ -115,4 +117,93 @@ test("a nonempty regular server entry retains the stage receipt without Git",t=>
   assert.match(manifest.stagedRuntime.sha256,/^[0-9a-f]{64}$/);
   assert.equal(manifest.source.state,"unavailable");
   assert.equal(readFileSync(join(dir,"desktop/stage/app/.output/server/index.mjs"),"utf8"),"export const fixture = 1;");
+});
+
+function acceptedStageFixture(t) {
+  const ctx = outputFixture(t, "valid"), {dir,out}=ctx;
+  out("package.json",'{"version":"0.0.1","dependencies":{"entry":"1.0.0"}}');
+  out("node_modules/entry/package.json",'{"name":"entry","version":"1.0.0"}');
+  const first = invoke(dir);
+  assert.equal(first.status,0,first.stdout+first.stderr);
+  const stage=join(dir,"desktop/stage"), app=join(stage,"app");
+  const marker=join(app,".output/server/index.mjs");
+  const receipt=join(stage,"MANIFEST.json");
+  const prior=readFileSync(marker,"utf8");
+  assert.match(JSON.parse(readFileSync(receipt,"utf8")).stagedRuntime.sha256,/^[0-9a-f]{64}$/);
+  return {...ctx,stage,app,marker,receipt,prior};
+}
+test("a failed second stage leaves old bytes but the actual afterPack refuses their old receipt",async t=>{
+  const {dir,app,marker,receipt,prior}=acceptedStageFixture(t);
+  const attempted = invoke(dir,true);
+  assert.notEqual(attempted.status,0,attempted.stdout+attempted.stderr);
+  assert.match(attempted.stderr,/refusing to build from stubs/);
+  assert.equal(readFileSync(marker,"utf8"),prior);
+  const hook=join(dir,"desktop/after-pack.cjs");
+  cpSync(new URL("../desktop/after-pack.cjs",import.meta.url),hook);
+  const unpacked=join(dir,"synthetic output");
+  cpSync(app,join(unpacked,"resources/app"),{recursive:true,filter:p=>basename(p)!=="node_modules"});
+  const localRequire=createRequire(import.meta.url);
+  await assert.rejects(localRequire(hook).default({appOutDir:unpacked,electronPlatformName:"win32"}),/no readable stage receipt/i);
+  assert.equal(existsSync(receipt),false);
+  assert.equal(existsSync(join(unpacked,"resources/app/node_modules")),false);
+  const retry=invoke(dir);
+  assert.equal(retry.status,0,retry.stdout+retry.stderr);
+  assert.match(JSON.parse(readFileSync(receipt,"utf8")).stagedRuntime.sha256,/^[0-9a-f]{64}$/);
+  await localRequire(hook).default({appOutDir:unpacked,electronPlatformName:"win32"});
+});
+test("a failed Vite pin check invalidates the prior stage receipt without deleting its bytes",t=>{
+  const {dir,out,marker,receipt,prior}=acceptedStageFixture(t);
+  out("node_modules/vite/package.json",'{"name":"vite","version":"0.0.0","bin":{"vite":"bin/vite.js"}}');
+  const second=invoke(dir);
+  assert.notEqual(second.status,0,second.stdout+second.stderr);
+  assert.match(second.stderr,/does not match locked/);
+  assert.equal(readFileSync(marker,"utf8"),prior);
+  assert.equal(existsSync(receipt),false);
+});
+test("a failed builder preflight for pack:dir invalidates the old stage receipt too",t=>{
+  const {dir,marker,receipt,prior}=acceptedStageFixture(t);
+  const second=invoke(dir,false,"dir");
+  assert.notEqual(second.status,0,second.stdout+second.stderr);
+  assert.match(second.stderr,/desktop[\\/]package-lock\.json/);
+  assert.equal(readFileSync(marker,"utf8"),prior);
+  assert.equal(existsSync(receipt),false);
+});
+
+test("a competing stage cannot invalidate the active owner receipt during packaging",async t=>{
+  const {dir,out}=outputFixture(t,"valid");
+  const meta={name:"electron-builder",version:"1.0.0",bin:{"electron-builder":"cli.js"}};
+  out("desktop/package-lock.json",JSON.stringify({packages:{"node_modules/electron-builder":{...meta,integrity:"fixture"}}}));
+  out("desktop/node_modules/electron-builder/package.json",JSON.stringify(meta));
+  const ready=join(dir,"owner-in-builder"), finish=join(dir,"release-owner");
+  out("desktop/node_modules/electron-builder/cli.js",`
+    const fs=require("node:fs");
+    fs.writeFileSync(${JSON.stringify(ready)},"synthetic pack started");
+    setInterval(()=>{if(fs.existsSync(${JSON.stringify(finish)}))process.exit(83)},25);
+    setTimeout(()=>process.exit(84),5000);
+  `);
+  const owner=spawn(process.execPath,[join(dir,"desktop/dist.mjs"),"dir"],{
+    cwd:dir,stdio:"ignore",
+    env:{PATH:join(dir,"no-executables"),...(process.env.SYSTEMROOT?{SYSTEMROOT:process.env.SYSTEMROOT}:{})}
+  });
+  const settled=once(owner,"exit");
+  void settled.catch(()=>{});
+  const receipt=join(dir,"desktop/stage/MANIFEST.json");
+  try {
+    const deadline=Date.now()+3500;
+    while(!existsSync(ready)&&Date.now()<deadline) await new Promise(r=>setTimeout(r,20));
+    assert.ok(existsSync(ready),"fixture owner never reached its synthetic builder");
+    const active=readFileSync(receipt,"utf8");
+    const contender=invoke(dir);
+    assert.notEqual(contender.status,0,contender.stdout+contender.stderr);
+    assert.match(contender.stderr,/another desktop.*stage|another desktop.*packaging/i);
+    assert.equal(readFileSync(receipt,"utf8"),active);
+  } finally {
+    writeFileSync(finish,"finish");
+    await settled;
+  }
+  // This owner was scripted to fail, not to produce an app or installer.
+  assert.equal(existsSync(receipt),false);
+  const retry=invoke(dir);
+  assert.equal(retry.status,0,retry.stdout+retry.stderr);
+  assert.ok(existsSync(receipt));
 });

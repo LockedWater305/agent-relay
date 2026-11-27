@@ -19,7 +19,7 @@
  *   <install>/resources/app/            .output/ scripts/ bin/ package.json node_modules/
  */
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireServerEntry, writeCspManifest } from "../scripts/build-desktop-csp.mjs";
@@ -30,6 +30,8 @@ const DESKTOP = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(DESKTOP, "..");
 const STAGE = join(DESKTOP, "stage");
 const APP = join(STAGE, "app");
+const RECEIPT = join(STAGE, "MANIFEST.json");
+const STAGE_LOCK = join(STAGE, ".build-lock");
 const OUT = join(ROOT, "dist-desktop"); // package.json build.directories.output
 
 const log = (msg) => console.log(`[dist] ${msg}`);
@@ -76,7 +78,12 @@ async function stage() {
   // sync uses the checked-in public stubs, unless BZ_REQUIRE_PRIVATE forbids it.
   runCli(ROOT, join(ROOT, "scripts/sync-private.mjs"), []);
   runCli(ROOT, join(ROOT, "scripts/assert-no-private-modules.mjs"), []);
-  rmSync(STAGE, { recursive: true, force: true });
+  // This invocation owns STAGE_LOCK. Clear old generated contents, not the
+  // lock that keeps another stage/pack attempt from racing this copy.
+  for (const name of readdirSync(STAGE)) {
+    const child = join(STAGE, name);
+    if (child !== STAGE_LOCK) rmSync(child, { recursive: true, force: true });
+  }
   mkdirSync(APP, { recursive: true });
 
   // Always rebuild. `vite build` takes under a second here, and skipping it when
@@ -168,7 +175,7 @@ async function stage() {
   // Logical file bytes, not filesystem block allocation. No platform command
   // (du is normally absent on Windows) or bogus zero if reading fails.
   const megabytes = stagedRuntime.bytes === null ? null : Math.round(stagedRuntime.bytes / 1e6);
-  writeFileSync(join(STAGE, "MANIFEST.json"), JSON.stringify({
+  writeFileSync(RECEIPT, JSON.stringify({
     stagedAt: new Date().toISOString(),
     version: JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version,
     productionPackages: copied,
@@ -361,14 +368,36 @@ function unpackedResources() {
 }
 
 const mode = process.argv[2] ?? "stage";
-if (mode === "dir") localTestBanner();
-const builder = mode === "all" || mode === "dir"
-  ? lockedCli(DESKTOP, "electron-builder", "cli.js")
-  : null;
-if (mode === "stage" || mode === "all" || mode === "dir") await stage();
-if (mode === "all") {
-  log("running electron-builder…");
-  runCli(DESKTOP, builder, ["--win", "nsis", "--publish", "never"]);
-  log("installer written to dist-desktop/");
+if (mode === "stage" || mode === "all" || mode === "dir") {
+  const priorStage = lstatSync(STAGE, { throwIfNoEntry: false });
+  if (priorStage && !priorStage.isDirectory()) throw new Error("desktop/stage must be a real directory");
+  mkdirSync(STAGE, { recursive: true });
+  try { mkdirSync(STAGE_LOCK); }
+  catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    throw new Error("another desktop stage or packaging attempt owns desktop/stage/.build-lock; remove an abandoned lock only after confirming all desktop build processes have stopped");
+  }
+  try {
+    // Preflight can preserve the old stage bytes for inspection, but nothing
+    // should package that old stage after this new attempt has started.
+    rmSync(RECEIPT, { force: true });
+    if (mode === "dir") localTestBanner();
+    const builder = mode === "all" || mode === "dir"
+      ? lockedCli(DESKTOP, "electron-builder", "cli.js")
+      : null;
+    await stage();
+    if (mode === "all") {
+      log("running electron-builder…");
+      runCli(DESKTOP, builder, ["--win", "nsis", "--publish", "never"]);
+      log("installer written to dist-desktop/");
+    }
+    if (mode === "dir") packDir(builder);
+  } catch (error) {
+    // A later failure (including afterPack/packager failure) cannot leave
+    // successful evidence from this attempt either.
+    rmSync(RECEIPT, { force: true });
+    throw error;
+  } finally {
+    rmdirSync(STAGE_LOCK);
+  }
 }
-if (mode === "dir") packDir(builder);
