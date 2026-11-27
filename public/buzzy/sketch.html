@@ -353,11 +353,11 @@
     // A note belongs to a mark, not to a coordinate: "this road is too narrow" must
     // stay attached to the road when the drawing around it moves. Anchor = stroke id;
     // the note's own x1/y1 is only a fallback for marks that no longer exist.
-    function anchorTarget(id) {
-      return strokes.find(function (stroke) { return stroke.id === id; });
+    function anchorTarget(id, markList) {
+      return (markList || strokes).find(function (stroke) { return stroke.id === id; });
     }
-    function anchorPoint(id) {
-      var st = anchorTarget(id);
+    function anchorPoint(id, markList) {
+      var st = anchorTarget(id, markList);
       if (!st) return null;
       if (st.tool === "pen" && st.points && st.points.length) {
         var p = st.points[Math.floor(st.points.length / 2)];
@@ -687,6 +687,9 @@
       pendingBoardCaptures.forEach(function (cancel) { cancel(); });
     }
     function flatten() {
+      // Capture annotations and their anchors in the same turn as the image
+      // placements. Later edits must not change this Create or export frame.
+      var captureStrokes = JSON.parse(JSON.stringify(strokes)), captureColor = color;
       var r = stage.getBoundingClientRect();
       var out = document.createElement("canvas");
       var s = Math.min(1, 1280 / Math.max(r.width, 1));
@@ -729,8 +732,8 @@
           c.drawImage(layer.img, layer.x, layer.y, layer.w, layer.h);
         });
         c.setTransform(s, 0, 0, s, 0, 0);
-        strokes.forEach(function (st) {
-          c.strokeStyle = st.color || color; c.fillStyle = st.color || color;
+        captureStrokes.forEach(function (st) {
+          c.strokeStyle = st.color || captureColor; c.fillStyle = st.color || captureColor;
           c.lineWidth = st.width || 3; c.lineCap = "round"; c.lineJoin = "round";
           if (st.tool === "pen") { c.beginPath(); c.moveTo(st.points[0].x, st.points[0].y);
             for (var i = 1; i < st.points.length; i++) c.lineTo(st.points[i].x, st.points[i].y); c.stroke(); }
@@ -740,7 +743,11 @@
               c.lineTo(st.x2 - h * Math.cos(a - 0.4), st.y2 - h * Math.sin(a - 0.4));
               c.lineTo(st.x2 - h * Math.cos(a + 0.4), st.y2 - h * Math.sin(a + 0.4)); c.closePath(); c.fill(); } }
           else if (st.tool === "rect") { c.strokeRect(st.x1, st.y1, st.x2 - st.x1, st.y2 - st.y1); }
-          else if (st.tool === "text") { c.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif"; c.fillText(st.text || "", st.x1, st.y1); }
+          else if (st.tool === "text") {
+            var at = (st.anchor && anchorPoint(st.anchor, captureStrokes)) || { x: st.x1, y: st.y1 };
+            c.font = "600 15px -apple-system, Segoe UI, Inter, sans-serif";
+            c.fillText(st.text || "", at.x, at.y);
+          }
         });
         return out.toDataURL("image/png");
       });

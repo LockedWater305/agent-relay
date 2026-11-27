@@ -548,13 +548,18 @@ test('explicit Save still settles an owned mouse drag without a pointerup event'
 // Canvas/load doubles expose what the real Sketch Create button sends, without
 // decoding real media or allowing the Art transport to reach a provider.
 function referenceCompositeFixture(f) {
- const images=metadataImageIO(f), drawn=[], exports=[];
+ const images=metadataImageIO(f), drawn=[], marks=[], exports=[];
  const create=f.h.document.createElement.bind(f.h.document);
- const url=()=> 'data:image/png;base64,'+Buffer.from(JSON.stringify(drawn)).toString('base64');
+ const url=()=> 'data:image/png;base64,'+Buffer.from(JSON.stringify({drawn,marks})).toString('base64');
  f.h.document.createElement=tag=>{
   const el=create(tag);
   if(tag==='canvas'){
-   el.getContext=()=>new Proxy({}, {get:(_,key)=>key==='drawImage'?(img,...geometry)=>drawn.push({url:img.src,geometry}):()=>{}});
+   el.getContext=()=>new Proxy({}, {get:(ctx,key)=>{
+    if(key==='drawImage')return (img,...geometry)=>drawn.push({url:img.src,geometry});
+    if(['moveTo','lineTo','strokeRect','fillText'].includes(key))
+     return (...args)=>marks.push({kind:key,args,color:key==='fillText'?ctx.fillStyle:ctx.strokeStyle});
+    return ()=>{};
+   }});
    el.toDataURL=url;
   } else if(tag==='a') el.click=()=>exports.push(el.href);
   return el;
@@ -657,4 +662,61 @@ for(const hit of [0,1])test('Delete only the hit legacy duplicate #'+hit+' and p
  assert.equal(f.posts().length,1);assert.deepEqual(f.data().board.strokes,expected);
  p.el('undo').click();await p.save();assert.deepEqual(f.data().board,board);
  p.el('redo').click();await p.save();assert.deepEqual(f.data().board.strokes,expected);
+});
+
+function decodeReferenceFixture(url) {
+ assert.match(url,/^data:image\/png;base64,/);
+ return JSON.parse(Buffer.from(url.split(',')[1],'base64').toString('utf8'));
+}
+
+test('Sketch Create sends the click-time line and note when Clear happens during image decode',async t=>{
+ const board={...savedBoard,images:imageBoard.images};
+ const f=await fixture(t,board),p=await f.mount(),capture=referenceCompositeFixture(f);
+ p.el('prompt').value='Keep the line and its note';p.el('create').click();
+ assert.equal(capture.images.length,2);
+ capture.images[0].onload();p.el('clear').click();await p.save();
+ assert.deepEqual(f.data().board.strokes,[]);
+ assert.deepEqual(capture.requests(),[]);
+ capture.images[1].onload();await drain();
+ assert.equal(capture.requests().length,1);
+ const sent=decodeReferenceFixture(capture.requests()[0].body.refs[0]);
+ assert.deepEqual(sent.drawn.map(row=>row.url),board.images.map(im=>im.url));
+ assert.deepEqual(sent.marks,[
+  {kind:'moveTo',args:[10,20],color:'#ffd40d'},
+  {kind:'lineTo',args:[180,80],color:'#ffd40d'},
+  {kind:'fillText',args:['Keep this road',95,38],color:'#ffffff'},
+ ]);
+ assert.deepEqual(f.data().board.strokes,[],'Create does not undo the live Clear');
+});
+
+test('Sketch PNG export does not include a later stroke and note added during image decode',async t=>{
+ const f=await fixture(t,imageBoard),p=await f.mount(),capture=referenceCompositeFixture(f);
+ p.el('shot').click();
+ assert.equal(capture.images.length,2);
+ capture.images[1].onload();
+ await p.draw();
+ p.tools.find(el=>el.getAttribute('data-tool')==='text').click();
+ p.el('board').dispatch('pointerdown',{clientX:325,clientY:115,pointerId:1});
+ await p.save();
+ assert.deepEqual(f.data().board.strokes.map(st=>st.tool),['rect','text']);
+ assert.deepEqual(capture.exports,[]);
+ capture.images[0].onload();await drain();
+ assert.equal(capture.exports.length,1);
+ const exported=decodeReferenceFixture(capture.exports[0]);
+ assert.deepEqual(exported.drawn.map(row=>row.url),imageBoard.images.map(im=>im.url));
+ assert.deepEqual(exported.marks,[],'no annotations added after the export click');
+ assert.deepEqual(f.data().board.strokes.map(st=>st.tool),['rect','text'],'later edits remain saved');
+});
+
+test('Sketch export keeps the click-time fallback colour for an older uncoloured mark',async t=>{
+ const line={...savedBoard.strokes[0]};delete line.color;
+ const board={...imageBoard,strokes:[line]};
+ const f=await fixture(t,board),p=await f.mount(),capture=referenceCompositeFixture(f),picker=p.el('color');
+ picker.value='#112233';picker.dispatch('input');
+ p.el('shot').click();
+ picker.value='#445566';picker.dispatch('input');
+ capture.images.forEach(img=>img.onload());await drain();
+ assert.equal(capture.exports.length,1);
+ const exported=decodeReferenceFixture(capture.exports[0]);
+ assert.deepEqual(exported.marks.map(mark=>mark.color),['#112233','#112233']);
 });
