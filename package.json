@@ -77,7 +77,7 @@
     "test:honcho-privacy": "node --test scripts/test-honcho-privacy.mjs",
     "test:auth-session-contract": "node scripts/test-auth-session-contract.mjs",
     "test:account-session-browser": "node scripts/test-account-session-parity.mjs",
-    "test:desktop-fixtures": "node --experimental-vm-modules --test --test-concurrency=1 scripts/test-desktop-prebuild.mjs scripts/test-desktop-sketch-transition.mjs scripts/test-desktop-stage-receipt.mjs scripts/test-parity-inventory-path.mjs scripts/test-account-logout-chrome.mjs scripts/test-installer-shape-label.mjs scripts/test-cli-serve-startup.mjs scripts/test-cli-status-discovery.mjs",
+    "test:desktop-fixtures": "node --experimental-vm-modules --test --test-concurrency=1 scripts/test-desktop-prebuild.mjs scripts/test-desktop-sketch-transition.mjs scripts/test-desktop-stage-receipt.mjs scripts/test-parity-inventory-path.mjs scripts/test-account-logout-chrome.mjs scripts/test-installer-shape-label.mjs scripts/test-cli-serve-startup.mjs scripts/test-cli-status-discovery.mjs scripts/test-desktop-stop-ipc-failure.mjs",
     "test:desktop-connect-guard": "node --experimental-vm-modules --test scripts/test-desktop-connect-guard.mjs",
     "test:desktop-settings-provenance": "node --experimental-vm-modules --test scripts/test-desktop-settings-provenance.mjs",
     "test:document-decisions": "node --experimental-vm-modules --test scripts/test-document-decisions.mjs",

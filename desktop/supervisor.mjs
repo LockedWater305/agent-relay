@@ -352,16 +352,25 @@ export class RuntimeSupervisor {
     // Ask the current launcher over IPC even before health is ready. Never
     // terminate an unknown pre-handshake generation and infer that it had no
     // server: it may already have spawned a database process.
-    let requested = false;
+    let requested = null;
+    let ipcUnavailable = false;
+    const rejectIpc = () => {
+      if (requested !== "ipc") return;
+      ipcUnavailable = true;
+      requested = null;
+    };
     const requestStop = () => {
       if (requested || !alive(child)) return;
       this.captureOwnedRuntime(child);
-      if (launch?.controlReady && child.connected) {
-        requested = true;
-        try { child.send({ type: "beezilla:stop" }, () => {}); }
-        catch { requested = false; }
-      } else if (launch?.serverPid) {
-        requested = true;
+      if (!ipcUnavailable && launch?.controlReady && child.connected) {
+        requested = "ipc";
+        // A false return may only mean backpressure. The callback reports an
+        // actual delivery error, allowing the same fallback as a broken channel.
+        try { child.send({ type: "beezilla:stop" }, (error) => { if (error) rejectIpc(); }); }
+        catch { rejectIpc(); }
+      }
+      if (!requested && launch?.serverPid && alive(child)) {
+        requested = "signal";
         child.kill("SIGTERM");
       }
     };
