@@ -115,7 +115,19 @@ async function cmdServe(argv) {
     stdio: "inherit",
     env: { ...process.env, BZ_DATA_DIR: DATA },
   });
-  await new Promise((r) => child.on("exit", r));
+  // Preserve launcher failures for health checks and shell automation. In
+  // particular, the launcher returns 2 when the installed server is absent.
+  return new Promise((done) => {
+    child.once("error", (error) => {
+      console.error(`[beezilla] could not start local runtime launcher: ${error.message}`);
+      done(1);
+    });
+    child.once("exit", (code, signal) => {
+      if (Number.isInteger(code)) return done(code);
+      console.error(`[beezilla] local runtime launcher stopped without a normal exit (${signal ?? "unknown signal"})`);
+      done(1);
+    });
+  });
 }
 
 async function cmdStatus() {
