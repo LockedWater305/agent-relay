@@ -26,7 +26,7 @@ export async function desktop(t,fixtures,options={}) {
  Object.assign(app,{isPackaged:true,getVersion:()=> 'synthetic-reconstruction',requestSingleInstanceLock:()=>true,
   commandLine:{appendSwitch(){}},whenReady:()=>({then(fn){ready=fn;return Promise.resolve();}}),
   exit(code){exitCode=code;},quit(){return quit();}});
- const scheduled=(fn,ms,...args)=>{const id=setTimeout(()=>{timers.delete(id);fn(...args);},ms);id.unref?.();timers.add(id);return id;};
+ const scheduled=(fn,ms,...args)=>{const id=setTimeout(()=>{timers.delete(id);fn(...args);},options.timerDelay?.(ms)??ms);id.unref?.();timers.add(id);return id;};
  const cancel=id=>{clearTimeout(id);timers.delete(id);};
  const auth=details=>{assert.equal(typeof requestHandler,'function','actual main request listener is installed');let result;requestHandler(details,x=>{result=x;});assert.ok(result);return result;};
  let api;
@@ -859,4 +859,41 @@ test('last window close uses normal Quit on win32', async t => {
   assert.equal(d.stops, 1);
   assert.equal(f.posts().length, 1);
   assert.equal(d.errors.length, 0);
+});
+
+test('a stalled Settings navigation gives one retry path and does not strand the existing window', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t); g.h.location.href = 'about:blank';
+  const gate = f.defer();
+  let attempts = 0;
+  const d = await desktop(t, [f, g], {
+    timerDelay: ms => ms === 30_000 ? 5 : ms,
+    beforeLoad: async url => {
+      if (new URL(url).pathname === '/buzzy/settings' && ++attempts === 1) {
+        await gate.promise;
+        throw Error('fixture: delayed initial navigation was superseded');
+      }
+    },
+  });
+  const command = d.menu.template.flatMap(x => x.submenu || []).find(x => x.accelerator === 'CmdOrCtrl+,');
+  command.click(); command.click();
+  const win = d.api.currentSettings();
+  assert.ok(win);
+  assert.equal(attempts, 1, 'do not duplicate an in-progress load');
+  try {
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(d.errors.length, 1, 'a load that has not settled still gets one actionable notice');
+    assert.match(d.errors[0].message, /taking longer.*open Settings.*try again/i);
+    assert.equal(d.didExit(), false);
+    command.click(); await drain();
+    assert.equal(attempts, 2, 'a later shortcut retries without closing the window');
+    assert.equal(d.api.currentSettings(), win);
+    assert.equal(new URL(win.url).pathname, '/buzzy/settings');
+  } finally {
+    gate.resolve();
+    await drain();
+  }
+  assert.equal(d.errors.length, 1, 'a late rejection from the first load does not add a warning');
+  assert.equal(d.windows.length, 2);
+  assert.equal(d.starts, 1);
 });

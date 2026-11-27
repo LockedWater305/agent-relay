@@ -605,15 +605,41 @@ function installMenu() {
 const settingsPagesLoaded = new WeakSet();
 const settingsPagesToRetry = new WeakSet();
 
-function loadSettingsPage(win, url) {
+function reportSettingsLoadProblem(win, slow = false) {
+  // Closing, quitting, or a successful restart navigation can cancel the
+  // original load. Only ask to retry an open window with no usable page.
+  if (quitting || settingsWindow !== win || win.isDestroyed() || settingsPagesLoaded.has(win)) return;
+  settingsPagesToRetry.add(win);
+  dialog.showErrorBox(slow ? "Settings is still loading" : "BeeZilla could not load Settings", slow
+    ? "Settings is taking longer than expected. Open Settings from the BeeZilla menu to try again."
+    : "The local Settings page did not load. Open Settings from the BeeZilla menu to try again.");
+}
+
+async function loadSettingsPage(win, url) {
   settingsPagesToRetry.delete(win);
-  void win.loadURL(url).then(() => console.log(`[desktop] settings window opened ${url}`)).catch(() => {
-    // Closing, quitting, or a successful restart navigation can cancel the
-    // original load. Only ask to retry an open window with no usable page.
-    if (quitting || settingsWindow !== win || win.isDestroyed() || settingsPagesLoaded.has(win)) return;
-    settingsPagesToRetry.add(win);
-    dialog.showErrorBox("BeeZilla could not load Settings", "The local Settings page did not load. Open Settings from the BeeZilla menu to try again.");
-  });
+  let timer, onClose, result;
+  try {
+    const closed = new Promise((resolve) => {
+      onClose = () => resolve("closed");
+      win.once("closed", onClose);
+    });
+    const slow = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("waiting"), 30_000);
+      timer.unref?.();
+    });
+    result = await Promise.race([
+      win.loadURL(url).then(() => "loaded"),
+      slow,
+      closed,
+    ]);
+  } catch {
+    result = "failed";
+  } finally {
+    clearTimeout(timer);
+    if (onClose) win.removeListener("closed", onClose);
+  }
+  if (result === "loaded") console.log(`[desktop] settings window opened ${url}`);
+  if (result === "failed" || result === "waiting") reportSettingsLoadProblem(win, result === "waiting");
 }
 
 function settingsWindowFor(url) {
@@ -651,7 +677,7 @@ function settingsWindowFor(url) {
       settingsPagesToRetry.delete(win);
     }
   });
-  loadSettingsPage(win, url);
+  void loadSettingsPage(win, url);
   return win;
 }
 
@@ -842,7 +868,7 @@ async function openSettingsWindow() {
     if (quitting || acquireLibraryTransition.held()) return;
   }
   if (settingsWindow) {
-    if (settingsPagesToRetry.has(settingsWindow)) loadSettingsPage(settingsWindow, `${runtimeBase}/buzzy/settings`);
+    if (settingsPagesToRetry.has(settingsWindow)) void loadSettingsPage(settingsWindow, `${runtimeBase}/buzzy/settings`);
   } else {
     settingsWindowFor(`${runtimeBase}/buzzy/settings`);
   }
