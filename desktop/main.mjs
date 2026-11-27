@@ -108,9 +108,10 @@ function guardLibraryWindowClose(win) {
     if (quitting || pending) return;
     pending = true;
     void (async () => {
-      let transition, closed = false;
+      let transition, closed = false, rendererGone = false;
       try {
         transition = await acquireLibraryTransition();
+        if (win.isDestroyed() || contents.isDestroyed()) return;
         const closingMain = win === mainWindow;
         const savedPage = closingMain ? transition.targets.find((item) => item.wc === contents) : null;
         // close() can be prevented by the renderer. Do not skip its lease
@@ -119,6 +120,7 @@ function guardLibraryWindowClose(win) {
           const cleanup = () => {
             win.removeListener("closed", didClose);
             contents.removeListener("will-prevent-unload", didPrevent);
+            contents.removeListener("render-process-gone", didLoseRenderer);
           };
           const didClose = () => {
             // Remember only the verified local document from a completed close,
@@ -131,16 +133,25 @@ function guardLibraryWindowClose(win) {
             resolve(true);
           };
           const didPrevent = () => { cleanup(); allowed = false; resolve(false); };
+          const didLoseRenderer = () => {
+            // A crashed renderer may never finish the unload handshake. End
+            // this attempt without forcing the host window to close.
+            rendererGone = true;
+            didPrevent();
+          };
           win.once("closed", didClose);
           contents.once("will-prevent-unload", didPrevent);
+          contents.once("render-process-gone", didLoseRenderer);
           allowed = true;
           try { win.close(); } catch (error) { cleanup(); allowed = false; throw error; }
         });
       } catch (error) {
         allowed = false;
-        dialog.showErrorBox("Changes still need to be saved", `${error.message}\n\nBeeZilla stayed open. Retry after Sketch and Library saves are available; do not force-quit to apply this change.`);
+        if (!win.isDestroyed() && !contents.isDestroyed()) {
+          dialog.showErrorBox("Changes still need to be saved", `${error.message}\n\nBeeZilla stayed open. Retry after Sketch and Library saves are available; do not force-quit to apply this change.`);
+        }
       } finally {
-        if (transition) await transition.release({ skip: closed ? [contents] : [] });
+        if (transition) await transition.release({ skip: closed || rendererGone ? [contents] : [] });
         pending = false;
       }
     })();

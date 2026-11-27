@@ -81,6 +81,7 @@ export async function desktop(t,fixtures,options={}) {
   show(){} focus(){} isVisible(){return true;} isMinimized(){return false;} restore(){}
   close(){
    const closing=event();this.emit('close',closing);if(closing.prevented)return;
+   if(options.interceptNativeClose?.(this))return;
    let refused=this.preventUnload;
    this.fixture.event('beforeunload',{preventDefault(){refused=true;}});
    if(refused){const prevented=event();this.lastUnloadEvent=prevented;this.webContents.emit('will-prevent-unload',prevented);if(!prevented.prevented)return;}
@@ -275,6 +276,77 @@ test('prevented window close releases the matching writer and can be retried wit
  const f=await fixture(t),p=await f.mount(),d=await desktop(t,[f]);d.main.preventUnload=true;await p.draw();await d.close();assert.equal(d.main.isDestroyed(),false);assert.equal(d.main.lastUnloadEvent.prevented,false,'no override of Electron unload prevention');assert.equal(d.errors.length,0,'user-cancelled close is not a save error');assert.equal(d.api.held(),false);assert.equal(p.el('save').disabled,false);assert.equal(f.data().board.strokes.length,3);
  await p.draw();d.main.preventUnload=false;await d.close();assert.equal(d.main.isDestroyed(),true);assert.equal(f.data().board.strokes.length,4);
 });
+test('guarded close retirement: renderer disappears during native close, releasing the queue without forcing the window shut', async t => {
+  const f = await fixture(t), page = await f.mount();
+  let nativeCloses = 0, gone = false, deadEvaluations = 0;
+  const d = await desktop(t, [f], { interceptNativeClose: win => {
+    if (++nativeCloses !== 1) return false;
+    queueMicrotask(() => {
+      gone = true;
+      win.webContents.emit('render-process-gone', {}, { reason: 'crashed' });
+    });
+    return true; // No closed/unload reply: the host window still exists.
+  } });
+  const wc = d.main.webContents, evaluate = wc.executeJavaScript;
+  wc.executeJavaScript = async code => {
+    if (!gone) return evaluate(code);
+    deadEvaluations++;
+    return new Promise(() => {});
+  };
+  await page.draw();
+  await d.close();
+  assert.equal(nativeCloses, 1);
+  assert.equal(f.data().board.strokes.length, 3, 'save finished before dispatching close');
+  assert.equal(d.main.isDestroyed(), false, 'host was not force-closed');
+  assert.equal(d.api.held(), false, 'renderer disappearance cannot strand the document transition');
+  assert.equal(deadEvaluations, 0, 'do not run lease cleanup against the disappeared renderer');
+  assert.equal(wc.listenerCount('will-prevent-unload'), 0);
+  assert.equal(wc.listenerCount('render-process-gone'), 0);
+  assert.equal(d.errors.length, 0);
+  gone = false;
+  d.main.replaceFrame(); await d.main.replacementReady;
+  await d.close();
+  assert.equal(nativeCloses, 2);
+  assert.equal(d.main.isDestroyed(), true);
+  await d.quit();
+  assert.equal(d.didExit(), true);
+  assert.equal(d.stops, 1);
+});
+
+for (const whileSaving of [false, true]) {
+  test(`guarded close retirement: destruction while ${whileSaving ? 'saving' : 'queued'} does not prompt for a vanished window`, async t => {
+    const f = await fixture(t), page = await f.mount(), d = await desktop(t, [f]);
+    const entered = f.defer(), proceed = f.defer();
+    let held;
+    if (whileSaving) {
+      f.transport = async (req, next) => {
+        const response = await next();
+        if (req.method === 'POST') { entered.resolve(); await proceed.promise; }
+        return response;
+      };
+      await page.draw();
+    } else {
+      held = await d.api.acquire();
+    }
+    const attempting = d.close();
+    if (whileSaving) await entered.promise;
+    else await attempting;
+    // A native owner/renderer can destroy a child before its queued close runs.
+    const win = d.main;
+    if (!whileSaving) win.close = () => { throw Error('Object has been destroyed'); };
+    win.destroyed = true;
+    win.emit('closed');
+    win.webContents.emit('destroyed');
+    proceed.resolve(); await held?.release(); await attempting; await drain();
+    assert.equal(d.api.held(), false);
+    assert.equal(d.errors.length, 0);
+    if (whileSaving) assert.equal(f.data().board.strokes.length, 3, 'the accepted save remains committed');
+    await d.quit();
+    assert.equal(d.didExit(), true);
+    assert.equal(d.stops, 1);
+  });
+}
+
 test('multiwindow Quit drains both captured mounted pages before stopping',async t=>{
  const f=await fixture(t),g=await fixture(t),p=await f.mount(),q=await g.mount(),d=await desktop(t,[f,g]);d.api.settingsWindowFor(g.h.location.href);await drain();await p.draw();await q.draw();await d.quit();
  assert.equal(d.didExit(),true);assert.equal(f.data().board.strokes.length,3);assert.equal(g.data().board.strokes.length,3);assert.equal(d.stops,1);
