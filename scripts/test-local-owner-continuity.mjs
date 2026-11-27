@@ -47,8 +47,14 @@ async function setup(t, explicit={}){
     await spawnLocal();
     return this.runtime;
   }};
-  let boots=0, persistedRow, app, credential=null;
-  const launcher=vm.createContext({supervisor,process:{env},join,existsSync,mkdirSync,readFileSync,writeFileSync,console:quiet});
+  let boots=0, persistedRow, app, credential=null, mintCount=0, rejectIdentityWrites=false;
+  const launcher=vm.createContext({supervisor,process:{env},join,existsSync,mkdirSync,readFileSync,console:quiet,
+    writeFileSync(path,data){
+      assert.equal(path,file);
+      if(rejectIdentityWrites)throw Object.assign(new Error("fixture-private-path"),{code:"EACCES"});
+      writeFileSync(path,data);
+    },
+  });
   vm.runInContext(identity,launcher);
   const apply=vm.runInContext("applyIdentityToEnv",launcher);
   const save=vm.runInContext("saveIdentity",launcher);
@@ -107,7 +113,7 @@ async function setup(t, explicit={}){
       baseUrl:origin,open:async url=>{assert.equal(new URL(url).origin,origin);},
       close:()=>{},signInDeadlineMs:1,pollMs:1,operationTimeoutMs:100,
       evaluate:async script=>{
-        if(script===MINT_SCRIPT)return mintOk?{status:200,body:{ok:true,token:"fixture-lease-only",baseUrl:origin+"/v1"}}:{status:503,body:{code:"not_configured"}};
+        if(script===MINT_SCRIPT)return mintOk?{status:200,body:{ok:true,token:"fixture-lease-"+(++mintCount),baseUrl:origin+"/v1"}}:{status:503,body:{code:"not_configured"}};
         if(script===SEARCH_MINT_SCRIPT)return {status:503,body:{code:"not_configured"}};
         assert.equal(script,PROFILE_SCRIPT);
         return profile?{status:200,user:profile}:{status:503,user:null};
@@ -117,7 +123,8 @@ async function setup(t, explicit={}){
     return got;
   }
   await spawnLocal();
-  return {connect,settings,owner:readOwner,file,logs,boots:()=>boots,
+  return {connect,settings,owner:readOwner,file,logs,boots:()=>boots,storedLease:()=>credential?.key,
+    rejectIdentityWrites(shouldReject){rejectIdentityWrites=shouldReject;},
     async restart(){apply();await spawnLocal();},env};
 }
 
@@ -174,4 +181,40 @@ test("valid Beta identity replaces both fields and survives a later key switch",
   assert.deepEqual(await f.owner(),beta);
   await f.settings.saveInference({provider:"byok",key:"synthetic-switch-only"});
   assert.deepEqual(await f.owner(),beta);
+});
+
+for(const profile of [beta,null]){
+  test(`a failed sidecar write cannot reload the prior account after a replacement with ${profile?"a known profile":"no profile"}`,async t=>{
+    const f=await setup(t);
+    await f.connect(alpha);
+    assert.deepEqual(await f.owner(),alpha);
+    const oldLease=f.storedLease();
+    const oldDisk=readFileSync(f.file,"utf8");
+
+    f.rejectIdentityWrites(true);
+    assert.equal((await f.connect(profile)).ok,true);
+    assert.ok(f.storedLease()!==oldLease,"the replacement credential committed");
+    assert.equal(f.boots(),2,"both Connect attempts restarted the local runtime");
+    assert.equal(readFileSync(f.file,"utf8"),oldDisk,"simulated EACCES left the previous sidecar intact");
+    assert.deepEqual(await f.owner(),profile??generic);
+    await f.settings.saveInference({provider:"byok",key:"fixture-independent-key"});
+    assert.deepEqual(await f.owner(),profile??generic,"another same-launcher restart cannot restore the old sidecar");
+    assert.ok(f.logs.some(line=>line.includes("could not save identity.json")));
+    assert.ok(f.logs.every(line=>!line.includes(alpha.email)&&!line.includes(beta.email)&&!line.includes("fixture-private-path")));
+  });
+}
+
+test("a successful later write clears the lifetime fallback and returns to the disk-backed path",async t=>{
+  const f=await setup(t);
+  await f.connect(alpha);
+  f.rejectIdentityWrites(true);
+  await f.connect(null);
+  assert.deepEqual(await f.owner(),generic);
+  f.rejectIdentityWrites(false);
+  await f.connect(beta);
+  assert.deepEqual(await f.owner(),beta);
+  assert.equal(JSON.parse(readFileSync(f.file,"utf8")).email,beta.email);
+  rmSync(f.file); // Only the fixture-owned file; models an absent sidecar.
+  await f.restart();
+  assert.deepEqual(await f.owner(),generic);
 });

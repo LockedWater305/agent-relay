@@ -278,6 +278,9 @@ function identityFile() {
 }
 
 const injectedOwnerEnv = new Map();
+// The credential commits first. A failed profile write must not make this
+// launcher trust the previous account's sidecar on any child restart.
+let unsavedOwnerIdentity = null;
 function applyIdentityToEnv() {
   // Remove only this launcher's previous overrides; a missing/partial backup
   // or a new account is not permission to reuse details from the older one.
@@ -288,8 +291,9 @@ function applyIdentityToEnv() {
   }
   injectedOwnerEnv.clear();
   try {
-    if (!existsSync(identityFile())) return;
-    const id = JSON.parse(readFileSync(identityFile(), "utf8"));
+    const id = unsavedOwnerIdentity ?? (existsSync(identityFile())
+      ? JSON.parse(readFileSync(identityFile(), "utf8"))
+      : null);
     const name = typeof id?.name === "string" ? id.name.trim() : "";
     const email = typeof id?.email === "string" ? id.email.trim() : "";
     if (!email) return;
@@ -298,7 +302,7 @@ function applyIdentityToEnv() {
       injectedOwnerEnv.set(key, { previous: process.env[key], value });
       process.env[key] = value;
     }
-    console.log("[desktop] local owner profile loaded");
+    if (!unsavedOwnerIdentity) console.log("[desktop] local owner profile loaded");
   } catch (err) {
     // JSON parser errors can quote the file contents. Log only the failure type.
     const reason = err instanceof SyntaxError ? " (invalid JSON)" : "";
@@ -309,16 +313,21 @@ function applyIdentityToEnv() {
 function saveIdentity(account) {
   const email = typeof account?.email === "string" ? account.email.trim() : "";
   const name = email && typeof account?.name === "string" ? account.name.trim() : "";
+  const nextIdentity = { name, email };
   try {
     mkdirSync(supervisor.dataDir, { recursive: true });
     // Called only when a new managed connection commits. An unavailable
     // profile must not leave the prior account displayed under the new key.
-    writeFileSync(identityFile(), JSON.stringify({ name, email, savedAt: new Date().toISOString() }, null, 2) + "\n");
-    applyIdentityToEnv();
+    writeFileSync(identityFile(), JSON.stringify({ ...nextIdentity, savedAt: new Date().toISOString() }, null, 2) + "\n");
+    unsavedOwnerIdentity = null;
     console.log(email ? "[desktop] local owner profile saved" : "[desktop] connected profile unavailable; using local owner settings");
   } catch {
+    // Keep even an empty replacement for the life of this launcher. Do not
+    // delete the old sidecar or change the credential commit on write failure.
+    unsavedOwnerIdentity = nextIdentity;
     console.warn("[desktop] could not save identity.json; check that the local data directory is writable");
   }
+  applyIdentityToEnv();
 }
 
 // Only values this process injected may be withdrawn on the next Save/Remove.
