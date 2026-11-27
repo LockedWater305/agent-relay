@@ -193,13 +193,31 @@ export function interpretMintResult(raw) {
   };
 }
 
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const duration = (value, fallback) => Number.isFinite(value) && value >= 0
+  ? Math.min(value, 2_147_483_647) : fallback;
+
+class ConnectDeadlineError extends Error {}
+
+async function bounded(work, ms) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(work),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new ConnectDeadlineError("ERR_CONNECTION_TIMED_OUT")), ms);
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
 /**
  * The whole flow: open our site, ask for a token, always close the window.
  * A failure to close must not swallow the result — the token matters more than a
  * leaked window, and main.mjs's process exit cleans up anyway.
  */
 /**
- * @param {{open: (url: string) => Promise<void>, evaluate: (script: string) => Promise<unknown>, close: () => Promise<void>|void, isOpen?: () => boolean, baseUrl?: string, signInDeadlineMs?: number, pollMs?: number}} deps
+ * @param {{open: (url: string) => Promise<void>, evaluate: (script: string) => Promise<unknown>, close: () => Promise<void>|void, isOpen?: () => boolean, baseUrl?: string, signInDeadlineMs?: number, pollMs?: number, operationTimeoutMs?: number}} deps
  * @returns {Promise<{ok: boolean, token?: string, expiresAt?: string, baseUrl?: string, model?: string, error?: string, needsSignIn?: boolean}>}
  */
 export async function connectAccount(deps) {
@@ -213,9 +231,15 @@ export async function connectAccount(deps) {
     return { ok: false, error: "no BeeZilla account server is configured (set BZ_CLOUD_URL)" };
   }
 
+  const operationTimeout = duration(deps.operationTimeoutMs, 15_000);
+  const evaluate = (script, ms = operationTimeout) => bounded(() => deps.evaluate(script), ms);
+  // The BrowserWindow owns the pending browser work. Closing it also ends
+  // a slow navigation or an evaluation whose response missed its deadline.
+  const close = async () => { try { await bounded(() => deps.close(), operationTimeout); } catch { /* best effort */ } };
   try {
-    await deps.open(`${base}${CONNECT_PATH}`);
+    await bounded(() => deps.open(`${base}${CONNECT_PATH}`), operationTimeout);
   } catch (err) {
+    await close();
     // The likely case for a shipped app: the host does not resolve yet, or the user is
     // offline. Say that in words a non-technical user can act on, and stop.
     if (isUnreachable(err)) return { ok: false, unreachable: true, error: unreachableMessage(base) };
@@ -226,7 +250,7 @@ export async function connectAccount(deps) {
   let search = null;
   try {
     try {
-      outcome = interpretMintResult(await deps.evaluate(MINT_SCRIPT));
+      outcome = interpretMintResult(await evaluate(MINT_SCRIPT));
     } catch (err) {
       if (isUnreachable(err)) return { ok: false, unreachable: true, error: unreachableMessage(base) };
       throw err;
@@ -235,15 +259,18 @@ export async function connectAccount(deps) {
     // A first visit is usually signed OUT. Rather than making the user find the
     // "connect" menu item again, keep the window open and watch for the sign-in to
     // land. The user closes the window to give up.
-    const deadline = Date.now() + (deps.signInDeadlineMs ?? 180_000);
-    const pollMs = deps.pollMs ?? 2_000;
-    while (!outcome.ok && outcome.needsSignIn && Date.now() < deadline) {
+    const deadline = performance.now() + duration(deps.signInDeadlineMs, 180_000);
+    const pollMs = duration(deps.pollMs, 2_000);
+    while (!outcome.ok && outcome.needsSignIn && performance.now() < deadline) {
       if (deps.isOpen && !deps.isOpen()) break;
-      await new Promise((r) => setTimeout(r, pollMs));
-      if (deps.isOpen && !deps.isOpen()) break;
+      await wait(Math.min(pollMs, deadline - performance.now()));
+      const remaining = deadline - performance.now();
+      if (remaining <= 0 || (deps.isOpen && !deps.isOpen())) break;
       try {
-        outcome = interpretMintResult(await deps.evaluate(MINT_SCRIPT));
+        outcome = interpretMintResult(await evaluate(MINT_SCRIPT, Math.min(operationTimeout, remaining)));
       } catch (err) {
+        // Running out of sign-in time is not a connectivity diagnosis.
+        if (remaining <= operationTimeout && err instanceof ConnectDeadlineError) break;
         if (isUnreachable(err)) {
           return { ok: false, unreachable: true, error: unreachableMessage(base) };
         }
@@ -255,13 +282,13 @@ export async function connectAccount(deps) {
     // open (the session lives there), and its problems never undo the sign-in.
     if (outcome?.ok) {
       try {
-        search = interpretSearchMintResult(await deps.evaluate(SEARCH_MINT_SCRIPT));
+        search = interpretSearchMintResult(await evaluate(SEARCH_MINT_SCRIPT));
       } catch (err) {
         search = { ok: false, error: `search token: ${err instanceof Error ? err.message : err}` };
       }
       // Same window, same session: who is this? Adopted by the local owner row.
       try {
-        const raw = await deps.evaluate(PROFILE_SCRIPT);
+        const raw = await evaluate(PROFILE_SCRIPT);
         const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
         if (parsed?.user?.email) outcome.account = { name: parsed.user.name || "", email: parsed.user.email };
       } catch {
@@ -271,11 +298,7 @@ export async function connectAccount(deps) {
   } catch (err) {
     outcome = { ok: false, error: `could not reach BeeZilla: ${err instanceof Error ? err.message : err}` };
   } finally {
-    try {
-      await deps.close();
-    } catch {
-      /* window cleanup is best-effort */
-    }
+    await close();
   }
   return { ...outcome, search };
 }
