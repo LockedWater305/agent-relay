@@ -1187,22 +1187,58 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
     function docRef(doc) { return doc._vaultRef || doc.name; }
     var showRecoveredFolders = false, archiveCheckNotice = "";
-    var libraryArchiveRoot = document.getElementById("app");
+    var libraryArchiveRoot = document.getElementById("app"), libraryReadRetry = null;
+    var libraryReadEntry = window.location.pathname + window.location.search;
+    function ownsLibraryDocs() {
+      return document.getElementById("app") === libraryArchiveRoot &&
+        window.location.pathname + window.location.search === libraryReadEntry &&
+        /^\/buzzy\/library(?:\.html)?\/?$/.test(window.location.pathname) && state.screen === "docs";
+    }
+    function libraryEmptyCopy(message, scope) {
+      if (!scope) return message;
+      if (scope.frozen) return "Saved documents are paused during the runtime transition.";
+      if (scope.readState === "failed") return "Saved documents couldn't be loaded.";
+      if (scope.readState === "loading" || !scope.ready) return "Loading saved documents…";
+      return message;
+    }
     function paintLibrarySync() {
-      var host = document.getElementById("librarySyncStatus");
-      if (!host || !window.BeeZillaLibraryVault) return;
-      host.textContent = archiveCheckNotice || window.BeeZillaLibraryVault.status().message;
+      var host = document.getElementById("librarySyncStatus"), vault = window.BeeZillaLibraryVault;
+      if (!host || !vault) return;
+      var scope = vault.status();
+      host.textContent = archiveCheckNotice || (scope.readState === "loading" ? "Loading durable Library history…" : scope.message);
+      var empty = document.getElementById("libraryDocsEmpty");
+      if (empty && empty.dataset) empty.textContent = libraryEmptyCopy(empty.dataset.libraryEmpty, scope);
+      var button = document.getElementById("libraryReadRetry");
+      if (button) {
+        button.hidden = scope.frozen || scope.readState !== "failed" || Boolean(libraryReadRetry) || typeof vault.retryRead !== "function";
+        button.onclick = retryLibraryRead;
+      }
+    }
+    function retryLibraryRead() {
+      if (!ownsLibraryDocs() || libraryReadRetry) return;
+      var vault = window.BeeZillaLibraryVault, scope = vault && vault.status();
+      if (!scope || scope.frozen || scope.readState !== "failed" || typeof vault.retryRead !== "function") return;
+      var attempt = {};
+      libraryReadRetry = attempt;
+      var request = vault.retryRead();
+      paintLibrarySync();
+      // The vault publishes successful snapshots to the active page. Never
+      // restore the folder, version or DOM that happened to start this retry.
+      void request.catch(function () {}).finally(function () {
+        if (libraryReadRetry === attempt) libraryReadRetry = null;
+        if (ownsLibraryDocs()) paintLibrarySync();
+      });
     }
     if (window.BeeZillaLibraryVault) {
       // The shell restores real cached DOM nodes and their closures. Resolve
       // the currently mounted page, not the last Library URL that ran a script.
-      document.getElementById("app").__bzLibraryVaultUpdate = function (changed) {
-        if (changed && state.screen === "docs") goDocs();
+      document.getElementById("app").__bzLibraryVaultUpdate = function (changed, readOnly) {
+        if (changed && state.screen === "docs") goDocs(readOnly);
         else paintLibrarySync();
       };
-      window.BeeZillaLibraryVault.onChange(function (changed) {
+      window.BeeZillaLibraryVault.onChange(function (changed, readOnly) {
         if (!/^\/buzzy\/library(?:\.html)?\/?$/.test(window.location.pathname)) return;
-        document.getElementById("app")?.__bzLibraryVaultUpdate?.(changed);
+        document.getElementById("app")?.__bzLibraryVaultUpdate?.(changed, readOnly);
       });
     }
     function slugify(s) {
@@ -1378,11 +1414,19 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
     }
 
-    function goDocs() {
+    function libraryEmptyMarkup(message) {
+      return "<p class='muted' id='libraryDocsEmpty' data-library-empty='" + escAttr(message) + "'>" + escHtml(message) + "</p>";
+    }
+
+    function goDocs(readOnly) {
       setPhase("Library");
-      var syncMarkup = window.BeeZillaLibraryVault ? "<p id='librarySyncStatus' class='muted' role='status'></p>" : "";
-      // Sync every job that has content so folders never look stale.
-      catalog.jobs.forEach(syncJobDocs);
+      var syncMarkup = window.BeeZillaLibraryVault
+        ? "<p id='librarySyncStatus' class='muted' role='status'></p>" +
+          "<button type='button' class='secondary' id='libraryReadRetry' hidden>Retry loading documents</button>"
+        : "";
+      // A manual retry only reads existing records, not newly derived drafts.
+      // Retain ordinary background materialization outside that read.
+      if (!readOnly) catalog.jobs.forEach(syncJobDocs);
       const all = loadDocs();
       const app = document.getElementById("app");
       const co = window.BZCompanies && BZCompanies.ready() ? BZCompanies.active() : null;
@@ -1399,7 +1443,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         const docs = all[docsOpenFolder] || [];
         const doc = docs.find((d) => docRef(d) === docsOpenDoc);
         const job = catalog.jobs.find((x) => x.id === docsOpenFolder);
-        if (!doc) { docsOpenDoc = null; return goDocs(); }
+        if (!doc) { docsOpenDoc = null; return goDocs(readOnly); }
         app.innerHTML =
           "<div class='docs-back'><button id='docsBackList' class='secondary'>← " + escHtml(job ? jobTitle(job) : docsOpenFolder) + "</button></div>" +
           "<h1>" + escHtml(doc.name) + "</h1>" +
@@ -1454,7 +1498,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
                   "<span class='di-meta'>updated " + new Date(d.updatedAt || d.createdAt).toLocaleDateString() + " · " + Math.max(1, Math.round(d.md.length / 100) / 10) + " KB</span>" +
                   "<span class='di-actions'><button class='secondary' data-open='" + escAttr(docRef(d)) + "'>Open</button><button class='secondary' data-dl='" + escAttr(docRef(d)) + "'>Download</button></span>" +
                 "</div>").join("")
-            : "<p class='muted'>No documents in this folder yet.</p>") +
+            : libraryEmptyMarkup("No documents in this folder yet.")) +
           "</div>" + syncMarkup;
         paintLibrarySync();
         document.getElementById("docsBackFolders").onclick = () => { docsOpenFolder = null; docsOpenFromLink = null; goDocs(); };
@@ -1506,7 +1550,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
                   (f.job && jobComplete(f.job) ? " · approved draft" : "") +
                   " · latest " + new Date(f.docs[0].updatedAt || f.docs[0].createdAt).toLocaleDateString() + "</div>" +
               "</div>").join("")
-          : "<p class='muted'>No documents yet. Documents appear here as your jobs produce drafts and deliverables.</p>") +
+          : libraryEmptyMarkup("No documents yet. Documents appear here as your jobs produce drafts and deliverables.")) +
         "</div>";
       app.querySelectorAll(".docfolder[data-folder]").forEach((el) => {
         el.onclick = () => { docsOpenFolder = el.getAttribute("data-folder"); goDocs(); };

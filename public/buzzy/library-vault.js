@@ -8,6 +8,7 @@
   var ENDPOINT = "/api/buzzy/library-vault";
   var cache = new Map(), nextRef = 0, metadata = null, ready = false, busy = null;
   var listener = null, notice = "Loading durable Library history…", timer = null;
+  var readState = "loading";
   var frozen = Boolean(window.__bzLibraryVaultBarrier), dirty = false;
   var encoder = new TextEncoder();
   var MAX_BYTES = 8 * 1024 * 1024;
@@ -64,8 +65,8 @@
     cache.set(value.text, { record: value.record, ref: "vault_" + (++nextRef) });
     return true;
   }
-  function emit(changed) { if (listener) listener(Boolean(changed)); }
-  function status() { return { ready: ready, frozen: frozen || Boolean(window.__bzLibraryVaultBarrier), message: notice, storeId: metadata && metadata.storeId, generation: metadata && metadata.generation }; }
+  function emit(changed, readOnly) { if (listener) listener(Boolean(changed), Boolean(readOnly)); }
+  function status() { return { ready: ready, frozen: frozen || Boolean(window.__bzLibraryVaultBarrier), message: notice, readState: readState, storeId: metadata && metadata.storeId, generation: metadata && metadata.generation }; }
   async function api(path, init) {
     var res = await fetch(ENDPOINT + path, Object.assign({ credentials: "same-origin", redirect: "error", cache: "no-store" }, init));
     var data = await res.json();
@@ -95,7 +96,11 @@
     }
     return acknowledgments;
   }
-  async function synchronize() {
+  function checkReadBarrier(readOnly) {
+    if (readOnly && (frozen || window.__bzLibraryVaultBarrier)) throw new Error("Saved documents are paused during the runtime transition.");
+  }
+  async function synchronize(readOnly) {
+    checkReadBarrier(readOnly);
     var meta = await api("?metadata=1");
     if (typeof meta.storeId !== "string" || typeof meta.generation !== "string" || !/^\d+$/.test(meta.generation)) throw new Error("The local Library returned invalid storage identity.");
     var old = flatten(localStorage.getItem(LEGACY)), pendingRows = pending(), migrate = [];
@@ -106,14 +111,17 @@
     }
     var eligible = pendingRows.filter(function (p) { return p.value.storeId === meta.storeId && p.value.generation === meta.generation; });
     var stale = pendingRows.length !== eligible.length || (meta.generation !== "0" && old.length > 0);
-    var merged = new Map();
-    migrate.concat(eligible.map(function (p) { return p.record; })).forEach(function (row) { merged.set(canonical(row).text, row); });
-    await importRows(meta, Array.from(merged.values()));
-    // No quota-consuming receipt is needed. Only exact committed pending
-    // records are removed; the legacy recovery copy is never modified.
-    eligible.forEach(function (p) { if (localStorage.getItem(p.key) === p.raw) localStorage.removeItem(p.key); });
+    if (!readOnly) {
+      var merged = new Map();
+      migrate.concat(eligible.map(function (p) { return p.record; })).forEach(function (row) { merged.set(canonical(row).text, row); });
+      await importRows(meta, Array.from(merged.values()));
+      // No quota-consuming receipt is needed. Only exact committed pending
+      // records are removed; the legacy recovery copy is never modified.
+      eligible.forEach(function (p) { if (localStorage.getItem(p.key) === p.raw) localStorage.removeItem(p.key); });
+    }
     var restored = [], after = "0", pages = 0;
     for (;;) {
+      checkReadBarrier(readOnly);
       var page = await api("?after=" + encodeURIComponent(after) + "&limit=50");
       if (!sameMeta(page, meta) || !Array.isArray(page.records)) throw new Error("The local Library changed while history was loading. Retry.");
       page.records.forEach(function (r) { restored.push(canonical(r).record); });
@@ -123,6 +131,7 @@
     }
     // Recheck local pending records after awaits, so a newer same-origin save
     // cannot disappear from the view while an earlier batch is being saved.
+    checkReadBarrier(readOnly);
     var latest = pending().filter(function (p) { return p.value.storeId === meta.storeId && p.value.generation === meta.generation; });
     var previous = cache;
     cache = new Map();
@@ -132,16 +141,24 @@
     });
     metadata = { storeId: meta.storeId, generation: meta.generation };
     ready = true;
-    notice = stale ? "Library history saved locally. Older recovery copies from a different store or data reset were not imported." : "Library history saved in this device’s database.";
-    emit(true);
+    readState = "loaded";
+    notice = readOnly
+      ? "Library history loaded. Recovery copies were left unchanged."
+      : (stale ? "Library history saved locally. Older recovery copies from a different store or data reset were not imported." : "Library history saved in this device’s database.");
+    emit(true, readOnly);
   }
-  function refresh() {
-    if (busy) { dirty = true; return busy; }
+  function refresh(readOnly) {
+    if (busy) { if (!readOnly) dirty = true; return busy; }
     dirty = false;
-    busy = synchronize().catch(function (error) { notice = error.message; emit(false); throw error; }).finally(function () {
+    readState = "loading";
+    busy = synchronize(readOnly).catch(function (error) {
+      readState = "failed"; notice = error.message; throw error;
+    }).finally(function () {
       busy = null;
       if (dirty && !frozen && !window.__bzLibraryVaultBarrier) { dirty = false; schedule(); }
+      if (readState === "failed") emit(false);
     });
+    emit(false);
     return busy;
   }
   function schedule() {
@@ -177,7 +194,8 @@
         emit(false); schedule(); return true;
       } catch (error) { notice = "Library history was not saved: " + error.message; emit(false); return false; }
     },
-    refresh: refresh,
+    refresh: function () { return refresh(false); },
+    retryRead: function () { return refresh(true); },
     freeze: function () { frozen = true; if (timer) { clearTimeout(timer); timer = null; } emit(false); },
     resume: function () { frozen = false; emit(false); schedule(); }
   };
