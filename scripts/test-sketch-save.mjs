@@ -466,3 +466,37 @@ test('a canvas drawing selection clears the previous image and Delete preserves 
  assert.deepEqual(f.data().board.images,images);
  assert.deepEqual(f.data().board.strokes,[{...savedBoard.strokes[1],anchor:null}]);
 });
+
+for(const kind of ['move','resize'])test('image '+kind+' updates its existing DOM only and saves final geometry once on release',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount();imageStart(p,1,kind);
+ const before=[...imageWrappers(p)], imgNodes=before.map(w=>w.children[0]);
+ for(const [dx,dy] of [[5,6],[20,15],[35,21],[35,21]]) {
+   f.event('pointermove',{clientX:400+dx,clientY:100+dy});
+   const current=[...imageWrappers(p)];
+   assert.ok(current.every((w,i)=>w===before[i]&&w.children[0]===imgNodes[i]),'pointer motion must not replace either image node');
+ }
+ const expected=plain(images),target=expected[1];
+ if(kind==='move'){target.x+=35;target.y+=21;}else{target.w+=35;target.h+=21;}
+ const style=before[1].style;
+ assert.deepEqual([style.left,style.top,style.width,style.height],[target.x,target.y,target.w,target.h].map(x=>x+'px'));
+ await f.timers(1200);assert.equal(f.posts().length,0);
+ f.event('pointerup');await f.timers(1200);
+ assert.equal(f.posts().length,1);assert.deepEqual(f.data().board.images,expected);
+ await f.timers(1200);assert.equal(f.posts().length,1);
+});
+test('stationary pointer motion on a selected image is not an unsaved edit',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount();
+ imageStart(p,1);f.event('pointermove',{clientX:400,clientY:100});
+ f.event('pointerup');await f.timers(1200);
+ assert.equal(f.posts().length,0);assert.deepEqual(f.data().board.images,images);
+});
+test('drag keeps updating the live image wrapper after a separate dropped image rerenders layers',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount(),pending=metadataImageIO(f);
+ imageStart(p,1);const old=imageWrappers(p)[1];
+ metadataDrop(p,'another.png');assert.equal(pending.length,1);
+ Object.assign(pending[0],{naturalWidth:240,naturalHeight:160});pending[0].onload();
+ assert.ok(imageWrappers(p)[1]!==old,'placing a different image rebuilds the layer structure');
+ f.event('pointermove',{clientX:410,clientY:95});f.event('pointerup');await p.save();
+ assert.equal(imageWrappers(p)[1].style.left,images[1].x+10+'px');assert.equal(imageWrappers(p)[1].style.top,images[1].y-5+'px');
+ assert.equal(f.data().board.images[1].x,images[1].x+10);assert.equal(f.data().board.images[2].url,'/synthetic/another.png');
+});

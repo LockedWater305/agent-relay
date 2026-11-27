@@ -557,17 +557,30 @@
           renderImages();
         });
         layers.appendChild(wrap);
+        if (drag && drag.image === im) drag.wrap = wrap;
       });
     }
     window.addEventListener("pointermove", function (e) {
-      if (!drag || !editable()) return;
+      if (!drag || !editable() || !drag.wrap?.isConnected) return;
       var im = drag.image;
       if (images.indexOf(im) < 0) return;
       var dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
-      if (drag.mode === "move") { im.x = drag.ox + dx; im.y = drag.oy + dy; }
-      else { im.w = Math.max(40, drag.ow + dx); im.h = Math.max(40, drag.oh + dy); }
+      if (drag.mode === "move") {
+        var x = drag.ox + dx, y = drag.oy + dy;
+        if (im.x === x && im.y === y) return;
+        im.x = x;
+        im.y = y;
+        drag.wrap.style.left = x + "px";
+        drag.wrap.style.top = y + "px";
+      } else {
+        var w = Math.max(40, drag.ow + dx), h = Math.max(40, drag.oh + dy);
+        if (im.w === w && im.h === h) return;
+        im.w = w;
+        im.h = h;
+        drag.wrap.style.width = w + "px";
+        drag.wrap.style.height = h + "px";
+      }
       drag.changed = true;
-      renderImages();
     });
     function finishImageDrag() {
       if (drag && drag.changed && images.indexOf(drag.image) >= 0 && hydrated && ownsPage()) changed();
