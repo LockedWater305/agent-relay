@@ -533,6 +533,12 @@
       showUnknown();
       refreshSession();
     });
+    window.addEventListener("online", function () {
+      // Connectivity returning is a reason to retry, not proof of a session.
+      // Revalidate before restoring any account-owned display or balances.
+      showUnknown();
+      refreshSession();
+    });
 
     // Adopt a page-built menu as the dropdown. clone the link once so a page's own
     // click handler (Talk binds a toggle to `.account-link`) cannot double-toggle ours.

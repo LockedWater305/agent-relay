@@ -86,14 +86,23 @@ app.get("/buzzy/login", () => new Response(login, { headers: { "content-type":"t
 const handle = async event => await route(event);
 app.get("/api/auth/get-session", handle);
 for (const path of ["/api/auth/sign-in/email","/api/auth/sign-out"]) app.post(path, handle);
+for (const path of ["/api/wallet","/api/buzzy/entitlement"]) app.get(path,async event=>{
+  if(scenario==="local")return Response.json({}, {status:401});
+  const checked=await auth.handler(new Request(origin+"/api/auth/get-session", {headers:event.req.headers}));
+  const current=await checked.json();
+  if(!current?.user)return Response.json({}, {status:401});
+  return Response.json(path==="/api/wallet"?{balance:4321}:{ok:true,plan:"pro",remaining:{inference:19},planUntil:"2027-01-02"},
+    {headers:{"x-bz-account-owner":encodeURIComponent(current.user.id),"cache-control":"private, no-store"}});
+});
 const h3Handler = h3.toNodeHandler(app);
 const server = http.createServer((req,res) => { void h3Handler(req,res); });
 await new Promise(resolve => server.listen(0,"127.0.0.1",resolve));
 const origin = "http://127.0.0.1:" + server.address().port;
+const authData={ user:[], account:[], session:[], verification:[] };
 auth = betterAuth({
   baseURL: origin,
   secret: "synthetic-loopback-cold-auth-fixtures-not-for-production",
-  database: memoryAdapter({ user:[], account:[], session:[], verification:[] }),
+  database: memoryAdapter(authData),
   emailAndPassword: { enabled:true },
   telemetry: { enabled:false },
   session: { cookieCache: { enabled:true, maxAge:300 } },
@@ -126,6 +135,34 @@ try {
   };
   const expected=(page,q)=>page.waitForResponse(r=>new URL(r.url()).pathname===q);
   const untilAccount=(page,name)=>page.waitForFunction(n=>document.getElementById("accountLink")?.textContent===n,name);
+  const disconnect=async(ctx,page)=>{
+    await page.evaluate(()=>{
+      window.__networkEvents=[];
+      for(const name of ["online","offline"])window.addEventListener(name,e=>window.__networkEvents.push([name,e.isTrusted]));
+    });
+    await ctx.setOffline(true);
+    await page.waitForFunction(()=>!navigator.onLine&&window.__networkEvents.some(([name,trusted])=>name==="offline"&&trusted));
+  };
+  const reconnect=async(ctx,page)=>{
+    const check=page.waitForResponse(r=>new URL(r.url()).pathname==="/api/auth/get-session",{timeout:900}).catch(()=>null);
+    await ctx.setOffline(false);
+    await page.waitForFunction(()=>navigator.onLine&&window.__networkEvents.some(([name,trusted])=>name==="online"&&trusted));
+    const result=await check;
+    const body=result?await result.json():undefined;
+    await sleep(100);
+    return {requested:!!result,body};
+  };
+  const offlineRestore=async page=>{
+    const failure=page.waitForEvent("requestfailed",r=>new URL(r.url()).pathname==="/api/auth/get-session");
+    await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent("pageshow",{persisted:true})));
+    await failure;
+    await untilAccount(page,"");
+  };
+  const indicators=page=>page.evaluate(()=>({
+    plan:document.getElementById("bzPlanChip").textContent,
+    honeyTitle:document.getElementById("bzHoneyChip").title,
+    caches:[localStorage.bz_identity,localStorage.bz_plan,localStorage.bz_honey],
+  }));
   const ui=page=>page.evaluate(()=>({
     path:location.pathname, name:document.getElementById("accountLink")?.textContent,
     accountTitle:document.getElementById("accountLink")?.title,
@@ -162,6 +199,11 @@ try {
   assert.equal(localUI.logout,null);
   assert.equal(binder.headers({...fixtureDetails({url:()=>origin+"/api/auth/get-session",headers:()=>({}),isNavigationRequest:()=>false,resourceType:()=>"fetch"}),webContentsId:99}).cancel,true);
   console.log("PASS cold direct Talk browser with real desktop token-binder logic and exact local H3 adapter gives workspace menu without hosted logout");
+  await disconnect(local,lp);await offlineRestore(lp);
+  const localOnline=await reconnect(local,lp);
+  const returnedLocal=await ui(lp);
+  observe("real browser reconnect recovers the authorized local workspace after a failed offline check",
+    { ...returnedLocal, requested:localOnline.requested }, localOnline.body?.user?.id!=="local_owner"||returnedLocal.name!==env.BZ_LOCAL_OWNER_NAME||returnedLocal.logout!==null);
   await local.close();
 
   const guest=await makeContext(null), guestPage=await guest.newPage();
@@ -297,6 +339,34 @@ try {
       assert.equal(final.logout,"Log out");assert.equal(final.disabled,false);assert.equal(final.alert,null);
     }
   } finally { releaseAlpha();releaseBeta();await reordered.close(); }
+
+  scenario="hosted";
+  const resumed=await makeContext(null), rp=await resumed.newPage();
+  await enter(rp,hosted.A);
+  await rp.waitForFunction(()=>document.getElementById("bzPlanChip")?.textContent==="PRO"&&document.getElementById("bzHoneyChip")?.title.includes("4,321"));
+  await disconnect(resumed,rp);await offlineRestore(rp);
+  const hostedOnline=await reconnect(resumed,rp);
+  if(hostedOnline.body?.user)await rp.waitForFunction(()=>document.getElementById("bzPlanChip")?.textContent==="PRO"&&document.getElementById("bzHoneyChip")?.title.includes("4,321"));
+  const recovered={ ...await ui(rp), ...await indicators(rp), requested:hostedOnline.requested };
+  observe("real browser reconnect recovers verified hosted account and its plan/Honey without a reload",
+    recovered,recovered.name!==hosted.A.name||recovered.plan!=="PRO"||!recovered.honeyTitle.includes("4,321")||!recovered.requested);
+  await resumed.close();
+
+  const expiring=await makeContext(null), ep=await expiring.newPage();
+  await enter(ep,hosted.A);
+  await ep.waitForFunction(()=>document.getElementById("bzPlanChip")?.textContent==="PRO"&&document.getElementById("bzHoneyChip")?.title.includes("4,321"));
+  const sessionId=await ep.evaluate(async()=>{const r=await fetch("/api/auth/get-session");return (await r.json()).session.id;});
+  const row=authData.session.find(item=>item.id===sessionId);
+  assert.ok(row,"real Better Auth memory storage recorded the active fixture session");
+  await disconnect(expiring,ep);
+  row.expiresAt=new Date(Date.now()-1000);
+  await expiring.clearCookies({name:/session_data/}); // model the short-lived cookie cache expiring too
+  assert.ok((await expiring.cookies()).some(cookie=>cookie.name.includes("session_token")),"old token is still presented for the recheck");
+  const expiredOnline=await reconnect(expiring,ep);
+  const ended={ ...await ui(ep), ...await indicators(ep), requested:expiredOnline.requested };
+  observe("real browser reconnect after Better Auth expiry clears previous owner and billing indicators",
+    ended,expiredOnline.body!==null||ended.name!=="Sign in"||ended.menu!==null||ended.plan!==""||ended.honeyTitle!==""||ended.caches.some(item=>item!=="null"));
+  await expiring.close();
 
   if(findings)process.exitCode=1;
 } finally {
