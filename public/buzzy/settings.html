@@ -98,7 +98,7 @@
     </style>
     <main>
       <h1>Settings</h1>
-      <p class="sub">Choose how BeeZilla thinks and searches. Cloud models and online search send requests to their providers. Choose a local model to run inference on this machine.</p>
+      <p class="sub">Cloud models and online search send requests to their providers. For on-device inference, set My own key → Advanced → Base URL to an OpenAI-compatible service running on this computer. Changing the Model name alone does not change where requests go or turn on Local Only.</p>
 
       <div class="nobridge" id="nobridge">
         This page manages app credentials, so it only works inside the BeeZilla window.
@@ -565,7 +565,7 @@
         ? error.name : "Error";
       function transcriptionFailure(code) {
         switch (code) {
-          case "transcription_local_only": return "Local Only is on. Use typed chat because on-device transcription is not available in this build.";
+          case "transcription_local_only": return "Local Only is on. This build cannot transcribe on-device. Typed chat in Local Only needs a local inference service; check Base URL under My own key.";
           case "transcription_policy_unavailable": return "Your privacy settings could not be checked. Use typed chat or try again.";
           case "signed_out":
           case "transcription_session_changed": return "Sign in again before testing transcription.";

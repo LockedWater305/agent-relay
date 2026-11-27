@@ -553,14 +553,16 @@ test("Settings shows its explicit test transcript locally but keeps support diag
   assert.doesNotMatch(copied + h.activity.logs.join("\n"), /fixture-private-spoken-words|fixture-device-label|fixture-private-profile|fixture-A/);
 });
 
-test("transcription denial shows the Local Only remedy, not raw response details", async () => {
-  const h = settingsHarness(), [done] = h.emit("mic-test");
+test("after a Settings reload, a Local Only refusal explains what typed chat still needs", async () => {
+  const h = settingsHarness();
+  h.w.dispatch("pagehide"); h.mount();
+  const [done] = h.emit("mic-test");
   h.activity.opening[0].resolve(fakeStream()); await flush();
   [...h.activity.timers.values()][0](); await flush();
   h.activity.requests[0].resolve({ ok: false, status: 409, json: async () => ({ ok: false,
     code: "transcription_local_only", error: "fixture-provider-account-detail" }) });
   await done;
-  assert.match(h.node("mic-result").textContent, /Local Only.*typed chat/i);
+  assert.match(h.node("mic-result").textContent, /Local Only.*Typed chat in Local Only needs a local inference service.*Base URL/i);
   await h.emit("mic-copy")[0];
   assert.doesNotMatch(h.node("mic-result").textContent + h.activity.copied.at(-1) + h.activity.logs.join("\n"), /fixture-provider-account-detail/);
 });
