@@ -3689,7 +3689,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (note) note.textContent = "These lines are proposed. Nothing is confirmed until you accept one.";
       }).catch(function (e) {
         if (!ownsPaperResponse() || (e && e.message === "signed_out")) return;
-        if (note) note.textContent = (e && e.message) || "Couldn't read that.";
+        if (note) note.textContent = e?.message === "fresh_session_timeout"
+          ? "Starting this conversation took too long. No paper was submitted. Try again."
+          : (e && e.message) || "Couldn't read that.";
       }).finally(function () { paperBusy = false; });
     }
 
@@ -7431,17 +7433,31 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // `fresh`: a new conversation, never the last one the server touched in the past
       // 12 hours. The page only lands here without a conversation on a fresh visit,
       // after New conversation, or after a company switch — each one a new start.
-      return fetch(SESSIONS_BASE, {
+      var controller = new AbortController(), timer, expired = false;
+      // Bound both headers and JSON. A renderer transport may settle after
+      // abort; only the bounded winner can adopt a session or redirect.
+      var deadline = new Promise(function (_, reject) {
+        timer = setTimeout(function () {
+          expired = true;
+          reject(new Error("fresh_session_timeout"));
+          controller.abort();
+        }, 15000);
+      });
+      var reply = fetch(SESSIONS_BASE, {
         method: "POST",
         credentials: "same-origin",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ companyId: coId || undefined, fresh: true }),
       }).then(function (r) {
-        if (ownsFreshSend && !ownsFreshSend()) return null;
-        if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
-        return r.ok ? r.json() : null;
-      }).then(function (data) {
-        var s = data && data.session;
+        if (expired || (ownsFreshSend && !ownsFreshSend())) return null;
+        if (r.status === 401) return { signedOut: true };
+        return r.ok ? r.json().then(function (data) { return { data: data }; }) : null;
+      });
+      return Promise.race([reply, deadline]).then(function (result) {
+        if (expired || (ownsFreshSend && !ownsFreshSend())) return null;
+        if (result?.signedOut) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
+        var s = result?.data?.session;
         if (ownsFreshSend && (!ownsFreshSend() || typeof s?.id !== "string" ||
             !/^sess_[a-f0-9]{20}$/.test(s.id) || (s.companyId ?? null) !== (coId ?? null))) return null;
         if (s && s.id) {
@@ -7451,9 +7467,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         }
         return chatState.sessionId;
       }).catch(function (e) {
-        if (e && e.message === "signed_out") throw e;
+        if (e && (e.message === "signed_out" || e.message === "fresh_session_timeout")) throw e;
         return ownsFreshSend ? null : chatState.sessionId;
-      });
+      }).finally(function () { clearTimeout(timer); });
     }
 
     // The composer's "Do it" control. A pressed button is a clearer instruction
