@@ -570,6 +570,20 @@ function installMenu() {
  * It shares the default session, so the auth header injected for `base` already
  * applies and the page can reach the preload bridge.
  */
+const settingsPagesLoaded = new WeakSet();
+const settingsPagesToRetry = new WeakSet();
+
+function loadSettingsPage(win, url) {
+  settingsPagesToRetry.delete(win);
+  void win.loadURL(url).then(() => console.log(`[desktop] settings window opened ${url}`)).catch(() => {
+    // Closing, quitting, or a successful restart navigation can cancel the
+    // original load. Only ask to retry an open window with no usable page.
+    if (quitting || settingsWindow !== win || win.isDestroyed() || settingsPagesLoaded.has(win)) return;
+    settingsPagesToRetry.add(win);
+    dialog.showErrorBox("BeeZilla could not load Settings", "The local Settings page did not load. Open Settings from the BeeZilla menu to try again.");
+  });
+}
+
 function settingsWindowFor(url) {
   if (acquireLibraryTransition.held()) return null;
   settingsWindow = new BrowserWindow({
@@ -588,19 +602,25 @@ function settingsWindowFor(url) {
       preload: join(dirname(fileURLToPath(import.meta.url)), "preload.cjs"),
     },
   });
-  settingsWindow.on("closed", () => {
-    settingsWindow = null;
+  const win = settingsWindow;
+  win.on("closed", () => {
+    if (settingsWindow === win) settingsWindow = null;
   });
   confineAppWindow(settingsWindow);
   guardLibraryWindowClose(settingsWindow);
   // Electron 35+ passes one event object; the positional level/message/line
   // arguments are deprecated (see the 35.0 breaking changes).
-  settingsWindow.webContents.on("console-message", ({ message }) =>
+  win.webContents.on("console-message", ({ message }) =>
     console.log(`[settings] ${message}`),
   );
-  void settingsWindow.loadURL(url);
-  console.log(`[desktop] settings window opened ${url}`);
-  return settingsWindow;
+  win.webContents.on("did-navigate", (_event, destination, status) => {
+    if (status >= 200 && status < 300 && isAppPage(destination, runtimeBase)) {
+      settingsPagesLoaded.add(win);
+      settingsPagesToRetry.delete(win);
+    }
+  });
+  loadSettingsPage(win, url);
+  return win;
 }
 
 /**
@@ -727,7 +747,7 @@ function openSettings() {
   if (settingsWindow) {
     if (settingsWindow.isMinimized()) settingsWindow.restore();
     settingsWindow.focus();
-    return;
+    if (!settingsPagesToRetry.has(settingsWindow)) return;
   }
   // The supervisor shares startup, but each awaiting menu click would still
   // create its own window. Share the entire open, not just the child process.
@@ -745,7 +765,11 @@ async function openSettingsWindow() {
     if (quitting || acquireLibraryTransition.held()) return;
     bindRuntime(rt, true);
   }
-  settingsWindowFor(`${runtimeBase}/buzzy/settings`);
+  if (settingsWindow) {
+    if (settingsPagesToRetry.has(settingsWindow)) loadSettingsPage(settingsWindow, `${runtimeBase}/buzzy/settings`);
+  } else {
+    settingsWindowFor(`${runtimeBase}/buzzy/settings`);
+  }
 }
 
 async function createWindow() {

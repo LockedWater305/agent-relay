@@ -49,6 +49,7 @@ export async function desktop(t,fixtures,options={}) {
     const details={url,webContentsId:wc.id,webContents:wc,frame:wc.mainFrame,resourceType:'mainFrame',requestHeaders:{}};
     const policy=requestHandler?auth(details):{};requests.push({url,policy,kind:'loadURL'});
     if(policy.cancel){wc.emit('did-fail-load',{},-3,'ERR_ABORTED',url,true);throw Error('Navigation cancelled by actual main request policy');}
+    if(options.beforeLoad)await options.beforeLoad(url);
     this.fixture.h.location.href=url;wc.mainFrame=frame(this);
     wc.emit('did-navigate',{},url,200,'OK');wc.emit('did-finish-load');return undefined;
    };
@@ -470,4 +471,79 @@ test('an in-flight Settings open cannot resurrect a window after quit', async t 
   command.click(); await drain();
   assert.equal(d.windows.length, 1);
   assert.equal(d.api.currentSettings(), null);
+});
+
+
+test('first Settings page load failure after runtime recovery is visible, retriable, and can close and quit normally', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t); g.h.location.href = 'about:blank';
+  let attempts = 0;
+  const d = await desktop(t, [f, g], { beforeLoad: async url => {
+    if (new URL(url).pathname === '/buzzy/settings' && ++attempts === 1) throw Error('fixture: ERR_CONNECTION_REFUSED');
+  } });
+  const command = d.menu.template.flatMap(x => x.submenu || []).find(x => x.accelerator === 'CmdOrCtrl+,');
+  d.replaceRuntime(null);
+  command.click(); await drain();
+  assert.equal(d.starts, 2, 'recovered the stopped runtime once');
+  assert.equal(d.errors.length, 1);
+  assert.match(d.errors[0].message, /open Settings.*try again/i);
+  assert.equal(d.didExit(), false);
+  assert.equal(d.windows.length, 2);
+  const win = d.api.currentSettings();
+  command.click(); await drain();
+  assert.equal(attempts, 2);
+  assert.equal(d.starts, 2);
+  assert.equal(d.windows.length, 2, 'retry in the existing window');
+  assert.equal(new URL(win.url).pathname, '/buzzy/settings');
+  await d.close(win);
+  assert.equal(win.destroyed, true);
+  assert.equal(d.api.currentSettings(), null);
+  assert.equal(d.stops, 0, 'closing Settings does not stop the shared runtime');
+  await d.quit();
+  assert.equal(d.didExit(), true);
+  assert.equal(d.stops, 1);
+});
+
+test('ordinary close while the initial Settings page is loading suppresses its late failure', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t); g.h.location.href = 'about:blank';
+  const gate = f.defer();
+  const d = await desktop(t, [f, g], { beforeLoad: async url => {
+    if (new URL(url).pathname === '/buzzy/settings') { await gate.promise; throw Error('fixture: ERR_ABORTED'); }
+  } });
+  const command = d.menu.template.flatMap(x => x.submenu || []).find(x => x.accelerator === 'CmdOrCtrl+,');
+  command.click(); await drain();
+  const win = d.api.currentSettings();
+  await d.close(win);
+  assert.equal(win.destroyed, true);
+  gate.resolve(); await drain();
+  assert.equal(d.errors.length, 0);
+  assert.equal(d.didExit(), false);
+  await d.quit();
+  assert.equal(d.didExit(), true);
+});
+
+test('successful runtime retarget suppresses failure from the superseded Settings page load', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t); g.h.location.href = 'about:blank';
+  const gate = f.defer();
+  let attempts = 0;
+  const d = await desktop(t, [f, g], { beforeLoad: async url => {
+    if (new URL(url).pathname === '/buzzy/settings' && ++attempts === 1) {
+      await gate.promise;
+      throw Error('fixture: superseded load');
+    }
+  } });
+  const command = d.menu.template.flatMap(x => x.submenu || []).find(x => x.accelerator === 'CmdOrCtrl+,');
+  command.click(); await drain();
+  const win = d.api.currentSettings(), replacement = { ...d.runtime(), port: 7441 };
+  d.replaceRuntime(replacement); d.api.bind(replacement, true);
+  await d.nextNavigation(win);
+  assert.equal(new URL(win.url).port, String(replacement.port));
+  gate.resolve(); await drain();
+  assert.equal(d.errors.length, 0);
+  command.click(); await drain();
+  assert.equal(attempts, 2, 'successful replacement did not schedule another retry');
+  await d.quit();
+  assert.equal(d.didExit(), true);
 });
