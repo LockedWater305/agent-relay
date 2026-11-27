@@ -634,9 +634,9 @@
     $("redo").addEventListener("click", redo);
     window.addEventListener("keydown", function (e) {
       if (!editable()) return;
+      var target = e.target;
+      if (e.defaultPrevented || target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || "")) return;
       if (e.key === "Delete" || e.key === "Backspace") {
-        var target = e.target;
-        if (e.defaultPrevented || target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || "")) return;
         if (tool !== "select") return;
         var imageIndex = images.indexOf(selected);
         var strokeIndex = strokes.indexOf(selectedStroke);

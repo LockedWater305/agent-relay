@@ -720,3 +720,31 @@ test('Sketch export keeps the click-time fallback colour for an older uncoloured
  const exported=decodeReferenceFixture(capture.exports[0]);
  assert.deepEqual(exported.marks.map(mark=>mark.color),['#112233','#112233']);
 });
+
+for(const modifier of ['ctrlKey','metaKey'])test('typing the Sketch prompt keeps '+modifier+'+Z in the text field without saving a canvas undo',async t=>{
+ const f=await fixture(t,{version:1,strokes:[],images:[]}),p=await f.mount();
+ await p.draw();await p.save();
+ const before=plain(f.data().board),writes=f.posts().length,prompt=p.el('prompt');
+ Object.defineProperty(prompt,'tagName',{value:'TEXTAREA'});
+ let prevented=false;
+ f.event('keydown',{target:prompt,key:'z',[modifier]:true,preventDefault(){prevented=true;}});
+ await p.save();assert.deepEqual(f.data().board,before);assert.equal(f.posts().length,writes);assert.equal(prevented,false);
+});
+test('Ctrl+Y on an editable target leaves native redo alone and does not save another board revision',async t=>{
+ const f=await fixture(t,{version:1,strokes:[],images:[]}),p=await f.mount();
+ await p.draw();await p.save();p.el('undo').click();await p.save();
+ const before=plain(f.data().board),writes=f.posts().length,editor=p.el('regionPrompt');
+ Object.defineProperty(editor,'isContentEditable',{value:true});
+ let prevented=false;
+ f.event('keydown',{target:editor,key:'y',ctrlKey:true,preventDefault(){prevented=true;}});
+ await p.save();assert.deepEqual(f.data().board,before);assert.equal(f.posts().length,writes);assert.equal(prevented,false);
+});
+test('canvas-focused keyboard Undo and Redo still persist the board revisions',async t=>{
+ const f=await fixture(t,{version:1,strokes:[],images:[]}),p=await f.mount();
+ await p.draw();await p.save();const after=plain(f.data().board),before=f.posts().length;
+ let prevented=0;const preventDefault=()=>{prevented++;},target=p.el('board');
+ f.event('keydown',{target,key:'z',metaKey:true,preventDefault});await p.save();
+ assert.equal(f.data().board.strokes.length,0);
+ f.event('keydown',{target,key:'y',ctrlKey:true,preventDefault});await p.save();
+ assert.deepEqual(f.data().board,after);assert.equal(f.posts().length,before+2);assert.equal(prevented,2);
+});
