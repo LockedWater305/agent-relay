@@ -1256,17 +1256,26 @@
       mount();
       refs();
       panel.classList.add("open");
-      panel.classList.remove("min");
-      min.textContent = "\u2013";
-      btn.setAttribute("aria-expanded", "true");
+      setMinimized(false);
+      focusFeedback();
+    }
+    function focusFeedback() {
       var focus = text || body.querySelector("#bzFbAgain");
       if (focus) focus.focus();
     }
+    function setMinimized(folding) {
+      panel.classList.toggle("min", folding);
+      min.textContent = folding ? "\u25A1" : "\u2013";
+      min.setAttribute("aria-label", folding ? "Restore feedback" : "Minimize feedback");
+      btn.setAttribute("aria-expanded", folding ? "false" : "true");
+    }
     function shut() {
+      var returnFocus = panel.contains(document.activeElement);
       invalidateVoiceDraft();
       panel.classList.remove("open");
       panel.classList.remove("min");
       btn.setAttribute("aria-expanded", "false");
+      if (returnFocus && btn.isConnected) btn.focus();
     }
 
     btn.addEventListener("click", function () {
@@ -1277,12 +1286,13 @@
     min.addEventListener("click", function (e) {
       e.stopPropagation();
       var folding = !panel.classList.contains("min");
-      panel.classList.toggle("min", folding);
-      min.textContent = folding ? "\u25A1" : "\u2013";
-      btn.setAttribute("aria-expanded", folding ? "false" : "true");
+      setMinimized(folding);
+      if (!folding) focusFeedback();
     });
     head.addEventListener("click", function () {
-      if (panel.classList.contains("min")) { panel.classList.remove("min"); min.textContent = "\u2013"; if (text) text.focus(); }
+      if (!panel.classList.contains("min")) return;
+      setMinimized(false);
+      focusFeedback();
     });
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape" && panel.classList.contains("open") && !panel.classList.contains("min")) shut();
