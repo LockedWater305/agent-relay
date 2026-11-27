@@ -3600,6 +3600,23 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       });
     }
 
+    function submitLocalFile(file, showReadError) {
+      // A file belongs to the conversation that took the click or drop, not
+      // whichever one is open when the asynchronous FileReader finishes.
+      var state = chatState, epoch = chatEpoch, company = activeCompanyId() || null;
+      var job = chatState.jobId || null, session = chatState.sessionId || null;
+      function readScopeIsCurrent() {
+        return chatState === state && chatEpoch === epoch && (activeCompanyId() || null) === company &&
+          (chatState.jobId || null) === job && (chatState.sessionId || null) === session;
+      }
+      return readDroppedFile(file).then(function (payload) {
+        if (!readScopeIsCurrent()) return;
+        return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload);
+      }).catch(function (err) {
+        if (readScopeIsCurrent()) showReadError(err);
+      });
+    }
+
     function submitPaper(payload) {
       var note = document.getElementById("paperNote");
       var co = activeCompanyId();
@@ -8105,8 +8122,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       var file = fileInput && fileInput.files && fileInput.files[0];
       var pasted = (document.getElementById("paperPaste").value || "").trim();
       if (file) {
-        readDroppedFile(file).then(function (payload) { return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload); }).catch(function (e) {
-          if (note) note.textContent = e.message || "Couldn't read that file.";
+        submitLocalFile(file, function (e) {
+          if (note) note.textContent = (e && e.message) || "Couldn't read that file.";
         });
         return;
       }
@@ -8141,9 +8158,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (!files || !files.length) return;
         e.preventDefault();
         Array.prototype.slice.call(files, 0, 5).forEach(function (file) {
-          readDroppedFile(file).then(function (payload) {
-            return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload);
-          }).catch(function (err) {
+          submitLocalFile(file, function (err) {
             chatState.messages.push({ role: "assistant", content: (err && err.message) || "Couldn't read that file." });
             renderChatMessages();
           });
@@ -8218,8 +8233,8 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
         var note = document.getElementById("paperNote");
         if (!file) return;
-        readDroppedFile(file).then(function (payload) { return payload.mediaFile ? submitMedia(payload.mediaFile) : submitPaper(payload); }).catch(function (err) {
-          if (note) note.textContent = err.message || "Couldn't read that file.";
+        submitLocalFile(file, function (err) {
+          if (note) note.textContent = (err && err.message) || "Couldn't read that file.";
         });
       });
     })();
