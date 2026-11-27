@@ -494,17 +494,31 @@ function registerSettingsIpc() {
   });
 }
 
-// One install, one runtime: a second launch must focus the existing window, not
-// open a second server against the same PGLite data directory.
+let canReopenMainWindow = false;
+let openingMainWindow = null;
+// One install, one runtime: a second launch must focus or reopen the window,
+// not open a second server against the same PGLite data directory.
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
-  });
+  app.on("second-instance", () => void focusOrReopenMainWindow());
+}
+
+function focusOrReopenMainWindow() {
+  if (quitting) return;
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    return;
+  }
+  // The first window is created by startup after Electron and the local
+  // handlers are ready. Later activation and launch events share a reopen.
+  if (!canReopenMainWindow || acquireLibraryTransition.held()) return;
+  if (!openingMainWindow) {
+    openingMainWindow = createWindow().catch((err) => {
+      if (!quitting) dialog.showErrorBox("BeeZilla could not reopen", String(err?.message ?? err));
+    }).finally(() => { openingMainWindow = null; });
+  }
 }
 
 function installMenu() {
@@ -731,10 +745,10 @@ async function openSettingsWindow() {
 }
 
 async function createWindow() {
-  if (acquireLibraryTransition.held()) return;
+  if (quitting || acquireLibraryTransition.held()) return;
   console.log("[desktop] createWindow: starting runtime");
   const rt = await supervisor.start();
-  if (acquireLibraryTransition.held()) return;
+  if (quitting || acquireLibraryTransition.held()) return;
   console.log(`[desktop] runtime ready on ${rt.host}:${rt.port}`);
   const base = bindRuntime(rt);
 
@@ -1003,8 +1017,9 @@ app.whenReady().then(async () => {
     return;
   }
 
+  canReopenMainWindow = true;
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) focusOrReopenMainWindow();
   });
 });
 

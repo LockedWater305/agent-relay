@@ -321,6 +321,80 @@ test('ordinary native Reload menu is suppressed only while the transition is hel
  const f=await fixture(t);await f.mount();const d=await desktop(t,[f]),item=d.menu.template.flatMap(x=>x.submenu||[]).find(x=>x.label==='Reload');assert.equal(typeof item?.click,'function');
  const hold=await d.api.acquire(),before=d.requests.length;item.click();await drain();assert.equal(d.requests.length,before);await hold.release();item.click();await drain();assert.equal(d.requests.filter(x=>x.kind==='loadURL').length,2);
 });
+test('second-instance restores and focuses an existing minimized main window without starting a runtime', async t => {
+  const f = await fixture(t); await f.mount();
+  const d = await desktop(t, [f]);
+  let minimized = true, focused = 0;
+  d.main.isMinimized = () => minimized;
+  d.main.restore = () => { minimized = false; };
+  d.main.focus = () => { focused++; };
+  d.app.emit('second-instance');
+  assert.equal(minimized, false);
+  assert.equal(focused, 1);
+  assert.equal(d.starts, 1);
+  assert.equal(d.windows.length, 1);
+});
+
+test('second-instance reopens a closed main window without spawning another runtime', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t); await g.mount();
+  const d = await desktop(t, [f, g]), rt = d.runtime();
+  await d.close();
+  assert.equal(d.api.currentMain(), null);
+  d.app.emit('second-instance'); await drain();
+  assert.equal(d.windows.length, 2, 'a new main window replaces the closed one');
+  assert.equal(d.api.currentMain(), d.windows[1]);
+  assert.equal(d.runtime(), rt);
+  assert.equal(d.starts, 1);
+});
+
+test('competing activate and second-instance callbacks share one pending main reopen', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t); await g.mount();
+  const d = await desktop(t, [f, g]), rt = d.runtime(), gate = f.defer();
+  await d.close();
+  let requests = 0;
+  d.api.supervisor().start = async () => { requests++; await gate.promise; return rt; };
+  d.app.emit('activate'); d.app.emit('second-instance'); d.app.emit('activate');
+  assert.equal(d.windows.length, 1, 'only the closed window while reopen is pending');
+  gate.resolve(); await drain();
+  assert.equal(d.windows.length, 2, 'exactly one replacement main window');
+  assert.equal(d.api.currentMain(), d.windows[1]);
+  assert.equal(requests, 1);
+});
+
+test('pending main reopen cannot create a window after quit completes', async t => {
+  const f = await fixture(t); await f.mount();
+  const d = await desktop(t, [f]), rt = d.runtime(), gate = f.defer();
+  await d.close();
+  d.api.supervisor().start = async () => { await gate.promise; return rt; };
+  d.app.emit('activate');
+  await d.quit();
+  assert.equal(d.didExit(), true);
+  gate.resolve(); await drain();
+  d.app.emit('second-instance'); await drain();
+  assert.equal(d.windows.length, 1);
+  assert.equal(d.api.currentMain(), null);
+});
+
+test('failed main reopen reports once and allows a later second-instance request to retry', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t); await g.mount();
+  const d = await desktop(t, [f, g]), gate = f.defer(), sup = d.api.supervisor();
+  const realStart = sup.start.bind(sup);
+  await d.close();
+  sup.start = async () => { await gate.promise; throw Error('fixture: startup not ready'); };
+  d.app.emit('second-instance'); d.app.emit('activate');
+  gate.resolve(); await drain();
+  assert.equal(d.api.currentMain(), null);
+  assert.equal(d.didExit(), false);
+  assert.equal(d.errors.length, 1);
+  assert.match(d.errors[0].message, /startup not ready/);
+  sup.start = realStart;
+  d.app.emit('second-instance'); await drain();
+  assert.equal(d.api.currentMain(), d.windows[1]);
+});
+
 for(const replacement of ['frame','same-frame-document'])test('pending Save acknowledgement from retired '+replacement+' cannot retire the runtime',async t=>{
  const f=await fixture(t),p=await f.mount(),d=await desktop(t,[f]),gate=f.defer();let body=false;
  f.transport=async(req,next)=>{const r=await next();if(req.method==='POST')return {ok:true,status:200,json:async()=>{body=true;await gate.promise;return r.json();}};return r;};await p.draw();const quitting=d.quit();await drain();assert.equal(body,true);
