@@ -194,6 +194,12 @@ function bindRuntime(rt, notifyWindows = false) {
   if (notifyWindows && previousBase && (previousBase !== runtimeBase || pendingRuntimeRetargets.size)) {
     for (const { wc, url } of targets) {
       if (wc.isDestroyed() || (testPageUrl && url === testPageUrl)) continue;
+      // The never-committed main window already has an explicit page retry.
+      // A fallback IPC navigation could overwrite its saved route.
+      if (wc === mainWindow?.webContents && mainPagesToRetry.has(mainWindow)) {
+        pendingRuntimeRetargets.delete(wc);
+        continue;
+      }
       const fallback = wc === settingsWindow?.webContents ? "/buzzy/settings" : "/buzzy/talk";
       const earlier = pendingRuntimeRetargets.get(wc);
       if (previousBase === runtimeBase && !earlier) continue;
@@ -563,8 +569,14 @@ function focusOrReopenMainWindow() {
 async function retryMainPage(win) {
   const target = mainPagesToRetry.get(win);
   if (!target || win !== mainWindow || win.isDestroyed()) return;
+  if (!currentRuntimeBinding(supervisor.runtime)) {
+    if (!await reconnectWindowRuntime()) return;
+    // Recovery can outlive the failed window or a late successful page commit.
+    if (quitting || win !== mainWindow || win.isDestroyed() || acquireLibraryTransition.held() ||
+        mainPagesToRetry.get(win) !== target) return;
+  }
   const binding = currentRuntimeBinding(supervisor.runtime);
-  if (!binding) throw new Error("The local connection is not ready. Open Settings to reconnect, then open BeeZilla again.");
+  if (!binding) throw new Error("The local connection changed. Open BeeZilla again to retry.");
   await loadMainPage(win, retargetAppPage(target.url, target.base, binding.base));
 }
 

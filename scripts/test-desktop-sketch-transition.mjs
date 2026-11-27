@@ -1081,3 +1081,98 @@ test('reopen after runtime exit waits for the previous launcher to drain and all
   assert.equal(d.windows.length, 1);
   assert.equal(d.errors.length, 1);
 });
+
+test('main-page retry after runtime exit reconnects once and opens only the saved resident route', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t); g.h.location.href = 'about:blank';
+  let retries = 0, reopened = false;
+  const d = await desktop(t, [f, g], { bootProbeOnly: true, autoNavigate: true, beforeLoad: async () => {
+    if (reopened && ++retries === 1) throw Error('fixture: first resident load failed');
+  } });
+  const original = d.runtime(), target = new URL('/buzzy/library?view=work#pinned', d.main.url);
+  d.main.webContents.windowOpenHandler({ url: target.href });
+  await drain();
+  assert.equal(d.main.url, target.href);
+  await d.close();
+  reopened = true;
+  d.app.emit('second-instance');
+  await drain();
+  const blank = d.api.currentMain();
+  assert.equal(blank.url, 'about:blank');
+  assert.equal(d.errors.length, 1);
+
+  const sup = d.api.supervisor(), start = sup.start.bind(sup);
+  const allowedToStart = f.defer();
+  let starts = 0;
+  sup.start = async () => { starts++; await allowedToStart.promise; return start(); };
+  d.replaceRuntime(null);
+  d.app.emit('activate', {}, true);
+  d.app.emit('second-instance');
+  assert.equal(starts, 1, 'the blank window retry and native launch share guarded runtime recovery');
+  assert.equal(blank.url, 'about:blank', 'do not navigate until a replacement is ready');
+  allowedToStart.resolve();
+  await drain(); await d.nextNavigation(blank);
+  assert.equal(d.api.currentMain(), blank, 'do not allocate a third window');
+  assert.equal(d.windows.length, 2);
+  assert.equal(d.didExit(), false);
+  assert.notEqual(d.runtime().port, original.port);
+  const next = new URL(blank.url);
+  assert.equal(next.port, String(d.runtime().port));
+  assert.equal(next.pathname + next.search + next.hash, target.pathname + target.search + target.hash);
+  assert.equal(retries, 2, 'recovery must not also navigate the blank page to the generic fallback');
+  assert.equal(d.messages.filter(item => item.wc === blank.webContents && item.channel === 'beezilla:runtime:changed').length, 0);
+  assert.equal(d.errors.length, 1);
+});
+
+test('main-page retry after runtime exit leaves a late successful Sketch commit and its draft intact', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t), page = await g.mount();
+  g.h.location.href = 'about:blank';
+  const firstResponse = f.defer(), entered = f.defer(), delayedRecovery = f.defer();
+  let active = false, attempts = 0;
+  const d = await desktop(t, [f, g], {
+    bootProbeOnly: true, timerDelay: ms => ms === 30_000 ? 10 : ms,
+    beforeLoad: async () => {
+      if (active && ++attempts === 1) { entered.resolve(); await firstResponse.promise; }
+    },
+  });
+  const old = d.runtime(), originalUrl = d.main.url;
+  await d.close();
+  active = true;
+  d.app.emit('second-instance');
+  await entered.promise;
+  try {
+    await new Promise(resolve => setTimeout(resolve, 35));
+    assert.equal(d.errors.length, 1);
+    const win = d.api.currentMain();
+    assert.equal(win.url, 'about:blank');
+
+    const replacement = { ...old, token: 'synthetic_page_retry_recovery'.padEnd(43, 'n') };
+    let starts = 0;
+    d.api.supervisor().start = async () => {
+      starts++;
+      await delayedRecovery.promise;
+      d.replaceRuntime(replacement);
+      return replacement;
+    };
+    d.replaceRuntime(null);
+    d.app.emit('second-instance');
+    assert.equal(starts, 1);
+    firstResponse.resolve();
+    await drain();
+    assert.equal(win.url, originalUrl, 'response from original timed-out request commits before recovery');
+    await page.draw();
+    delayedRecovery.resolve();
+    await drain(); await d.nextNavigation(win);
+    assert.equal(attempts, 1, 'do not retry at all once the original document commits');
+    assert.equal(d.api.currentMain(), win);
+    assert.equal(win.url, originalUrl);
+    assert.equal(d.errors.length, 1);
+    await page.save();
+    assert.equal(g.data().board.strokes.length, 3, 'the committed draft can save with the new binding');
+  } finally {
+    firstResponse.resolve();
+    delayedRecovery.resolve();
+    await drain();
+  }
+});
