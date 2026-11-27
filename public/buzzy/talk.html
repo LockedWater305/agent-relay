@@ -3608,20 +3608,37 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         return Promise.resolve();
       }
       if (paperBusy) return Promise.resolve();
+      var startState = chatState, startEpoch = chatEpoch;
+      var startJob = chatState.jobId || null, startSession = chatState.sessionId || null;
+      var paperSession = startSession;
+      function scopeIsCurrent() {
+        return chatState === startState && chatEpoch === startEpoch &&
+          activeCompanyId() === co && (chatState.jobId || null) === startJob;
+      }
+      function ownsPaperResponse() {
+        return scopeIsCurrent() && (chatState.sessionId || null) === paperSession;
+      }
       paperBusy = true;
       if (note) note.textContent = "Reading…";
       var userLine = payload.filename ? "Read this — " + payload.filename : "Read this.";
       chatState.messages.push({ role: "user", content: userLine });
       renderChatMessages();
-      return ensureChatSession().then(function () {
+      return ensureChatSession(startSession ? null : function () {
+        return scopeIsCurrent() && !chatState.sessionId;
+      }).then(function (readySession) {
+        var ready = readySession || null;
+        // The old input never follows a newly selected company, job or session.
+        if (!scopeIsCurrent() || (chatState.sessionId || null) !== ready ||
+            (startSession && ready !== startSession)) return null;
+        paperSession = ready;
         return fetch("/api/buzzy/papers", {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             companyId: co,
-            jobId: chatState.jobId || undefined,
-            sessionId: chatState.sessionId || undefined,
+            jobId: startJob || undefined,
+            sessionId: paperSession || undefined,
             filename: payload.filename || "",
             text: payload.text || "",
             fileKind: payload.fileKind || "paste",
@@ -3629,9 +3646,11 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           }),
         });
       }).then(function (r) {
+        if (!r || !ownsPaperResponse()) return null;
         if (r.status === 401) { window.location.href = "/buzzy/landing"; throw new Error("signed_out"); }
         return r.json().then(function (d) { return { ok: r.ok, d: d }; });
       }).then(function (res) {
+        if (!res || !ownsPaperResponse()) return;
         if (!res.ok || !res.d.paper) {
           if (note) note.textContent = (res.d && res.d.error) || "Couldn't read that.";
           return;
@@ -3652,7 +3671,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         if (file) file.value = "";
         if (note) note.textContent = "These lines are proposed. Nothing is confirmed until you accept one.";
       }).catch(function (e) {
-        if (e && e.message === "signed_out") return;
+        if (!ownsPaperResponse() || (e && e.message === "signed_out")) return;
         if (note) note.textContent = (e && e.message) || "Couldn't read that.";
       }).finally(function () { paperBusy = false; });
     }
