@@ -196,6 +196,7 @@ export function desktopLaunchStatus(result, page = "/buzzy/talk") {
     // The production launcher binds exactly this IPv4 loopback authority.
     // Encountering another ready line retires the prior binding evidence.
     if (line.startsWith("[desktop] runtime ready on ")) {
+      loaded = false;
       const ready = /^\[desktop\] runtime ready on 127\.0\.0\.1:([1-9]\d{0,4})$/.exec(line);
       readyPort = ready && Number(ready[1]) <= 65535 ? ready[1] : null;
       if (readyPort) sawReady = true;

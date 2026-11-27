@@ -290,3 +290,11 @@ test("a newly ready runtime can supply its own exact subsequent page load", () =
   const out = readyLine(12345) + readyLine(12346) + pageLine(12346);
   assert.equal(desktopLaunchStatus(result({ out })).ok, true);
 });
+
+test("successful load evidence expires when a different runtime becomes current", () => {
+  const stale = readyLine(12345) + pageLine(12345) + readyLine(12346);
+  assert.equal(desktopLaunchStatus(result({ out: stale })).ok, false);
+  assert.equal(desktopLaunchStatus(result({ out: stale + pageLine(12346) })).ok, true);
+  assert.equal(desktopLaunchStatus(result({ out: readyLine(12345) + pageLine(12345) +
+    "[desktop] runtime ready on malformed\n" })).ok, false);
+});
