@@ -8,6 +8,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { CSP_PAGE_NAMES } from "../desktop/csp.mjs";
 
 function setup(t) {
   const dir = mkdtempSync(join(tmpdir(),"bee-desktop-prebuild-"));
@@ -62,4 +63,56 @@ test("pack:dir identifies a local test build without claiming pin or signature s
   assert.match(r.stdout,/LOCAL TEST BUILD.*unpacked.*no installer.*no publish/i);
   assert.doesNotMatch(r.stdout,/unsigned|no publisher pins/i);
   assert.ok(existsSync(join(dir,"vite-ran")));
+});
+
+function outputFixture(t,entry) {
+  const ctx=setup(t), {out}=ctx;
+  out("package.json",'{"version":"0.0.1"}');
+  out("desktop/package.json",'{"build":{"files":["main.mjs"]}}');
+  out("desktop/main.mjs","// shaped shell fixture");
+  out("migrations/001.sql","-- shaped migration fixture");
+  for (const path of [
+    "bin/beezilla.mjs", "scripts/beezilla-local.mjs", "scripts/migrate.mjs",
+    "scripts/lib/parent-watchdog.cjs", "scripts/lib/inference.mjs",
+    "scripts/lib/search-keys.mjs", "scripts/lib/music-keys.mjs",
+  ]) out(path,"// shaped runtime script fixture");
+  const html='<body><script src="/buzzy/chat.js"></script><script src="/buzzy/companies.js"></script><script>0</script></body>';
+  for (const page of CSP_PAGE_NAMES) out(`public/buzzy/${page}.html`,html);
+  out("public/buzzy/chat.js","// inert fixture");
+  out("public/buzzy/companies.js","// inert fixture");
+  out("public/buzzy/nav.js",`  function runScripts(root) { return Promise.resolve(); }
+  // Chrome-owned nodes must not ride in with the page.
+  `);
+  // Simulate a Vite command claiming success with setup-only output. Real CSP
+  // generation, runtime script staging, and manifest writing still run.
+  out("node_modules/vite/bin/vite.js",`
+    const fs=require("node:fs");
+    if(process.argv[2]!=="build")process.exit(90);
+    fs.cpSync("public",".output/public",{recursive:true});
+    fs.mkdirSync(".output/server/_libs",{recursive:true});
+    for(const name of ["pglite.data","pglite.wasm","initdb.wasm"]) fs.writeFileSync(".output/server/_libs/"+name,"fixture loader payload");
+    const entry=${JSON.stringify(entry)};
+    if(entry==="directory")fs.mkdirSync(".output/server/index.mjs");
+    if(entry==="empty")fs.writeFileSync(".output/server/index.mjs","");
+    if(entry==="valid")fs.writeFileSync(".output/server/index.mjs","export const fixture = 1;");
+  `);
+  return ctx;
+}
+for (const entry of ["missing","directory","empty"]) {
+  test(`incomplete generated server entry (${entry}) cannot write a successful stage receipt`,t=>{
+    const {dir}=outputFixture(t,entry);
+    const r=invoke(dir);
+    assert.notEqual(r.status,0,r.stdout+r.stderr);
+    assert.match(r.stderr,/nonempty regular .output\/server\/index\.mjs/i);
+    assert.equal(existsSync(join(dir,"desktop/stage/MANIFEST.json")),false);
+  });
+}
+test("a nonempty regular server entry retains the stage receipt without Git",t=>{
+  const {dir}=outputFixture(t,"valid");
+  const r=invoke(dir);
+  assert.equal(r.status,0,r.stdout+r.stderr);
+  const manifest=JSON.parse(readFileSync(join(dir,"desktop/stage/MANIFEST.json"),"utf8"));
+  assert.match(manifest.stagedRuntime.sha256,/^[0-9a-f]{64}$/);
+  assert.equal(manifest.source.state,"unavailable");
+  assert.equal(readFileSync(join(dir,"desktop/stage/app/.output/server/index.mjs"),"utf8"),"export const fixture = 1;");
 });

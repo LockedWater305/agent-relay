@@ -22,7 +22,7 @@ import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { writeCspManifest } from "../scripts/build-desktop-csp.mjs";
+import { requireServerEntry, writeCspManifest } from "../scripts/build-desktop-csp.mjs";
 import { productionDependencyClosure, copyProductionDependency, ensurePgliteAssets } from "./stage-inputs.mjs";
 import { finishCheckout, observeCheckout, observeStagedRuntime } from "./stage-receipt.mjs";
 
@@ -97,6 +97,9 @@ async function stage() {
     log(`copying ${dir}`);
     cpSync(join(ROOT, dir), join(APP, dir), { recursive: true });
   }
+  // We called the CSP-only builder helper above. Require the entry from the
+  // actual staged copy, not merely the source output, before issuing a receipt.
+  requireServerEntry(APP);
   // `scripts/` used to be copied wholesale: 89 files of test probes, seeds and
   // TypeScript sources rode along with the launcher, so every installer shipped
   // the recipe-seal sources, the check corpus and the internal test harness in

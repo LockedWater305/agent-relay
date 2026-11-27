@@ -162,14 +162,17 @@ export async function writeCspManifest(root) {
   return manifest;
 }
 
+/** Complete runtime readiness, separate from CSP-only fixture generation. */
+export function requireServerEntry(root) {
+  const entry = lstatSync(join(root, ".output/server/index.mjs"), { throwIfNoEntry: false });
+  if (!entry?.isFile() || entry.size === 0) {
+    fail("complete build requires a nonempty regular .output/server/index.mjs");
+  }
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  if (process.argv.slice(2).includes("--require-server-entry")) {
-    const entry = lstatSync(join(root, ".output/server/index.mjs"), { throwIfNoEntry: false });
-    if (!entry?.isFile() || entry.size === 0) {
-      fail("complete build requires a nonempty regular .output/server/index.mjs");
-    }
-  }
+  if (process.argv.slice(2).includes("--require-server-entry")) requireServerEntry(root);
   const manifest = await writeCspManifest(root);
   console.log(`[desktop-csp] ${manifest.scriptHashes.length} inline hashes, ${manifest.scriptPaths.length} exact script paths; both public trees verified`);
 }
