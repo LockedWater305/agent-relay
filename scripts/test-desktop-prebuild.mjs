@@ -13,7 +13,7 @@ function setup(t) {
   const dir = mkdtempSync(join(tmpdir(),"bee-desktop-prebuild-"));
   t.after(()=>rmSync(dir,{recursive:true,force:true}));
   const out = (path, text) => {const dest=join(dir,path); mkdirSync(dirname(dest),{recursive:true}); writeFileSync(dest,text)};
-  for (const f of ["desktop/dist.mjs", "desktop/stage-inputs.mjs", "desktop/csp.mjs", "desktop/security.mjs", "scripts/build-desktop-csp.mjs", "scripts/sync-private.mjs", "scripts/assert-no-private-modules.mjs"]) {
+  for (const f of ["desktop/dist.mjs", "desktop/stage-inputs.mjs", "desktop/stage-receipt.mjs", "desktop/csp.mjs", "desktop/security.mjs", "scripts/build-desktop-csp.mjs", "scripts/sync-private.mjs", "scripts/assert-no-private-modules.mjs"]) {
     mkdirSync(dirname(join(dir,f)),{recursive:true}); cpSync(new URL("../"+f,import.meta.url),join(dir,f));
   }
   out("private.lock.json",JSON.stringify({repo:"test/invalid",commit:"unused"}));

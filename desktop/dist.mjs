@@ -24,6 +24,7 @@ import { dirname, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeCspManifest } from "../scripts/build-desktop-csp.mjs";
 import { productionDependencyClosure, copyProductionDependency, ensurePgliteAssets } from "./stage-inputs.mjs";
+import { finishCheckout, observeCheckout, observeStagedRuntime } from "./stage-receipt.mjs";
 
 const DESKTOP = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(DESKTOP, "..");
@@ -67,6 +68,7 @@ function runCli(cwd, entry, args, env = process.env) {
 }
 
 async function stage() {
+  const checkoutBefore = observeCheckout(ROOT);
   const vite = lockedCli(ROOT, "vite", "bin/vite.js");
   // Calling Vite directly bypasses npm's prebuild hooks. A clean source tree
   // has no recipe modules yet. Use the same pinned sync and leak checks as the
@@ -165,6 +167,8 @@ async function stage() {
     version: JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version,
     productionPackages: copied,
     megabytes: Math.round(size / 1e6),
+    source: finishCheckout(checkoutBefore, observeCheckout(ROOT)),
+    stagedRuntime: observeStagedRuntime(APP),
   }, null, 2) + "\n");
   log(`staged tree: ${Math.round(size / 1e6)} MB at ${APP}`);
 }
