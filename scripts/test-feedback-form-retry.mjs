@@ -50,6 +50,10 @@ async function form(t, responses) {
       const n = window.calls.push({
         url, method: options.method, payload: JSON.parse(options.body),
       });
+      const receipt = { ok: true, ref: ["BZ-FB-ABCDEF", "BZ-FB-GHJKLM"][n - 1], received_at: "2026-11-27T00:00:00.000Z" };
+      const reply = (patch = {}, status = 201) => Promise.resolve({
+        ok: status >= 200 && status < 300, status, json: async () => ({ ...receipt, ...patch }),
+      });
       switch (modes[n - 1]) {
         case "503":
           return Promise.resolve({
@@ -61,8 +65,16 @@ async function form(t, responses) {
           return stall(options.signal);
         case "hung-body":
           return Promise.resolve({ ok: true, json: () => stall(options.signal) });
-        case "ok":
-          return Promise.resolve({ ok: true, json: async () => ({ ok: true, ref: "BZ-FB-SYNTH" + n }) });
+        case "ok": return reply();
+        case "missing-ref": return reply({ ref: undefined });
+        case "numeric-ref": return reply({ ref: 123456 });
+        case "bad-alphabet": return reply({ ref: "BZ-FB-ABCD01" });
+        case "trailing-line-break": return reply({ ref: receipt.ref + "\n" });
+        case "nonboolean-ok": return reply({ ok: "true" });
+        case "missing-time": return reply({ received_at: undefined });
+        case "invalid-time": return reply({ received_at: "not-a-date" });
+        case "noncanonical-time": return reply({ received_at: "2026-11-27T00:00:00Z" });
+        case "wrong-http-code": return reply({}, 200);
         default:
           throw new Error("Unexpected attempted write");
       }
@@ -91,7 +103,7 @@ test("explicit 503 preserves text and screenshot and supports a single deliberat
   assert.equal(await send.isEnabled(), true);
   assert.equal((await calls()).length, 1);
   await send.click();
-  await page.getByText("BZ-FB-SYNTH2").waitFor();
+  await page.getByText("BZ-FB-GHJKLM").waitFor();
   const sent = await calls();
   assert.equal(sent.length, 2);
   assert.deepEqual(sent[0], sent[1]);
@@ -125,7 +137,7 @@ for (const outcome of ["hung-headers", "hung-body"]) {
     assert.equal(await page.locator("#bzFbShotImg").getAttribute("src"), imageUrl);
     assert.equal((await calls()).length, 1, "outcome is unknown; never retry automatically");
     await send.click();
-    await page.getByText("BZ-FB-SYNTH2").waitFor();
+    await page.getByText("BZ-FB-GHJKLM").waitFor();
     const sent = await calls();
     assert.equal(sent.length, 2);
     assert.deepEqual(sent[0], sent[1]);
@@ -135,12 +147,12 @@ for (const outcome of ["hung-headers", "hung-body"]) {
 test("Send another captures the new text and does not resend the old screenshot", async (t) => {
   const { page, calls } = await form(t, ["ok", "ok"]);
   await page.locator("#bzFbSend").click();
-  await page.getByText("BZ-FB-SYNTH1").waitFor();
+  await page.getByText("BZ-FB-ABCDEF").waitFor();
   await page.getByRole("button", { name: "Send another" }).click();
   assert.equal(await page.locator("#bzFbText").inputValue(), "");
   await page.locator("#bzFbText").fill(secondDraft);
   await page.locator("#bzFbSend").click();
-  await page.getByText("BZ-FB-SYNTH2").waitFor();
+  await page.getByText("BZ-FB-GHJKLM").waitFor();
   const sent = await calls();
   assert.equal(sent.length, 2);
   assert.equal(sent[0].url, "/api/buzzy/feedback");
@@ -185,7 +197,7 @@ test("late FileReader result from replaced photo can never overwrite the current
   const expected = "data:image/png;base64,TkVX";
   const preview = await page.locator("#bzFbShotImg").getAttribute("src");
   await page.locator("#bzFbSend").click();
-  await page.getByText("BZ-FB-SYNTH1").waitFor();
+  await page.getByText("BZ-FB-ABCDEF").waitFor();
   const [post] = await calls();
   assert.deepEqual({ preview, upload: post.payload.screenshot }, { preview: expected, upload: expected });
 });
@@ -198,7 +210,31 @@ test("removing the attachment invalidates the pending FileReader even with the s
   await resolvePhoto(page, "pending.png", "OLD");
   const visible = await page.locator("#bzFbShotImg").isVisible();
   await page.locator("#bzFbSend").click();
-  await page.getByText("BZ-FB-SYNTH1").waitFor();
+  await page.getByText("BZ-FB-ABCDEF").waitFor();
   const [post] = await calls();
   assert.deepEqual({ visible, upload: post.payload.screenshot ?? null }, { visible: false, upload: null });
 });
+
+for (const outcome of [
+  "missing-ref", "numeric-ref", "bad-alphabet", "trailing-line-break", "nonboolean-ok",
+  "missing-time", "invalid-time", "noncanonical-time", "wrong-http-code",
+]) {
+  test(`an unconfirmed ${outcome} preserves this draft and attachment without auto-retry`, async (t) => {
+    const { page, calls } = await form(t, [outcome, "ok"]);
+    await page.locator("#bzFbSend").click();
+    await page.waitForFunction(() => {
+      const send = document.getElementById("bzFbSend");
+      return document.getElementById("bzFbAgain") || (window.calls.length === 1 && send && !send.disabled);
+    });
+    assert.equal(await page.locator("#bzFbAgain").count(), 0, "invalid reply cannot advance to a receipt");
+    assert.equal(await page.locator("#bzFbText").inputValue(), firstDraft);
+    assert.equal(await page.locator("#bzFbShotImg").getAttribute("src"), imageUrl);
+    assert.match(await page.locator("#bzFbStatus").textContent(), /could not confirm.*retrying could send it twice/i);
+    assert.equal((await calls()).length, 1);
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.getByText("BZ-FB-GHJKLM", { exact: true }).waitFor();
+    const sent = await calls();
+    assert.equal(sent.length, 2);
+    assert.deepEqual(sent[1], sent[0]);
+  });
+}

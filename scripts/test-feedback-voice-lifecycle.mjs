@@ -59,11 +59,11 @@ async function website(t) {
       if (url === "/api/buzzy/feedback/transcribe") {
         if (!(options.body instanceof Blob) || options.body.type !== "audio/wav" || options.body.size < 44)
           throw new Error("Expected synthetic WAV");
-        return new Promise((resolve, reject) => pendingVoice.push({resolve, reject}));
+        return new Promise((resolve, reject) => pendingVoice.push({resolve, reject, signal:options.signal}));
       }
       if (url === "/api/buzzy/feedback") {
         report.push(JSON.parse(options.body));
-        return Promise.resolve({ok:true,json:async()=>({ok:true,ref:"BZ-FB-SYNTH"})});
+        return Promise.resolve({ok:true,status:201,json:async()=>({ok:true,ref:"BZ-FB-ABCDEF",received_at:"2026-11-27T00:00:00.000Z"})});
       }
       throw new Error("Unexpected network request");
     };
@@ -76,6 +76,7 @@ async function website(t) {
       rejectPermission(i) { pendingPermission[i].reject(new Error("Synthetic denied")); },
       voice(i, value) { pendingVoice[i].resolve({ok:true,json:async()=>({text:value})}); },
       voiceError(i) { pendingVoice[i].reject(new Error("Synthetic late error")); },
+      voiceAborted(i) { return pendingVoice[i].signal?.aborted === true; },
       feed() {
         const active = ctx.at(-1)?.proc;
         active.onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(7000) } });
@@ -123,7 +124,7 @@ for(const disposition of ["text", "error"]) test("late transcription " + disposi
   await q.text.fill("Original synthetic body");
   await requestTranscript(q);
   await q.send.click();
-  await q.page.getByText("BZ-FB-SYNTH").waitFor();
+  await q.page.getByText("BZ-FB-ABCDEF").waitFor();
   await q.page.getByRole("button",{name:"Send another"}).click();
   await q.text.fill("New independent draft");
   if (disposition === "text") await q.voice(0,"OLD PRIVATE SENTINEL");
@@ -158,7 +159,7 @@ test("pending permission after the receipt cannot capture in the new draft", asy
   await q.text.fill("Original synthetic body");
   await q.mic.click();
   await q.send.click();
-  await q.page.getByText("BZ-FB-SYNTH").waitFor();
+  await q.page.getByText("BZ-FB-ABCDEF").waitFor();
   await q.page.getByRole("button",{name:"Send another"}).click();
   await q.permission(0);
   assert.deepEqual(await q.stats(),{requested:1,contextCount:0,closes:[],stops:[1],transcriptions:0,reports:1});
@@ -193,7 +194,7 @@ test("replacing the form with the receipt releases current hardware without uplo
   const q=await website(t);
   await q.text.fill("Only this typed body is sent.");
   await begin(q); await q.feed(); await q.send.click();
-  await q.page.getByText("BZ-FB-SYNTH").waitFor();
+  await q.page.getByText("BZ-FB-ABCDEF").waitFor();
   assert.deepEqual(await q.stats(),{requested:1,contextCount:1,closes:[1],stops:[1],transcriptions:0,reports:1});
 });
 test("partial audio setup failure also releases the track and context", async t => {
@@ -204,4 +205,55 @@ test("partial audio setup failure also releases the track and context", async t 
   await q.mic.click(); await q.permission(0);
   assert.deepEqual(await q.stats(),{requested:1,contextCount:1,closes:[1],stops:[1],transcriptions:0,reports:0});
   assert.equal(await q.mic.getAttribute("aria-pressed"),"false");
+});
+
+async function secondCapture(q, { stop = true } = {}) {
+  assert.equal(await q.mic.isEnabled(),true,"Speak stays available while first ASR waits");
+  await q.mic.click(); await q.permission(1);
+  await q.page.locator("#bzFbMic[aria-pressed=true]").waitFor();
+  if (stop) {
+    await q.feed(); await q.mic.click();
+    assert.equal((await q.stats()).transcriptions,2);
+  }
+}
+test("two voice captures append in capture order even when ASR replies in reverse", async t => {
+  const q=await website(t);
+  await q.text.fill("Typed introduction.");
+  await requestTranscript(q); await secondCapture(q);
+  await q.voice(1,"SECOND NOTE");
+  await q.voice(0,"FIRST NOTE");
+  assert.equal(await q.text.inputValue(),"Typed introduction. FIRST NOTE SECOND NOTE");
+  assert.equal(await q.hint.textContent(),"Said what you wanted? You can edit it.");
+  assert.equal((await q.stats()).reports,0);
+});
+test("a late earlier error must not obscure a successful second capture", async t => {
+  const q=await website(t);
+  await requestTranscript(q); await secondCapture(q);
+  await q.voice(1,"SECOND NOTE");
+  await q.voiceError(0);
+  assert.equal(await q.text.inputValue(),"SECOND NOTE");
+  assert.equal(await q.hint.textContent(),"Said what you wanted? You can edit it.");
+});
+test("earlier completion cannot overwrite the current Listening or Too short hint", async t => {
+  const q=await website(t);
+  await requestTranscript(q); await secondCapture(q,{stop:false});
+  await q.voice(0,"FIRST NOTE");
+  assert.equal(await q.text.inputValue(),"FIRST NOTE");
+  assert.match(await q.hint.textContent(), /^Listening/);
+  await q.mic.click(); // No samples in the second capture: its own newest hint wins.
+  assert.match(await q.hint.textContent(), /^Too short/);
+});
+test("a first ASR that never responds cannot strand a later successful capture", async t => {
+  const q=await website(t);
+  await q.page.clock.install();
+  await requestTranscript(q); await secondCapture(q);
+  await q.voice(1,"SECOND NOTE");
+  const whileWaiting=await q.text.inputValue();
+  await q.page.clock.fastForward(60001);
+  assert.equal(await q.text.inputValue(),"SECOND NOTE");
+  assert.equal(whileWaiting,"","wait briefly for capture order rather than immediately inverting it");
+  assert.equal(await q.page.evaluate(() => window.fixture.voiceAborted(0)),true);
+  assert.equal(await q.hint.textContent(),"Said what you wanted? You can edit it.");
+  await q.voice(0,"EXPIRED FIRST NOTE");
+  assert.equal(await q.text.inputValue(),"SECOND NOTE");
 });
