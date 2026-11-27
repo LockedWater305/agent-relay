@@ -13,7 +13,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
 import test from "node:test";
-import { managedAccountConnectCapability } from "../desktop/connect.mjs";
+import { connectAccount, managedAccountConnectCapability } from "../desktop/connect.mjs";
 import * as security from "../desktop/security.mjs";
 import { createLibraryTransition } from "../desktop/library-vault.mjs";
 
@@ -73,7 +73,8 @@ async function mainFixture(flag, connect = async () => ({ ok: false, error: "fix
   const wc = Object.assign(new EventEmitter(), {
     executeJavaScript: async (code) => vm.runInNewContext(code, { window: historyWindow, document: historyDocument, location: new URL(wc.getURL()), localStorage: historyStorage }),
     id: 7, mainFrame: { url: `${base}/buzzy/settings` },
-    getURL() { return this.mainFrame.url; }, isDestroyed: () => false, send() {},
+    getURL() { return this.mainFrame.url; }, isDestroyed: () => false,
+    send(event) { if (event === "beezilla:runtime:changed") trace.push("runtime-retarget"); },
   });
   const win = { webContents: wc, isDestroyed: () => false };
   class FakeWindow {
@@ -178,6 +179,12 @@ function rendererFixture(bridge) {
     }];
   }));
   const radios = [nodes.get("provider-beezilla"), nodes.get("provider-byok")];
+  // Model native radio groups: checking one unchecks the previously selected one.
+  let selected = radios.find((radio) => radio.checked);
+  for (const radio of radios) Object.defineProperty(radio, "checked", {
+    get() { return selected === radio; },
+    set(value) { if (value) selected = radio; else if (selected === radio) selected = undefined; },
+  });
   const document = {
     getElementById: (id) => { assert.ok(nodes.has(id), `Unknown Settings element ${id}`); return nodes.get(id); },
     querySelector: (selector) => selector.endsWith(":checked") ? radios.find((radio) => radio.checked)
@@ -189,7 +196,12 @@ function rendererFixture(bridge) {
   assert.equal(scripts.length, 1, "execute the whole actual Settings script");
   vm.runInContext(scripts[0][1], context);
   return { nodes, render: (value) => { context.nextState = value; vm.runInContext("renderStatus(nextState)", context); },
-    click: () => nodes.get("connect-account").listeners.click(),
+    click: (id = "connect-account") => nodes.get(id).listeners.click(),
+    selectProvider: (provider) => {
+      const radio = nodes.get("provider-" + provider);
+      radio.checked = true;
+      radio.listeners.change();
+    },
     idle: () => new Promise((resolve) => setImmediate(resolve)),
   };
 }
@@ -441,4 +453,75 @@ test("cancelled Connect shows status in Settings without a failure dialog and ca
   assert.equal(attempts, 2);
   assert.ok(ctx.trace.includes("save:inference"));
   assert.equal(page.nodes.get("connect-hint").textContent, "Connected.");
+});
+
+for (const closePoint of ["navigation", "401 poll", "no cancellation"]) {
+  test(`a deliberate manual-key save clears the old Connect status after ${closePoint} on the same runtime port`, async () => {
+    let attempts = 0;
+    const ctx = await mainFixture(undefined, async (deps) => {
+      if (++attempts === 1) return { ok: true, token: "fixture-managed-only" };
+      let checks = 0, mints = 0;
+      const cancelled = await connectAccount({
+        baseUrl: deps.baseUrl, close: deps.close, signInDeadlineMs: 300, pollMs: 15, operationTimeoutMs: 100,
+        isOpen: () => {
+          if (++checks === 2 && closePoint === "401 poll") queueMicrotask(deps.close);
+          return deps.isOpen();
+        },
+        open: async () => {
+          if (closePoint === "navigation") { deps.close(); throw new Error("ERR_ABORTED"); }
+        },
+        evaluate: async () => { mints++; return { status: 401, body: { code: "unauthenticated" } }; },
+      });
+      assert.equal(cancelled.cancelled, true);
+      assert.equal(mints, closePoint === "navigation" ? 0 : 1);
+      return cancelled;
+    });
+    const bridge = preloadFixture((channel, payload) => ctx.ipc.get(channel)(ctx.event, payload));
+    const page = rendererFixture(bridge.settings);
+    const hint = page.nodes.get("connect-hint");
+    const current = page.nodes.get("inference-current");
+    await page.idle();
+    const neutral = hint.textContent;
+    assert.match(neutral, /short-lived token/i);
+    await page.click();
+    assert.equal(hint.textContent, "Connected.");
+    assert.match(current.innerHTML, /BeeZilla inference/);
+    if (closePoint !== "no cancellation") {
+      const previous = ctx.trace.filter((effect) => effect === "save:inference").length;
+      await page.click();
+      assert.match(hint.textContent, /cancelled/i);
+      assert.equal(ctx.trace.filter((effect) => effect === "save:inference").length, previous);
+      assert.match(current.innerHTML, /BeeZilla inference/, "cancel must not change the active credential");
+    }
+    assert.ok(!page.nodes.get("connect-account").disabled);
+    page.selectProvider("byok");
+    page.nodes.get("key").value = "fixture-manual-only";
+    await page.click("save-inference");
+    assert.ok(!ctx.trace.includes("runtime-retarget"), "same origin preserves this Settings document");
+    assert.match(page.nodes.get("inference-status").textContent, /saved.*restarted/i);
+    assert.match(current.innerHTML, /your own key/);
+    assert.equal(page.nodes.get("managed-fields").hidden, true);
+    assert.equal(page.nodes.get("key").value, "");
+    page.selectProvider("beezilla");
+    assert.equal(page.nodes.get("managed-fields").hidden, false);
+    assert.equal(page.nodes.get("connect-account").disabled, false);
+    assert.match(current.innerHTML, /your own key/, "selecting a radio does not activate another credential");
+    assert.equal(hint.textContent, neutral);
+  });
+}
+
+test("a failed manual-key save does not rewrite the last confirmed Connect status", async () => {
+  const ctx = await mainFixture(undefined, async () => ({ ok: true, token: "fixture-managed-only" }));
+  const bridge = preloadFixture((channel, payload) => ctx.ipc.get(channel)(ctx.event, payload));
+  const page = rendererFixture(bridge.settings);
+  await page.idle();
+  await page.click();
+  ctx.handlers.saveInference = async () => { throw Error("fixture write failed"); };
+  page.selectProvider("byok");
+  page.nodes.get("key").value = "fixture-manual-only";
+  await page.click("save-inference");
+  assert.match(page.nodes.get("inference-status").textContent, /could not confirm/i);
+  page.selectProvider("beezilla");
+  assert.equal(page.nodes.get("connect-hint").textContent, "Connected.");
+  assert.match(page.nodes.get("inference-current").innerHTML, /BeeZilla inference/);
 });

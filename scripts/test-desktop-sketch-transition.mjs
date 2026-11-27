@@ -139,7 +139,7 @@ export async function desktop(t,fixtures,options={}) {
     openSettings,createWindow,handleAppLink,
     settingsWindowFor:(url)=>settingsWindowFor(url),
     acquire:(options)=>acquireLibraryTransition(options),
-    currentMain:()=>mainWindow,currentSettings:()=>settingsWindow,
+    currentMain:()=>mainWindow,currentSettings:()=>settingsWindow, rememberedMainRoute:()=>mainReopenPage,
     runtimeBase:()=>runtimeBase,
     retargets:()=>typeof pendingRuntimeRetargets==='undefined'?null:pendingRuntimeRetargets,
     flushRetargets:()=>typeof flushRuntimeRetargets==='function'?flushRuntimeRetargets():undefined,
@@ -1253,4 +1253,80 @@ test('native close first saves a cold Sketch and resident reopen uses its new jo
   window.replaceFrame(); await window.replacementReady; await drain();
   assert.equal(f.reads().at(-1).response.board.strokes.length, 1);
   assert.equal(f.posts().length, 1);
+});
+
+async function openRoute(d, win, route) {
+  const target = new URL(route, win.url);
+  assert.equal(win.webContents.windowOpenHandler({ url: target.href }).action, 'deny');
+  await drain();
+  assert.equal(win.url, target.href);
+}
+const route = (url) => { const u = new URL(url); return u.pathname + u.search + u.hash; };
+
+for (const signal of ['activate', 'second-instance']) {
+  test('Library-only resident audit: ' + signal + ' restores linked folder after an owned retarget and completed close', async t => {
+    const f = await fixture(t), g = await fixture(t);
+    const d = await desktop(t, [f, g], { bootProbeOnly: true });
+    const target = '/buzzy/library?job=library_fixture#saved-docs';
+    await openRoute(d, d.main, target);
+    const from = new URL(d.main.url).port, held = f.defer();
+    d.ipc.set('beezilla:app:log', () => held.promise);
+    const ipc = d.main.preloadBridge.app.log('isolated Library fixture');
+    try {
+      d.replaceRuntime(null);
+      d.app.emit('second-instance');
+      await drain();
+      const current = d.runtime(), pending = d.api.retargets().get(d.main.webContents);
+      assert.notEqual(String(current.port), from);
+      assert.equal(route(pending.url), target);
+      assert.equal(d.main.preloadTimers.length, 0);
+      assert.equal(new URL(d.main.url).port, from);
+
+      await d.close();
+      assert.ok(d.main.isDestroyed());
+      assert.equal(d.api.retargets().size, 0, 'old renderer destroyed');
+      d.app.emit(signal, {}, false);
+      await drain();
+      const reopened = d.api.currentMain();
+      assert.equal(route(reopened.url), target);
+      assert.equal(new URL(reopened.url).port, String(current.port));
+      assert.equal(d.starts, 2);
+      assert.equal(d.stops, 0);
+      assert.equal(d.errors.length, 0);
+      assert.equal(f.posts().length + g.posts().length, 0, 'route restoration never writes a Sketch');
+    } finally { held.resolve(); await ipc; }
+  });
+}
+
+test('Library-only resident audit: a cancelled close records no new reopen route and a later successful close uses its own folder', async t => {
+  const f = await fixture(t), g = await fixture(t), h = await fixture(t);
+  const d = await desktop(t, [f, g, h], { bootProbeOnly: true });
+  const prior = '/buzzy/library?job=first_library_folder', refused = '/buzzy/library?job=cancelled_library_folder', done = '/buzzy/library?job=final_library_folder';
+  await openRoute(d, d.main, prior);
+  await d.close();
+  assert.equal(route(d.api.rememberedMainRoute().url), prior);
+  d.app.emit('second-instance'); await drain();
+  const resident = d.api.currentMain();
+  assert.equal(route(resident.url), prior);
+
+  await openRoute(d, resident, refused);
+  resident.preventUnload = true;
+  await d.close(resident);
+  assert.equal(resident.isDestroyed(), false);
+  assert.equal(resident.lastUnloadEvent.prevented, false, 'main never overrides the renderer/native unload refusal');
+  assert.equal(d.api.held(), false);
+  assert.equal(route(d.api.rememberedMainRoute().url), prior, 'only the closed event records the next route');
+  d.app.emit('second-instance'); await drain();
+  assert.equal(d.api.currentMain(), resident);
+  assert.equal(route(resident.url), refused);
+
+  await openRoute(d, resident, done);
+  resident.preventUnload = false;
+  await d.close(resident);
+  d.app.emit('activate', {}, false); await drain();
+  assert.equal(route(d.api.currentMain().url), done);
+  assert.equal(d.windows.length, 3);
+  assert.equal(d.starts, 1);
+  assert.equal(d.stops, 0);
+  assert.equal(d.errors.length, 0);
 });

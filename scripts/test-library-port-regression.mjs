@@ -55,7 +55,7 @@ async function scenario() {
  const wc={id:1,mainFrame:{url:currentUrl},isDestroyed:()=>false,getURL:()=>currentUrl,send:(channel,data)=>listeners[channel]?.({},data),executeJavaScript:async code=>vm.runInContext(code,first.context)};
  const auth=createRuntimeAuth({getContents:()=>[wc]});auth.bind(runtime);
  let refusalClears=0;
- const mainContext=vm.createContext({originalDownloadRefusal:{clear:()=>refusalClears++},runtimeBase:before,runtimeAuth:auth,runtimeBinding:null,runtimeBindingGeneration:0,pendingRuntimeRetargets:new Map(),acquireLibraryTransition:{held:()=>false},trustedContents:()=>[wc],settingsWindow:null,testPageUrl:null,retargetAppPage,console});
+ const mainContext=vm.createContext({originalDownloadRefusal:{clear:()=>refusalClears++},runtimeBase:before,runtimeAuth:auth,runtimeBinding:null,runtimeBindingGeneration:0,pendingRuntimeRetargets:new Map(),acquireLibraryTransition:{held:()=>false},trustedContents:()=>[wc],mainWindow:{webContents:wc},mainPagesToRetry:new WeakMap(),settingsWindow:null,testPageUrl:null,retargetAppPage,console});
  vm.runInContext(main.slice(main.indexOf(main.includes('function currentRuntimeBinding(')?'function currentRuntimeBinding(':'function bindRuntime('),main.indexOf('function openSafeExternal(')),mainContext);
  let transition;
  if(main.includes('await acquireLibraryTransition'))transition=await createLibraryTransition({getContents:()=>[wc],getBase:()=>mainContext.runtimeBase,getRuntime:()=>runtime,fetchImpl:api})();

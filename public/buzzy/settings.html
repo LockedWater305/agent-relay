@@ -402,7 +402,15 @@
       // The settings bridge keeps a successful save/remove even when startup
       // fails, and returns that failure in data.reason rather than res.ok.
       function reportCredentialChange(status, data, completed) {
-        if (data?.status) renderStatus(data.status);
+        if (data?.status) {
+          renderStatus(data.status);
+          // A previous Connect result does not describe a saved manual key or
+          // a removed inference key. Keep the active-credential line separate.
+          if (status.id === "inference-status" && !connectingAccount
+            && connectCapability()?.enabled === true && data.status.inference?.provider !== "beezilla") {
+            $("connect-hint").textContent = connectHint;
+          }
+        }
         if (data?.reason || !(data?.started === true || data?.restarted === true)) {
           var advice = /Library|history|migration/i.test(data?.reason || "")
             ? "Keep this window open and retry from Settings after Library history is saved. Do not force-quit to apply the change."
