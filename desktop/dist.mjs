@@ -21,7 +21,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, posix, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireServerEntry, writeCspManifest } from "../scripts/build-desktop-csp.mjs";
 import { productionDependencyClosure, copyProductionDependency, ensurePgliteAssets } from "./stage-inputs.mjs";
@@ -73,7 +73,9 @@ function runCli(cwd, entry, args, env = process.env) {
 function runBuilder(builder, args, attempt) {
   // Only the direct locked packaging CLI receives the ID. Neither prebuild
   // child commands nor a separate electron-builder invocation can claim it.
-  runCli(DESKTOP, builder, args, { ...process.env, BZ_DESKTOP_STAGE_ATTEMPT: attempt });
+  runCli(DESKTOP, builder, args, {
+    ...process.env, BZ_DESKTOP_STAGE_ATTEMPT: attempt, BZ_DESKTOP_PACK_DIR: mode === "dir" ? "1" : "0",
+  });
 }
 
 async function stage(receiptFile) {
@@ -345,33 +347,42 @@ function localTestBanner() {
  * target writes the app under dist-desktop/ (macOS: mac-arm64/BeeZilla.app,
  * Windows: win-unpacked/). It is not an installer and not a release.
  */
-function packDir(builder, attempt) {
+function packDir(builder, attempt, pending) {
   const flag = { darwin: "--mac", win32: "--win", linux: "--linux" }[process.platform];
   if (!flag) throw new Error(`no electron-builder target for ${process.platform}`);
   log(`running electron-builder ${flag} dir (unpacked, no installer, no publish)…`);
   runBuilder(builder, [flag, "dir", "--publish", "never"], attempt);
-  // The production node_modules is added by the afterPack hook (after-pack.cjs)
-  // for every target, because extraResources drops a top-level node_modules.
-  // Check it really landed: without it the packaged runtime cannot start.
-  const resources = unpackedResources();
-  if (!existsSync(join(resources, "node_modules", "@electric-sql", "pglite"))) {
-    throw new Error(`packaged runtime has no node_modules under ${resources} — the afterPack hook did not run`);
+  const evidence = `${pending}.dir-output.json`;
+  let app, relativeApp;
+  try {
+    if (!lstatSync(evidence, { throwIfNoEntry: false })?.isFile()) throw new Error("no receipt");
+    ({ relativeApp } = JSON.parse(readFileSync(evidence, "utf8")));
+    if (typeof relativeApp !== "string" || !relativeApp || isAbsolute(relativeApp)) throw new Error("invalid output path");
+    app = resolve(OUT, relativeApp);
+    if (!inside(OUT, app) || relative(OUT, app) !== relativeApp ||
+        !lstatSync(OUT, { throwIfNoEntry: false })?.isDirectory() ||
+        relative(realpathSync(OUT), realpathSync(app)) !== relativeApp) {
+      throw new Error("output path outside expected build directory or redirected");
+    }
+  } catch {
+    throw new Error("electron-builder did not supply verified unpacked runtime evidence from this build");
   }
-  localTestBanner();
-  log("unpacked app written under dist-desktop/");
+  // Use the actual output path from this attempt, not the first historical
+  // platform directory that happens to exist. Check it again after the child
+  // exits so a later pack step cannot report a changed runtime as complete.
+  const expected = JSON.parse(readFileSync(pending, "utf8")).stagedRuntime;
+  const observed = observeStagedRuntime(app);
+  if (!expected?.sha256 || observed.sha256 !== expected.sha256 ||
+      observed.files !== expected.files || observed.bytes !== expected.bytes ||
+      !lstatSync(join(app, "node_modules", "@electric-sql", "pglite"), { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error("unpacked runtime now differs from this build's verified stage");
+  }
+  return join("dist-desktop", relativeApp);
 }
 
-/** The resources/app folder electron-builder wrote for this platform. */
-function unpackedResources() {
-  const macDirs = process.arch === "arm64" ? ["mac-arm64", "mac"] : ["mac", "mac-arm64"];
-  const candidates = process.platform === "darwin"
-    ? macDirs.map((d) => join(OUT, d, "BeeZilla.app", "Contents", "Resources", "app"))
-    : process.platform === "win32"
-      ? ["win-unpacked", "win-arm64-unpacked"].map((d) => join(OUT, d, "resources", "app"))
-      : ["linux-unpacked", "linux-arm64-unpacked"].map((d) => join(OUT, d, "resources", "app"));
-  const found = candidates.find((p) => existsSync(join(p, "package.json")));
-  if (!found) throw new Error(`no unpacked app under ${OUT} (looked in ${candidates.join(", ")})`);
-  return found;
+function inside(directory, path) {
+  const rel = relative(directory, path);
+  return Boolean(rel && !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
 }
 
 function lockedWindowsInstaller() {
@@ -438,10 +449,14 @@ if (mode === "stage" || mode === "all" || mode === "dir") {
         throw new Error(`electron-builder did not produce a fresh nonempty regular Windows installer output at ${installer}`);
       }
     }
-    if (mode === "dir") packDir(builder, attempt);
+    const unpacked = mode === "dir" ? packDir(builder, attempt, pending) : null;
     // Commit the stage-only receipt atomically after any requested packaging.
     // Windows output presence is reported separately, not an installer trust receipt.
     renameSync(pending, RECEIPT);
+    if (unpacked) {
+      localTestBanner();
+      log(`verified local unpacked app written at ${unpacked}`);
+    }
     if (installerOutput) log(`fresh Windows installer output present at ${installer} (${installerOutput.size} bytes; presence only)`);
   } catch (error) {
     // A later failure (including afterPack/packager failure) cannot leave
@@ -450,6 +465,7 @@ if (mode === "stage" || mode === "all" || mode === "dir") {
     throw error;
   } finally {
     rmSync(pending, { force: true });
+    if (mode === "dir") rmSync(`${pending}.dir-output.json`, { force: true });
     rmdirSync(STAGE_LOCK);
   }
 }

@@ -173,8 +173,10 @@ test("a failed builder preflight for pack:dir invalidates the old stage receipt 
   assert.equal(existsSync(receipt),false);
 });
 
-for (const mode of ["dir", "all"]) {
-  test(`${mode} passes only provisional evidence to its matching builder and promotes it after success`, t => {
+for (const [mode, output] of [["dir", "normal"], ["all", "normal"], ["dir", "mutated"], ["dir", "outside"]]) {
+  const description = output==="normal" ? `${mode} passes only provisional evidence to its matching builder and promotes it after success` :
+    `dir rejects ${output} unpacked runtime from the builder`;
+  test(description, t => {
     const {dir,out}=outputFixture(t,"valid");
     const meta={name:"electron-builder",version:"1.0.0",bin:{"electron-builder":"cli.js"}};
     out("desktop/package-lock.json",JSON.stringify({packages:{"node_modules/electron-builder":{...meta,integrity:"fixture"}}}));
@@ -190,8 +192,9 @@ for (const mode of ["dir", "all"]) {
       const hook=require(path.resolve("after-pack.cjs"));
       const stage=path.resolve("stage"), lock=path.join(stage,".build-lock");
       const mode=${JSON.stringify(mode)}, platform=mode==="all"?"win32":process.platform;
-      const outputName={win32:"win-unpacked",linux:"linux-unpacked",darwin:"mac"}[platform];
-      const appOutDir=path.resolve("..","dist-desktop",outputName);
+      const output=${JSON.stringify(output)};
+      const outputName=mode==="dir"?"exact-builder-selected-dir":"win-unpacked";
+      const appOutDir=path.resolve("..",output==="outside"?"other-dir":"dist-desktop",outputName);
       const context={appOutDir,electronPlatformName:platform,packager:{appInfo:{productFilename:"BeeZilla"}}};
       assert.equal(process.argv.at(-2),"--publish");
       assert.equal(process.argv.at(-1),"never");
@@ -210,12 +213,29 @@ for (const mode of ["dir", "all"]) {
         assert.equal(fs.existsSync(path.join(app,"node_modules")),false);
         process.env.BZ_DESKTOP_STAGE_ATTEMPT=attempt;
         await hook.default(context);
-        if (mode==="all") fs.writeFileSync(path.resolve("..",${JSON.stringify(installerPath)}),"fixture bytes, not an installer");
+        if (mode==="all") {
+          fs.writeFileSync(path.resolve("..",${JSON.stringify(installerPath)}),"fixture bytes, not an installer");
+        } else {
+          const marker=path.join(lock,"pending-"+process.ppid+"-"+attempt+".json.dir-output.json");
+          assert.deepEqual(JSON.parse(fs.readFileSync(marker,"utf8")),{
+            relativeApp:path.relative(path.resolve("..","dist-desktop"),app)
+          });
+          if (output==="mutated") fs.writeFileSync(path.join(app,"package.json"),'{"changed":true}');
+        }
       })().catch(error=>{console.error(error);process.exitCode=1;});
     `);
     const packed=invoke(dir,false,mode);
+    if (output!=="normal") {
+      assert.notEqual(packed.status,0,packed.stdout+packed.stderr);
+      assert.match(packed.stderr,output==="mutated"?/unpacked runtime now differs/i:/outside the expected dist-desktop directory/i);
+      assert.doesNotMatch(packed.stdout,/verified local unpacked app written/i);
+      assert.equal(existsSync(join(dir,"desktop/stage/MANIFEST.json")),false);
+      assert.equal(existsSync(join(dir,"desktop/stage/.build-lock")),false);
+      return;
+    }
     assert.equal(packed.status,0,packed.stdout+packed.stderr);
     assert.match(packed.stdout,/staged and unpacked runtime bytes verified/i);
+    if (mode==="dir") assert.match(packed.stdout,/verified local unpacked app written at dist-desktop[\\/]exact-builder-selected-dir/);
     if (mode==="all") {
       assert.match(packed.stdout,/fresh Windows installer output present.*presence only/i);
       assert.equal(readFileSync(join(dir,installerPath),"utf8"),"fixture bytes, not an installer");
@@ -352,4 +372,27 @@ test("a competing stage cannot invalidate the active owner receipt during packag
   const retry=invoke(dir);
   assert.equal(retry.status,0,retry.stdout+retry.stderr);
   assert.ok(existsSync(receipt));
+});
+
+test("pack:dir refuses stale unpacked runtime when this builder exits zero without afterPack",t=>{
+  const {dir,out}=outputFixture(t,"valid");
+  const meta={name:"electron-builder",version:"1.0.0",bin:{"electron-builder":"cli.js"}};
+  out("desktop/package-lock.json",JSON.stringify({packages:{"node_modules/electron-builder":{...meta,integrity:"fixture"}}}));
+  out("desktop/node_modules/electron-builder/package.json",JSON.stringify(meta));
+  out("desktop/node_modules/electron-builder/cli.js",'require("node:fs").writeFileSync("../builder-called","called");');
+  const output = {
+    win32:"win-unpacked/resources/app",
+    linux:"linux-unpacked/resources/app",
+    darwin:"mac/BeeZilla.app/Contents/Resources/app",
+  }[process.platform];
+  assert.ok(output);
+  out("dist-desktop/"+output+"/package.json",'{"name":"old unrelated unpacked stage"}');
+  out("dist-desktop/"+output+"/node_modules/@electric-sql/pglite/package.json",'{"name":"old stub"}');
+  const result=invoke(dir,false,"dir");
+  assert.notEqual(result.status,0,result.stdout+result.stderr);
+  assert.match(result.stderr,/did not supply verified unpacked runtime evidence from this build/i);
+  assert.doesNotMatch(result.stdout,/unpacked app written under dist-desktop/i);
+  assert.equal(existsSync(join(dir,"builder-called")),true);
+  assert.equal(existsSync(join(dir,"desktop/stage/MANIFEST.json")),false);
+  assert.equal(readFileSync(join(dir,"dist-desktop",output,"package.json"),"utf8"),'{"name":"old unrelated unpacked stage"}');
 });

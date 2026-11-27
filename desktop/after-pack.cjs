@@ -16,8 +16,8 @@
  */
 "use strict";
 
-const { cpSync, lstatSync, readFileSync, readdirSync } = require("node:fs");
-const { join } = require("node:path");
+const { cpSync, lstatSync, readFileSync, readdirSync, writeFileSync } = require("node:fs");
+const { isAbsolute, join, relative, sep } = require("node:path");
 
 /** Where resources/ lives inside the unpacked app for this platform. */
 function resourcesDir(context) {
@@ -83,6 +83,13 @@ exports.default = async function afterPack(context) {
   const { observeStagedRuntime } = await import("./stage-receipt.mjs");
   const receiptFile = stageReceiptFile(stage);
   const expected = readRuntimeReceipt(receiptFile);
+  let relativeApp;
+  if (process.env.BZ_DESKTOP_PACK_DIR === "1" && receiptFile !== join(stage, "MANIFEST.json")) {
+    relativeApp = relative(join(__dirname, "..", "dist-desktop"), app);
+    if (!relativeApp || isAbsolute(relativeApp) || relativeApp === ".." || relativeApp.startsWith(`..${sep}`)) {
+      throw new Error("afterPack: unpacked runtime is outside the expected dist-desktop directory");
+    }
+  }
   const verify = (directory, label) => {
     const observed = observeStagedRuntime(directory);
     if (observed.sha256 !== expected.sha256 || observed.files !== expected.files || observed.bytes !== expected.bytes) {
@@ -106,7 +113,12 @@ exports.default = async function afterPack(context) {
       current.files !== expected.files || current.bytes !== expected.bytes) {
     throw new Error("afterPack: stage receipt changed during packaging — rebuild the desktop output");
   }
-  console.log(`  • afterPack: staged and unpacked runtime bytes verified at ${app}`);
+  if (relativeApp) {
+    // Only the lock-matched dir child records relative build output. Nothing
+    // persists outside its attempt, and no machine-specific path is recorded.
+    writeFileSync(`${receiptFile}.dir-output.json`, JSON.stringify({ relativeApp }), { flag: "wx" });
+  }
+  console.log(`  • afterPack: staged and unpacked runtime bytes verified at ${relativeApp ? join("dist-desktop", relativeApp) : app}`);
 };
 
 // For tests.
