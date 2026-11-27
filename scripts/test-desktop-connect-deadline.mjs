@@ -129,3 +129,62 @@ for (const stage of ["first", "retry"]) {
     });
   }
 }
+
+const optionalSearch = { status: 200, body: { ok: true, token: "synthetic-search-only" } };
+const optionalProfile = { status: 200, user: { name: "Fixture", email: "fixture@invalid.example" } };
+
+for (const [name, delayedStep] of [["search", SEARCH_MINT_SCRIPT], ["profile", PROFILE_SCRIPT]]) {
+  for (const completion of ["timeout", "rejected transport", "late valid response"]) {
+    test(`window closed during optional ${name} (${completion}) leaves no inference, search or profile result to save`, async () => {
+      let open = true, closes = 0;
+      const scripts = [];
+      const result = await within(connectAccount({
+        baseUrl, operationTimeoutMs: 35,
+        open: async () => {},
+        isOpen: () => open,
+        evaluate(script) {
+          scripts.push(script);
+          if (script === MINT_SCRIPT) return mint;
+          const valid = script === SEARCH_MINT_SCRIPT ? optionalSearch : optionalProfile;
+          if (script !== delayedStep) return valid;
+          return Promise.resolve().then(() => {
+            open = false;
+            if (completion === "timeout") return never();
+            if (completion === "rejected transport") throw new Error("ERR_CONNECTION_REFUSED");
+            return valid;
+          });
+        },
+        close: () => { closes++; return never(); },
+      }));
+      assert.equal(result.ok, false);
+      assert.equal(result.cancelled, true);
+      assert.equal(result.needsSignIn, true);
+      assert.equal(result.unreachable, undefined);
+      assert.equal(result.token, undefined);
+      assert.equal(result.search?.token, undefined);
+      assert.equal(result.account, undefined);
+      assert.deepEqual(scripts, name === "search"
+        ? [MINT_SCRIPT, SEARCH_MINT_SCRIPT] : [MINT_SCRIPT, SEARCH_MINT_SCRIPT, PROFILE_SCRIPT]);
+      assert.equal(closes, 1);
+    });
+  }
+}
+
+test("normal owned cleanup after successful optional results does not cancel Connect", async () => {
+  let open = true, closes = 0;
+  const result = await within(connectAccount({
+    baseUrl, operationTimeoutMs: 100,
+    open: async () => {},
+    isOpen: () => open,
+    evaluate: (script) => script === MINT_SCRIPT ? mint
+      : script === SEARCH_MINT_SCRIPT ? optionalSearch : optionalProfile,
+    close: () => { closes++; open = false; },
+  }));
+  assert.equal(open, false);
+  assert.equal(closes, 1);
+  assert.equal(result.ok, true);
+  assert.equal(result.cancelled, undefined);
+  assert.equal(result.token, mint.body.token);
+  assert.equal(result.search.token, optionalSearch.body.token);
+  assert.deepEqual(result.account, optionalProfile.user);
+});

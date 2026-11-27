@@ -233,7 +233,7 @@ export async function connectAccount(deps) {
 
   const operationTimeout = duration(deps.operationTimeoutMs, 15_000);
   const evaluate = (script, ms = operationTimeout) => bounded(() => deps.evaluate(script), ms);
-  const cancelledMint = { ok: false, needsSignIn: true, cancelled: true, error: "BeeZilla account connection was cancelled." };
+  const cancelledOutcome = { ok: false, needsSignIn: true, cancelled: true, error: "BeeZilla account connection was cancelled." };
   const mintWhileOpen = async (ms) => {
     let raw;
     try {
@@ -241,12 +241,12 @@ export async function connectAccount(deps) {
     } catch (error) {
       // A destroyed window can reject or never resolve its borrowed JavaScript.
       // Do not turn a user close into a network diagnosis when the bound expires.
-      if (deps.isOpen?.() === false) return cancelledMint;
+      if (deps.isOpen?.() === false) return cancelledOutcome;
       throw error;
     }
     // A result arriving after the owner closed the window is not permission to
     // accept its credentials, even if the server minted them successfully.
-    return deps.isOpen?.() === false ? cancelledMint : interpretMintResult(raw);
+    return deps.isOpen?.() === false ? cancelledOutcome : interpretMintResult(raw);
   };
   // The BrowserWindow owns the pending browser work. Closing it also ends
   // a slow navigation or an evaluation whose response missed its deadline.
@@ -296,11 +296,15 @@ export async function connectAccount(deps) {
     // Inference is in hand; now the search half. It runs while the window is still
     // open (the session lives there), and its problems never undo the sign-in.
     if (outcome?.ok) {
+      // The mandatory token is not committed yet. If the owner closes the
+      // window while we wait on optional data, discard the whole result.
+      if (deps.isOpen?.() === false) return cancelledOutcome;
       try {
         search = interpretSearchMintResult(await evaluate(SEARCH_MINT_SCRIPT));
       } catch (err) {
         search = { ok: false, error: `search token: ${err instanceof Error ? err.message : err}` };
       }
+      if (deps.isOpen?.() === false) return cancelledOutcome;
       // Same window, same session: who is this? Adopted by the local owner row.
       try {
         const raw = await evaluate(PROFILE_SCRIPT);
@@ -309,6 +313,7 @@ export async function connectAccount(deps) {
       } catch {
         /* identity is a nicety, not a requirement */
       }
+      if (deps.isOpen?.() === false) return cancelledOutcome;
     }
   } catch (err) {
     outcome = { ok: false, error: `could not reach BeeZilla: ${err instanceof Error ? err.message : err}` };
