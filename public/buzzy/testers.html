@@ -173,6 +173,14 @@
                 (f.has_screenshot ? '<button class="ghost" type="button" data-shot="' + esc(f.id) + '">See the screenshot</button><div class="shot" hidden></div>' : "") +
                 '</div>';
             }).join("") : '<p class="empty">No reports yet.</p>';
+            // This endpoint returns the newest 200, without a total count.
+            if (rows.length === 200) {
+              var notice = document.createElement("p");
+              notice.className = "status";
+              notice.setAttribute("role", "status");
+              notice.textContent = "Showing the newest 200 reports. Older reports may not be shown in this view.";
+              reports.prepend(notice);
+            }
             gate.hidden = true;
             feedbackLoadStatus.hidden = true;
             testerBody.hidden = false;

@@ -225,3 +225,46 @@ test("a late plan success cannot update a detached panel", async t => {
   assert.doesNotMatch(status, /is on pro/i);
   assert.equal(await page.locator("#body").count(), 0);
 });
+
+const capNotice = /Older reports may not be shown in this view/i;
+const testerReports = count => Array.from({ length: count }, (_, index) => ({
+  ...sample, id: "fixture-list-" + index, ref: "SYNTHETIC-REPORT-" + (index + 1),
+  has_screenshot: false,
+}));
+
+test("the rendered Testers list warns about the 200-report cap without claiming there are older reports", async t => {
+  const page = await view(t, { list: { status: 200, json: { ok: true, feedback: testerReports(200) } } });
+  await settled(page);
+  assert.equal(await page.locator("#reports .report").count(), 200);
+  const notice = page.locator("#reports").getByRole("status").filter({ hasText: capNotice });
+  assert.equal(await notice.count(), 1);
+  assert.equal(await notice.isVisible(), true);
+  assert.match(await notice.textContent(), /Showing the newest 200 reports\./i);
+  await assertReads(page, ["/api/buzzy/entitlement", reportPath]);
+});
+
+test("a valid 199-report Testers response does not show a cap warning", async t => {
+  const page = await view(t, { list: { status: 200, json: { ok: true, feedback: testerReports(199) } } });
+  await settled(page);
+  assert.equal(await page.locator("#reports .report").count(), 199);
+  assert.equal(await page.getByText(capNotice).count(), 0);
+});
+
+test("a malformed 200-entry Testers response does not advertise a loaded capped queue", async t => {
+  const page = await view(t, { list: { status: 200, json: { ok: true, feedback: [...testerReports(199), null] } } });
+  await settled(page);
+  await assertUnavailable(page);
+  assert.equal(await page.getByText(capNotice).count(), 0);
+});
+
+test("observed permission loss removes a previously visible Testers cap warning", async t => {
+  const page = await view(t, { list: { status: 200, json: { ok: true, feedback: [sample, ...testerReports(199)] } },
+    screenshot: { status: 403, json: { ok: false } } });
+  await settled(page);
+  assert.equal(await page.getByText(capNotice).count(), 1);
+  await page.getByRole("button", { name: "See the screenshot" }).click();
+  await page.waitForFunction(() => !document.getElementById("gate").hidden);
+  assert.equal(await page.locator("#body").isVisible(), false);
+  assert.equal(await page.getByText(capNotice).count(), 0);
+  assert.equal(await page.locator("#reports .report").count(), 0);
+});
