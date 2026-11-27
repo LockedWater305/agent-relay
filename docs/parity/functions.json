@@ -204,7 +204,7 @@
     },
     {
       "id": "nav.canonical",
-      "name": "One nav \u2014 eight links, active state from the path",
+      "name": "One nav \u2014 shared links, active state from the path",
       "owner": "buzzy",
       "state": "both",
       "web": {
@@ -214,7 +214,7 @@
         ],
         "pages": [
           "talk",
-          "index",
+          "library",
           "memory",
           "remember",
           "experts",
@@ -232,7 +232,7 @@
         ],
         "pages": [
           "talk",
-          "index",
+          "library",
           "memory",
           "remember",
           "experts",
@@ -244,7 +244,7 @@
           "graph"
         ]
       },
-      "note": "Same 12 pages, same #bzNav block, same absolute asset URLs as web \u2014 the desktop no longer carries its own per-page navs."
+      "note": "Shared #bzNav and absolute asset URLs. Library is a page; index.html is a redirect alias."
     },
     {
       "id": "library.documents",
@@ -257,7 +257,7 @@
           "src/lib/buzzy/paper.ts"
         ],
         "pages": [
-          "index"
+          "library"
         ],
         "routes": [
           "/api/buzzy/documents",
@@ -273,7 +273,7 @@
           "src/lib/buzzy/paper.ts"
         ],
         "pages": [
-          "index"
+          "library"
         ],
         "routes": [
           "/api/buzzy/documents",
@@ -283,7 +283,7 @@
           "/api/buzzy/review"
         ]
       },
-      "note": "/buzzy/library serves index.html on both surfaces."
+      "note": "/buzzy/library serves library.html; the legacy index.html alias redirects to Talk."
     },
     {
       "id": "assets.shelf",

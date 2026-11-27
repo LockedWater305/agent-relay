@@ -128,13 +128,35 @@ function pagesOf(root) {
     .sort();
 }
 
+// Read only known static declarations; never import code from an evidence tree.
+function literalPageNames(list) {
+  if (!list.trim()) return [];
+  const names = [];
+  const parts = list.trim().replace(/,$/, "").split(",");
+  for (const part of parts) {
+    const item = part.trim().match(/^(['"])([a-z][a-z0-9-]*)\1$/);
+    if (!item) return null;
+    names.push(item[2]);
+  }
+  return [...new Set(names)].sort();
+}
+
 function pageSetOf(root) {
   const file = join(root, "src/lib/buzzy/pages.nitro.ts");
-  if (!existsSync(file)) return { declared: [], file: null };
-  const src = readFileSync(file, "utf8");
-  const m = src.match(/const PAGES = new Set\(\[([^\]]*)\]\)/);
-  const declared = m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]).sort() : [];
-  return { declared, file };
+  try {
+    const src = readFileSync(file, "utf8");
+    // Older hosted/desktop trees kept the allowlist directly in the handler.
+    const inline = src.match(/^\s*const\s+PAGES\s*=\s*new Set(?:<string>)?\s*\(\s*\[([^\]]*)\]\s*\)/m);
+    if (inline) return literalPageNames(inline[1]);
+    // Current lines share one allowlist with the legacy .html redirect helper.
+    if (/^\s*const\s+PAGES\s*=\s*new Set(?:<string>)?\s*\(\s*BUZZY_PAGE_NAMES\s*\)/m.test(src) &&
+        /^\s*import\s*\{\s*BUZZY_PAGE_NAMES(?:\s*,[^}]*)?\s*\}\s*from\s*["']\.\/page-alias["']/m.test(src)) {
+      const alias = readFileSync(join(root, "src/lib/buzzy/page-alias.ts"), "utf8");
+      const named = alias.match(/^\s*export\s+const\s+BUZZY_PAGE_NAMES\s*=\s*Object\.freeze\s*\(\s*\[([^\]]*)\]\s+as const\s*\)/m);
+      if (named) return literalPageNames(named[1]);
+    }
+  } catch { /* missing or unreadable is not evidence of a missing route */ }
+  return null;
 }
 
 function migrationsOf(root) {
@@ -240,9 +262,9 @@ function inventory(root, label) {
     head: gitHead(root),
     version: versionOf(root),
     pages,
-    pageSet: pageSet.declared,
+    pageSet,
     /** pages that exist on disk but are not routable — a real defect class */
-    unroutable: pages.filter((p) => !pageSet.declared.includes(p)),
+    unroutable: pageSet ? pages.filter((p) => !pageSet.includes(p)) : null,
     migrations: migrationsOf(root),
     routes: routesOf(root),
   };
@@ -332,8 +354,15 @@ if (register) {
   lines.push(rule());
 }
 
-for (const p of web.unroutable) warnings.push(`web page ${p}.html exists but is not in PAGES — it will 404`);
-for (const p of desk.unroutable) warnings.push(`desktop page ${p}.html is not in PAGES — reachable only as a static file`);
+for (const surface of [web, desk]) {
+  if (surface.unroutable === null) {
+    warnings.push(`${surface.label} page allowlist unavailable or unrecognized — route declaration check not performed`);
+    continue;
+  }
+  for (const p of surface.unroutable) {
+    warnings.push(`${surface.label} page ${p}.html exists but is not in the BeeZilla page allowlist`);
+  }
+}
 
 /* --- unregistered divergence -------------------------------------------- */
 function undeclared(list, surface, kind) {
@@ -387,7 +416,7 @@ if (BUNDLE && existsSync(BUNDLE)) {
     /* not built */
   }
   bundleReport = { pages: bPages.length, migrations: bMigrations.length, builtAt, stalePages, staleMigrations, extraPages };
-  lines.push(`INSTALLED BUNDLE ${BUNDLE}`);
+  lines.push(`INSTALLED BUNDLE ${BUNDLE} (layout only; revision not verified)`);
   lines.push(`  pages ${bPages.length} · migrations ${bMigrations.length} · payload mtime ${builtAt}`);
   lines.push(`  behind its source tree: pages ${stalePages.join(", ") || "none"} · migrations ${staleMigrations.length}`);
   lines.push(`  not in source tree: ${extraPages.join(", ") || "none"}`);
@@ -415,6 +444,8 @@ if (opt("--json")) {
         desktop: { root: desk.root, head: desk.head, version: desk.version },
         divergence: { onlyWebPages, onlyDeskPages, onlyWebRoutes, onlyDeskRoutes, onlyWebMigrations, onlyDeskMigrations },
         bundle: bundleReport,
+        evidenceScope: bundleReport ? "source-and-runtime-layout" : "source-only",
+        warnings,
         problems,
         orphans,
         pass: !failed,

@@ -80,3 +80,58 @@ test('source-only --inventory is still usable but cannot silently ignore explici
   assert.equal((await cli('--inventory')).code,0);
   assert.equal((await cli('--inventory','--bundle',makeBundle('ignored-before'))).code,2);
 });
+
+function makePageSource(name, handler, allowlist) {
+  const dir = path.join(root, name);
+  for (const rel of ['src/lib/buzzy', 'public/buzzy', 'migrations']) fs.mkdirSync(path.join(dir, rel), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src/lib/buzzy/pages.nitro.ts'), handler);
+  if (allowlist !== undefined) fs.writeFileSync(path.join(dir, 'src/lib/buzzy/page-alias.ts'), allowlist);
+  for (const page of ['talk', 'library']) fs.writeFileSync(path.join(dir, 'public/buzzy', page + '.html'), 'exact source page');
+  fs.writeFileSync(path.join(dir, 'migrations/001_test.sql'), 'current source migration');
+  return dir;
+}
+test('current imported allowlist is recognized without evaluating the evidence source', async () => {
+  const dir = makePageSource(
+    'imported',
+    'import { BUZZY_PAGE_NAMES, htmlAliasLocation } from "./page-alias";\nconst PAGES = new Set<string>(BUZZY_PAGE_NAMES);',
+    'export const BUZZY_PAGE_NAMES = Object.freeze([\n  "talk", "library",\n] as const);\nthrow new Error("do not import this file");',
+  );
+  const inv = await cli('--web', dir, '--desktop', dir, '--inventory');
+  assert.deepEqual(JSON.parse(inv.lines).desktop.pageSet, ['library', 'talk']);
+  const r = await cli('--web', dir, '--desktop', dir);
+  assert.equal(r.code, 0, r.lines);
+  assert.doesNotMatch(r.lines, /WARN.*page/);
+});
+test('inline legacy list still finds a genuinely missing declaration', async () => {
+  const dir = makePageSource('legacy', 'const PAGES = new Set(["talk"]);');
+  const inv = await cli('--web', dir, '--desktop', dir, '--inventory');
+  assert.deepEqual(JSON.parse(inv.lines).desktop.unroutable, ['library']);
+  const r = await cli('--web', dir, '--desktop', dir);
+  assert.match(r.lines, /WARN.*library.html exists but is not in the BeeZilla page allowlist/);
+  assert.doesNotMatch(r.lines, /WARN.*talk.html/);
+});
+test('unsupported or missing page list is unknown, not an invented 404', async () => {
+  const dir = makePageSource('unknown', 'const PAGES = new Set(resolveFromBuild());');
+  const r = await cli('--web', dir, '--desktop', dir);
+  assert.match(r.lines, /WARN.*allowlist unavailable or unrecognized/);
+  assert.doesNotMatch(r.lines, /will 404|reachable only as a static file|talk.html exists but is not/);
+});
+test('a saved revision with correct filenames is labeled layout-only, never revision-verified', async () => {
+  const dir = makePageSource('expected-source', 'const PAGES = new Set(["talk", "library"]);');
+  const bundle = makeBundle('other-revision-same-layout');
+  fs.writeFileSync(path.join(bundle, 'public/buzzy/library.html'), 'old revision page');
+  assert.notDeepEqual(fs.readFileSync(path.join(dir, 'public/buzzy/talk.html')), fs.readFileSync(path.join(bundle, 'public/buzzy/talk.html')));
+  const report = path.join(root, 'comparison.json');
+  const source = await cli('--web', dir, '--desktop', dir, '--json', report);
+  assert.equal(source.code, 0, source.lines);
+  const src = JSON.parse(fs.readFileSync(report, 'utf8'));
+  assert.equal(src.bundle, null);
+  const compared = await cli('--web', dir, '--desktop', dir, '--bundle', bundle, '--json', report);
+  assert.equal(compared.code, 0, compared.lines);
+  const data = JSON.parse(fs.readFileSync(report, 'utf8'));
+  assert.deepEqual(data.bundle.stalePages, []);
+  assert.deepEqual(data.bundle.staleMigrations, []);
+  assert.match(compared.lines, /layout only; revision not verified/);
+  assert.equal(src.evidenceScope, 'source-only');
+  assert.equal(data.evidenceScope, 'source-and-runtime-layout');
+});

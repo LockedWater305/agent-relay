@@ -45,11 +45,18 @@ It fails (exit 1) when:
    (register rot);
 3. an entry's declared `state` disagrees with what the evidence proves.
 
-It also prints behaviour markers side by side (canonical nav, listen mode, recorder/ASR,
-asset shelf, local runtime) and, if a built app is present, whether that **install is behind
-its own branch** — the failure a user actually feels.
+It also prints source markers and recognizes the current shared page allowlist as
+well as the old inline list. If the allowlist can't be read, the route-declaration
+check is explicitly unavailable; it does not report every page as a 404.
 
-Exit 2 means a tree could not be read (wrong path), never "something is wrong".
+When checking a staged runtime, pass its path explicitly with `--bundle`.
+The bundle section is **layout only**: it checks page/migration names, not
+the bytes, exact release revision, served behavior, or signature. A saved
+build from another revision can have the same layout and pass. Require separate,
+independently approved provenance binding the exact full source commit/tree
+to the actual bundle or installer bytes before any release or native claim.
+Using the same checkout for both source inputs is a control, not a hosted
+comparison. Exit 2 means required input could not be read or validated.
 
 ## Historical source/register state — 2026-11-03
 
