@@ -392,3 +392,30 @@ test("all current account entry paths use the guarded command, packaged modules 
   assert.match(pkg.scripts["test:desktop-boundaries"], /test-desktop-connect-guard\.mjs/);
   for (const file of ["main.mjs", "settings.mjs", "connect.mjs", "preload.cjs"]) assert.ok(desktop.build.files.includes(file));
 });
+
+test("Connect reports saved credentials without disclosing private restart details", async () => {
+  const email = "fixture-owner@example.invalid", token = "fixture-managed-value";
+  const cx = await mainFixture(undefined, async () => ({
+    ok: true, token, account: { name: "Fixture owner", email },
+    search: { ok: false, notDeployed: true },
+  }));
+  cx.handlers.saveInference = async (cfg) => {
+    assert.equal(cfg.key, token);
+    return { saved: { key: "masked" }, restarted: false, reason: "Local runtime did not stop for " + email };
+  };
+  const bridge = preloadFixture((channel, payload) => cx.ipc.get(channel)(cx.event, payload));
+  let wire;
+  const page = rendererFixture({
+    get: async () => ({ ok: true, data: state() }),
+    connect: async () => (wire = await bridge.settings.connect()),
+  });
+  await page.idle();
+  await page.click();
+  assert.equal(wire.ok, true);
+  assert.equal(wire.data.ok, false);
+  const visible = page.nodes.get("connect-hint").textContent;
+  assert.match(visible, /credentials were saved.*did not restart.*Retry from Settings without force-quitting/i);
+  assert.ok(!visible.includes(email));
+  assert.ok(!JSON.stringify(wire).includes(email));
+  assert.ok(!JSON.stringify(wire).includes(token));
+});

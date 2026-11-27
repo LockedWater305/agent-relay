@@ -699,7 +699,7 @@ async function performConnect() {
       token: outcome.search.token, gateway: outcome.search.endpoint, expiresAt: outcome.search.expiresAt,
     } : null,
   });
-  console.log(`[desktop] connect: BeeZilla inference connected (expires ${outcome.expiresAt ?? "unknown"}), runtime ${saved.reason ? `restart failed: ${saved.reason}` : saved.started ? "started" : "restarted"}`);
+  console.log(`[desktop] connect: BeeZilla inference connected (expires ${outcome.expiresAt ?? "unknown"}), runtime ${saved.reason ? "restart failed" : saved.started ? "started" : "restarted"}`);
 
   // Search is a second capability and is allowed to be missing. Saying so once, at
   // connect time, is better than a user discovering it later in a chat turn.
@@ -715,7 +715,10 @@ async function performConnect() {
     console.warn(`[desktop] connect: search token unavailable — ${outcome.search.error}`);
   }
 
-  return { ...outcome, ...(restartFailure ? { ok: false, error: `Account credentials were saved, but BeeZilla did not restart. ${restartFailure} Retry from Settings without force-quitting.` } : {}), token: undefined, search: { ...outcome.search, ...(saved.searchError ? { ok: false, error: saved.searchError } : {}), token: undefined, saved: searchSaved }, savedTo: saved.saved?.key };
+  if (restartFailure) {
+    return { ok: false, error: "Account credentials were saved, but BeeZilla did not restart. Retry from Settings without force-quitting." };
+  }
+  return { ...outcome, token: undefined, search: { ...outcome.search, ...(saved.searchError ? { ok: false, error: saved.searchError } : {}), token: undefined, saved: searchSaved }, savedTo: saved.saved?.key };
 }
 
 let openingSettings = null;
