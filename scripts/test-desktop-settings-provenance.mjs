@@ -768,3 +768,16 @@ for (const mode of ["resolved-failure", "rejected-failure", "unavailable", "open
     assert.ok(!JSON.stringify(f.responses.at(-1).result).includes(privateFolder), "open reply does not repeat private path");
   });
 }
+
+test("renderer Settings Save refuses managed inference without private adoption", async (t) => {
+  const fx = await fixture(t, { stored: byok });
+  const file = path.join(fx.dir, "inference.json");
+  const before = fs.readFileSync(file, "utf8"), runtime = fx.runtime(), lifecycle = [...fx.lifecycle];
+  const reply = await fx.bridge.saveInference(managed);
+  assert.ok(fs.readFileSync(file, "utf8") === before, "private-managed provider is not written by Settings Save");
+  assert.equal(fx.runtime(), runtime, "invalid Settings save cannot restart the runtime");
+  assert.deepEqual(fx.lifecycle, lifecycle);
+  assert.equal(fx.starts.length, 1);
+  assert.deepEqual(reply, { ok: false, error: "Use Connect BeeZilla account to set up managed inference." });
+  checkStored(await fx.status(), byok);
+});

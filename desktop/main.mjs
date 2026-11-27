@@ -508,6 +508,9 @@ function registerSettingsIpc() {
         if (!isTrustedSender(event, { base: runtimeBase, contents: trustedContents(), testPageUrl })) {
           return { ok: false, error: "This action is available only from the BeeZilla app window." };
         }
+        if (settingsAction === "saveInference" && payload?.provider === "beezilla") {
+          return { ok: false, error: "Use Connect BeeZilla account to set up managed inference." };
+        }
         const data = await fn(payload);
         return { ok: true, data: settingsAction ? publicSettingsResult(data) : data };
       } catch (err) {
