@@ -257,3 +257,51 @@ test("a first ASR that never responds cannot strand a later successful capture",
   await q.voice(0,"EXPIRED FIRST NOTE");
   assert.equal(await q.text.inputValue(),"SECOND NOTE");
 });
+
+const voiceNotice = "Pressing Stop or reaching the time limit sends your recording to an online transcription service, even if you never send feedback.";
+async function micDescription(q) {
+  const cdp = await q.page.context().newCDPSession(q.page);
+  try {
+    const { root } = await cdp.send("DOM.getDocument");
+    const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector:"#bzFbMic" });
+    const { nodes } = await cdp.send("Accessibility.getPartialAXTree", { nodeId, fetchRelatives:false });
+    return nodes[0].description?.value;
+  } finally {
+    await cdp.detach();
+  }
+}
+
+test("before recording, Speak visibly and accessibly explains automatic online transcription separately from sending a report", async t => {
+  const q = await website(t);
+  const notice = q.page.getByText(voiceNotice, { exact:true });
+  assert.equal(await notice.count(),1,"the note must be visible before invoking the microphone");
+  assert.equal(await notice.isVisible(),true);
+  await q.mic.focus();
+  assert.equal(await micDescription(q),voiceNotice);
+  assert.equal(await q.page.getByText(/Never included in the report: .*audio/).isVisible(),true);
+  assert.deepEqual(await q.stats(),{requested:0,contextCount:0,closes:[],stops:[],transcriptions:0,reports:0});
+});
+
+test("the disclosure stays available while listening and after Stop sends audio before any report", async t => {
+  const q = await website(t);
+  await begin(q);
+  await q.feed();
+  assert.match(await q.hint.textContent(), /^Listening/);
+  assert.equal(await q.page.getByText(voiceNotice, { exact:true }).count(),1);
+  assert.equal(await micDescription(q),voiceNotice);
+  await q.mic.click();
+  assert.equal(await q.page.getByText(voiceNotice, { exact:true }).isVisible(),true);
+  assert.equal(await micDescription(q),voiceNotice);
+  assert.deepEqual(await q.stats(),{requested:1,contextCount:1,closes:[1],stops:[1],transcriptions:1,reports:0});
+});
+
+test("time-limit auto-Stop also sends audio before any report, as described", async t => {
+  const q = await website(t);
+  await q.page.clock.install();
+  await begin(q);
+  await q.page.clock.fastForward(60001);
+  await q.feed();
+  assert.equal((await q.stats()).transcriptions,1);
+  assert.equal((await q.stats()).reports,0);
+  assert.equal(await q.mic.getAttribute("aria-pressed"),"false");
+});

@@ -931,8 +931,8 @@
    * same way as the chat panel: full-width sheet at 390px, top-right at 1280px.
    *
    * The reference number is the anonymous user's only handle, so it is shown on
-   * the confirmation and nowhere else. Nothing is sent until Send is pressed;
-   * the mic only fills the textarea.
+   * the confirmation and nowhere else. Sending the report is separate from
+   * sending a voice recording for transcription when recording stops.
    */
   function feedbackControl(nav) {
     var btn = document.createElement("button");
@@ -995,9 +995,10 @@
         '<label class="bz-fb-label" for="bzFbText">What happened, or what would help?</label>',
         '<textarea id="bzFbText" class="bz-fb-text" maxlength="5000" rows="4" placeholder="The more concrete the better — what you did, what you expected, what happened."></textarea>',
         '<div class="bz-fb-row">',
-        '  <button type="button" id="bzFbMic" class="bz-fb-mic" aria-pressed="false">&#127908; Speak</button>',
+        '  <button type="button" id="bzFbMic" class="bz-fb-mic" aria-pressed="false" aria-describedby="bzFbVoiceNotice">&#127908; Speak</button>',
         '  <span class="bz-fb-hint" id="bzFbHint">Up to 60 seconds.</span>',
         '</div>',
+        '<div class="bz-fb-hint" id="bzFbVoiceNotice">Pressing Stop or reaching the time limit sends your recording to an online transcription service, even if you never send feedback.</div>',
         '<label class="bz-fb-check"><input type="checkbox" id="bzFbDiag" /> Include a diagnostic file</label>',
         '<div class="bz-fb-row">',
         '  <label class="bz-fb-link" for="bzFbShot">Attach a screenshot (optional)</label>',
@@ -1011,7 +1012,7 @@
         '<button type="button" id="bzFbSee" class="bz-fb-link" aria-expanded="false">See what\u2019s included</button>',
         '<pre id="bzFbDiagBox" class="bz-fb-diag" hidden></pre>',
         '<p class="bz-fb-never" id="bzFbStamped" hidden>The server stamps this record with its build sha, shown in the report as \u201cstamped by the server\u201d. Nothing else is added to the preview above.</p>',
-        '<p class="bz-fb-never">Never included: cookies, session or auth tokens, passwords, API keys, request or response bodies, chat text or history, audio, localStorage, other tabs, or your IP address.</p>',
+        '<p class="bz-fb-never">Never included in the report: cookies, session or auth tokens, passwords, API keys, request or response bodies, chat text or history, audio, localStorage, other tabs, or your IP address.</p>',
         '<div class="bz-fb-actions"><button type="button" id="bzFbSend" class="bz-fb-send">Send feedback</button></div>',
         '<p class="bz-fb-status" id="bzFbStatus" role="status"></p>'
       ].join("");
