@@ -43,6 +43,8 @@
   .turn p { margin: 0.2rem 0 0; white-space: pre-wrap; }
   details summary { cursor: pointer; color: var(--bz-muted); font-size: 0.84rem; }
   .back { color: var(--bz-muted); text-decoration: none; font-size: 0.84rem; }
+  .project-retry { margin-top: .55rem; padding: .3rem .65rem; border: 1px solid var(--bz-muted);
+    border-radius: 6px; background: var(--bz-card); color: var(--bz-text); font: inherit; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -62,7 +64,8 @@
   </nav>
   <a class="back" href="/buzzy/talk" id="backLink">← Talk</a>
   <h1 id="title">Project</h1>
-  <div class="meta" id="meta"></div>
+  <div class="meta" id="meta" aria-live="polite"></div>
+  <button type="button" id="projectRetry" class="project-retry" hidden>Retry project</button>
 </header>
 <main>
   <h2>Sources</h2>
@@ -103,6 +106,7 @@
     var jobId = new URLSearchParams(location.search).get("job");
     var titleEl = document.getElementById("title");
     var metaEl = document.getElementById("meta");
+    var retryEl = document.getElementById("projectRetry");
     var srcBox = document.getElementById("sources");
     var box = document.getElementById("deliverables");
     var act = document.getElementById("activity");
@@ -122,25 +126,13 @@
       });
     }
     function kb(n) { return n ? Math.round(n / 1024) + " KB" : ""; }
-    if (!jobId) {
-      titleEl.textContent = "No project selected";
-      metaEl.textContent = "Open a work item from Talk → Recent work.";
-      box.innerHTML = '<p class="empty-note">Nothing to show.</p>';
-      return;
+    function showSections(note) {
+      [srcBox, box, act, conv].forEach(function (section) {
+        section.innerHTML = '<p class="empty-note">' + esc(note) + '</p>';
+      });
     }
-    fetch("/api/buzzy/projects/" + encodeURIComponent(jobId), { credentials: "same-origin" })
-      .then(function (r) {
-        if (!ownsPage()) return;
-        if (r.status === 401) {
-          // pushState precedes the next mount. Do not replace a pending destination.
-          if (ownsUrl()) location.href = "/buzzy/landing";
-          throw new Error("signed_out");
-        }
-        return r.json();
-      })
-      .then(function (data) {
-        if (!ownsPage()) return;
-        if (!data || !data.project) throw new Error("missing project");
+    function renderProject(data) {
+        if (!data || !data.project || data.project.id !== jobId) throw new Error("missing or mismatched project");
         var p = data.project;
         titleEl.textContent = p.title || "Untitled project";
         var chipClass = p.status === "Deliverable ready" ? "ready" : (p.status === "In progress" ? "prog" : "empty");
@@ -194,12 +186,74 @@
                 "</div><p>" + esc(m.content) + "</p></div>";
             }).join("") + "</details>";
         }
-      })
-      .catch(function (e) {
-        if (!ownsPage()) return;
-        titleEl.textContent = "Could not load project";
-        metaEl.textContent = e.message;
+    }
+    var activeAttempt = null;
+    function loadProject() {
+      if (activeAttempt || !ownsPage() || !ownsUrl()) return;
+      var controller = new AbortController();
+      activeAttempt = controller;
+      retryEl.hidden = true;
+      titleEl.textContent = "Project";
+      metaEl.textContent = "Loading project details…";
+      showSections("Loading…");
+      var deadline, timedOut = false;
+      var request = fetch("/api/buzzy/projects/" + encodeURIComponent(jobId), {
+        credentials: "same-origin", signal: controller.signal
+      }).then(function (r) {
+        if (!r.ok) {
+          // Status is enough for this UI; do not keep an unread error body open.
+          controller.abort();
+          return { status: r.status };
+        }
+        return r.json().then(function (data) { return { data: data }; });
       });
+      // Cover both the initial response and its JSON body with one deadline.
+      // Do not retire the mounted Project on URL change alone: Back can keep it.
+      var timeout = new Promise(function (_, reject) {
+        deadline = setTimeout(function () {
+          timedOut = true;
+          controller.abort();
+          reject(new Error("project request timed out"));
+        }, 15000);
+      });
+      Promise.race([request, timeout])
+        .then(function (result) {
+          if (activeAttempt !== controller || !ownsPage()) return;
+          if (result.status === 401) {
+            // pushState precedes the next mount. Do not replace a pending destination.
+            if (ownsUrl()) { location.href = "/buzzy/landing"; return; }
+            throw new Error("signed_out");
+          }
+          if (result.status === 403 || result.status === 404) {
+            titleEl.textContent = "Project unavailable";
+            metaEl.textContent = "Open a work item from Talk → Recent work.";
+            showSections("Project unavailable.");
+            return;
+          }
+          if (result.status !== undefined) throw new Error("project request failed");
+          renderProject(result.data);
+        })
+        .catch(function () {
+          if (activeAttempt !== controller || !ownsPage()) return;
+          titleEl.textContent = "Could not load project";
+          metaEl.textContent = timedOut ? "The project took too long to respond. Try again, or return to Talk."
+            : "The project details didn't load. Try again, or return to Talk.";
+          showSections("Project details couldn't be loaded.");
+          retryEl.hidden = false;
+        })
+        .finally(function () {
+          clearTimeout(deadline);
+          if (activeAttempt === controller) activeAttempt = null;
+        });
+    }
+    if (!jobId) {
+      titleEl.textContent = "No project selected";
+      metaEl.textContent = "Open a work item from Talk → Recent work.";
+      showSections("Nothing to show.");
+      return;
+    }
+    retryEl.onclick = loadProject;
+    loadProject();
   })();
 </script>
 </body>
