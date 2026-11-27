@@ -25,8 +25,8 @@ function setup(t) {
   out("node_modules/vite/bin/vite.js",'require("node:fs").writeFileSync("vite-ran","1");process.exit(82);');
   return {dir,out};
 }
-function invoke(dir,requirePrivate=false) {
-  const r=spawnSync(process.execPath,[join(dir,"desktop/dist.mjs"),"stage"],{
+function invoke(dir,requirePrivate=false,mode="stage") {
+  const r=spawnSync(process.execPath,[join(dir,"desktop/dist.mjs"),mode],{
     cwd:dir,encoding:"utf8",timeout:15000,
     env:{PATH:join(dir,"no-executables"),...(process.env.SYSTEMROOT ? {SYSTEMROOT:process.env.SYSTEMROOT} : {}),BZ_REQUIRE_PRIVATE:requirePrivate?"1":"0"}
   });
@@ -49,4 +49,17 @@ test("public-tree leak guard refuses before Vite and preserves existing stage",t
   const r=invoke(dir);
   assert.notEqual(r.status,0);assert.match(r.stderr,/src\/unrelated\/routes\.ts/);
   assert.ok(!existsSync(join(dir,"vite-ran")));assert.ok(existsSync(join(dir,"desktop/stage/old-marker")));
+});
+
+test("pack:dir identifies a local test build without claiming pin or signature state",t=>{
+  const {dir,out}=setup(t);
+  const meta={name:"electron-builder",version:"1.0.0",bin:{"electron-builder":"cli.js"}};
+  out("desktop/package-lock.json",JSON.stringify({packages:{"node_modules/electron-builder":{...meta,integrity:"fixture"}}}));
+  out("desktop/node_modules/electron-builder/package.json",JSON.stringify(meta));
+  out("desktop/node_modules/electron-builder/cli.js",'throw new Error("the fixture never runs a packager");');
+  out("publishers.json",'{"publishers":[{"keyId":"fixture-key"}]}');
+  const r=invoke(dir,false,"dir");
+  assert.match(r.stdout,/LOCAL TEST BUILD.*unpacked.*no installer.*no publish/i);
+  assert.doesNotMatch(r.stdout,/unsigned|no publisher pins/i);
+  assert.ok(existsSync(join(dir,"vite-ran")));
 });

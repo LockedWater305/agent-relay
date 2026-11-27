@@ -21,17 +21,26 @@ function run(t, assets, prerelease = true, opts = {}) {
   mkdirSync(join(dir, "desktop")); mkdirSync(join(dir, "dist-desktop"));
   copyFileSync(release, join(dir, "desktop", "release.mjs"));
   writeFileSync(join(dir, "desktop", "package.json"), '{"version":"0.0.1"}');
-  writeFileSync(join(dir, "dist-desktop", name), file);
-  writeFileSync(join(dir, "publishers.json"), '{"publishers":[{"keyId":"fixture-dev"}]}');
+  if (opts.BZ_FIXTURE_EXISTING !== "none") writeFileSync(join(dir, "dist-desktop", name), file);
+  writeFileSync(join(dir, "publishers.json"), JSON.stringify({publishers:[{keyId:opts.BZ_FIXTURE_PIN ?? "fixture-dev"}]}));
+  writeFileSync(join(dir, "calls.txt"), "");
   // All git/gh processes are replaced before release.mjs can import execFileSync.
   // No executable can be found through the child's PATH even on a fixture error.
   writeFileSync(join(dir, "mock.cjs"), `
     const cp = require("node:child_process"), fs = require("node:fs");
     const assets=JSON.parse(process.env.BZ_FIXTURE_ASSETS);
+    let built=false;
     const prerelease=process.env.BZ_FIXTURE_PRE==="true";
     cp.execFileSync = (cmd, args) => {
       fs.appendFileSync(process.env.BZ_FIXTURE_LOG,JSON.stringify([cmd,...args])+"\\n");
-      if(cmd==="git" && args.includes("rev-parse")) return args.includes("--abbrev-ref") ? "fixture" : "00abcde";
+      if(cmd==="node" && args[1]==="all"){
+        fs.writeFileSync(process.env.BZ_FIXTURE_BUILD_OUTPUT, "test artifact");built=true;return "";
+      }
+      if(cmd==="git" && args.includes("rev-parse")) {
+        if(args.includes("--abbrev-ref")) return "fixture";
+        if(args.includes("--verify")) return built && process.env.BZ_FIXTURE_MOVED === "1" ? "b".repeat(40) : "a".repeat(40);
+        return "00abcde";
+      }
       if(cmd==="git" && args.includes("status")) return "";
       if(cmd==="git" && args.includes("--list")) return "desktop-v0.0.1";
       if(cmd==="gh" && args[0]==="release" && args[1]==="view"){
@@ -48,13 +57,13 @@ function run(t, assets, prerelease = true, opts = {}) {
     };
     require("node:module").syncBuiltinESMExports();
   `);
-  const proc = spawnSync(process.execPath, ["--require", join(dir,"mock.cjs"), join(dir,"desktop","release.mjs"), "--skip-build", "--allow-dev-pin"], {
+  const proc = spawnSync(process.execPath, ["--require", join(dir,"mock.cjs"), join(dir,"desktop","release.mjs"), ...(opts.BZ_FIXTURE_CLI ? JSON.parse(opts.BZ_FIXTURE_CLI) : ["--skip-build","--allow-dev-pin"])], {
     cwd: dir, encoding: "utf8", timeout: 15000,
     env: { ...process.env, PATH: join(dir,"no-executables"), BZ_RECIPE_PUBLISHER_FILE: join(dir,"publishers.json"),
-      NODE_OPTIONS:"", BZ_FIXTURE_LOG:join(dir,"calls.txt"), BZ_FIXTURE_PRE:String(prerelease), BZ_FIXTURE_ASSETS:JSON.stringify(assets), ...opts }
+      NODE_OPTIONS:"", BZ_FIXTURE_BUILD_OUTPUT:join(dir,"dist-desktop",name), BZ_FIXTURE_LOG:join(dir,"calls.txt"), BZ_FIXTURE_PRE:String(prerelease), BZ_FIXTURE_ASSETS:JSON.stringify(assets), ...opts }
   });
   assert.ifError(proc.error);
-  const calls = readFileSync(join(dir,"calls.txt"),"utf8").trim().split("\n").map(line=>JSON.parse(line));
+  const calls = readFileSync(join(dir,"calls.txt"),"utf8").trim().split("\n").filter(Boolean).map(line=>JSON.parse(line));
   return { code: proc.status, text: proc.stdout+proc.stderr, calls };
 }
 test("source release entry verifies exact remote asset bytes by digest", t=>{
@@ -115,4 +124,38 @@ test("verify the canonical upload even when a legacy asset precedes it",t=>{
 test("do not report success if the release channel changed after preflight",t=>{
   const r=run(t,expected,true,{BZ_FIXTURE_FINAL_CHANNEL:"stable"});
   assert.notEqual(r.code,0,r.text);assert.doesNotMatch(r.text,/verified on GitHub/i);
+});
+
+function stable(t, cli, opts={}) {
+  return run(t,expected,false,{BZ_FIXTURE_PIN:"fixture-production", BZ_FIXTURE_CLI:JSON.stringify(cli),...opts});
+}
+test("stable skip-build cannot treat a previously created installer as stable based on today's pins",t=>{
+  const r=stable(t,["--skip-build"]);
+  assert.notEqual(r.code,0,r.text);
+  assert.match(r.text,/stable.*fresh build/i);
+  assert.deepEqual(r.calls,[]);
+});
+test("stable release cannot retag freshly built bytes as a --ref override",t=>{
+  const r=stable(t,["--ref","old-ref"],{BZ_FIXTURE_EXISTING:"none"});
+  assert.notEqual(r.code,0,r.text);
+  assert.match(r.text,/stable.*--ref/i);
+  assert.deepEqual(r.calls,[]);
+});
+test("stable fresh-build path refuses old canonical output rather than relabel it or delete it",t=>{
+  const r=stable(t,[]);
+  assert.notEqual(r.code,0,r.text);
+  assert.match(r.text,/move the existing.*output/i);
+  assert.deepEqual(r.calls,[]);
+});
+test("stable release proceeds in the offline harness only when a clean fresh build creates the installer",t=>{
+  const r=stable(t,[],{BZ_FIXTURE_EXISTING:"none"});
+  assert.equal(r.code,0,r.text);
+  assert.ok(r.calls.some(([cmd,...args])=>cmd==="node"&&args.includes("all")));
+  assert.equal(r.calls.filter(changed).length,1);
+});
+test("stable release refuses if HEAD changes during the fresh build",t=>{
+  const r=stable(t,[],{BZ_FIXTURE_EXISTING:"none",BZ_FIXTURE_MOVED:"1"});
+  assert.notEqual(r.code,0,r.text);
+  assert.match(r.text,/HEAD changed/i);
+  assert.deepEqual(r.calls.filter(changed),[]);
 });

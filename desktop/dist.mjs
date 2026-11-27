@@ -314,7 +314,7 @@ function assertPackagedImports() {
   log(`packaged imports: ok (${asarFiles.length} shell files, ${REQUIRED_RUNTIME_FILES.length} runtime libs)`);
 }
 
-const LOCAL_TEST = "LOCAL TEST BUILD — not a release, unsigned, no publisher pins";
+const LOCAL_TEST = "LOCAL TEST BUILD — unpacked app only, no installer, no publish";
 
 function localTestBanner() {
   const rule = "*".repeat(LOCAL_TEST.length + 6);
@@ -324,7 +324,7 @@ function localTestBanner() {
 }
 
 /**
- * `dir`: unpacked, unsigned, current platform only. electron-builder's `dir`
+ * `dir`: unpacked, current platform only. electron-builder's `dir`
  * target writes the app under dist-desktop/ (macOS: mac-arm64/BeeZilla.app,
  * Windows: win-unpacked/). It is not an installer and not a release.
  */

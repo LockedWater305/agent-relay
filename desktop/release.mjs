@@ -13,12 +13,12 @@
  *   - the tag is `desktop-v<version>` (the server keeps plain `v<version>`; two
  *     release lines, two tag namespaces, no ambiguity at a glance)
  *   - a build carrying a DEV publisher pin can only ship as a prerelease
- *     (`--allow-dev-pin` required, and it returns 402 to the latest slot)
+ *     (`--allow-dev-pin` required; never eligible for the stable channel)
  *   - the uploaded asset is verified by size + sha256 against the local file
  *
  * Usage
  *   node desktop/release.mjs                    # build, tag, publish
- *   node desktop/release.mjs --skip-build       # publish the existing artifact
+ *   node desktop/release.mjs --skip-build --prerelease  # prerelease only
  *   node desktop/release.mjs --allow-dev-pin --prerelease
  *   node desktop/release.mjs --dry-run          # print what it would do
  */
@@ -80,6 +80,30 @@ if (devPin && !ALLOW_DEV) {
 }
 const prerelease = FORCE_PRE || devPin;
 
+// An existing .exe does not carry a verified link to today's publisher pins
+// or this source ref. Do not promote it based on local config or filename.
+if (!prerelease && SKIP_BUILD) {
+  console.error("refusing: stable releases require a fresh build; --skip-build is prerelease only");
+  process.exit(1);
+}
+if (!prerelease && flag("--ref")) {
+  console.error("refusing: stable releases must build and tag current HEAD; omit --ref");
+  process.exit(1);
+}
+
+let stableHead = null;
+if (!prerelease && !DRY) {
+  if (existsSync(installer) || existsSync(blockmap)) {
+    console.error("refusing: move the existing installer/blockmap output aside before a fresh stable build");
+    process.exit(1);
+  }
+  stableHead = run("git", ["-C", ROOT, "rev-parse", "--verify", "HEAD^{commit}"], { capture: true }).trim();
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(stableHead)) throw new Error("cannot identify stable release HEAD");
+  const status = run("git", ["-C", ROOT, "status", "--porcelain"], { capture: true }).trim();
+  if (status) throw new Error("working tree is dirty; stable release build was not started");
+}
+
+
 /* -- artifact --------------------------------------------------------------- */
 if (!SKIP_BUILD) {
   log(`building ${tag}`);
@@ -89,11 +113,16 @@ if (!existsSync(installer)) {
   console.error(`refusing: ${installer} does not exist — build it first (drop --skip-build)`);
   process.exit(1);
 }
+if (stableHead && run("git", ["-C", ROOT, "rev-parse", "--verify", "HEAD^{commit}"], { capture: true }).trim() !== stableHead) {
+  console.error("refusing: HEAD changed during the stable build; no release was created");
+  process.exit(1);
+}
 const bytes = statSync(installer).size;
 const sha = createHash("sha256").update(readFileSync(installer)).digest("hex");
 
 /* -- the commit must be the one that was built ------------------------------ */
-const head = run("git", ["-C", ROOT, "rev-parse", "--short", REF ?? "HEAD"], { capture: true }).trim();
+const sourceRef = stableHead ?? REF ?? "HEAD";
+const head = run("git", ["-C", ROOT, "rev-parse", "--short", sourceRef], { capture: true }).trim();
 const branch = run("git", ["-C", ROOT, "rev-parse", "--abbrev-ref", "HEAD"], { capture: true }).trim();
 const dirty = run("git", ["-C", ROOT, "status", "--porcelain"], { capture: true }).trim();
 if (dirty && !DRY) {
@@ -111,7 +140,7 @@ the same pages, routes and migrations as the hosted app at https://app.devboards
 - SHA-256 \`${sha}\`
 - Publisher pins: ${pins.map((p) => `\`${p.keyId}\` (${p.label ?? "no label"})`).join(", ")}
 ${devPin ? "- **Prerelease:** carries a DEV trust anchor — fetched recipes verify against a test key. Not for general distribution." : ""}
-- Unsigned: no code-signing certificate is configured, so Windows SmartScreen will warn.
+- Authenticode status is not verified by this script. Check the installer signature independently.
 
 Install: double-click, pick a directory, then connect a BeeZilla account (menu → *Connect BeeZilla account…*)
 or paste your own provider key in Settings. Data lives in \`%APPDATA%\\BeeZilla\\data\`.
@@ -164,13 +193,13 @@ if (hasTag) {
       );
       process.exit(1);
     }
-    run("git", ["-C", ROOT, "tag", "-f", "-a", tag, REF ?? "HEAD", "-m", `BeeZilla Desktop ${version}`]);
+    run("git", ["-C", ROOT, "tag", "-f", "-a", tag, sourceRef, "-m", `BeeZilla Desktop ${version}`]);
     run("git", ["-C", ROOT, "push", "--force", "github", tag]);
     log(`tag ${tag} moved ${tagged} -> ${head}`);
   }
 }
 if (!hasTag) {
-  run("git", ["-C", ROOT, "tag", "-a", tag, REF ?? "HEAD", "-m", `BeeZilla Desktop ${version}`]);
+  run("git", ["-C", ROOT, "tag", "-a", tag, sourceRef, "-m", `BeeZilla Desktop ${version}`]);
   run("git", ["-C", ROOT, "push", "github", tag]);
   log(`tagged ${tag}`);
 } else {
