@@ -71,6 +71,8 @@
       <p><strong>Only BeeZilla admins can use this page.</strong> An admin is a signed-in account whose email is listed in <code>BZ_ADMIN_EMAILS</code> on the server.</p>
     </div>
 
+    <p id="feedbackLoadStatus" class="empty" role="status">Checking access to feedback…</p>
+
     <div id="body" hidden>
       <h2>Put a tester on a plan</h2>
       <div class="panel">
@@ -97,7 +99,7 @@
       </div>
 
       <h2>What testers reported</h2>
-      <div id="reports"><p class="empty">Loading…</p></div>
+      <div id="reports"></div>
     </div>
   </main>
 
@@ -111,18 +113,41 @@
     // public nav links: the page marks itself active through body[data-bz-active]
     // and nobody stumbles into it from the nav.
 
+    var gate = document.getElementById("gate");
+    var testerBody = document.getElementById("body");
+    var feedbackLoadStatus = document.getElementById("feedbackLoadStatus");
+    var reports = document.getElementById("reports");
+
+    function hideReports() {
+      testerBody.hidden = true;
+      reports.textContent = "";
+    }
+    function showLoadStatus(message) {
+      hideReports();
+      gate.hidden = true;
+      feedbackLoadStatus.textContent = message;
+      feedbackLoadStatus.hidden = false;
+    }
+    function unavailable() {
+      showLoadStatus("Could not read reports. Reload this page to try again.");
+    }
+    function accessDenied(response) {
+      if (response.status !== 401 && response.status !== 403) return false;
+      hideReports();
+      feedbackLoadStatus.hidden = true;
+      gate.hidden = false;
+      return true;
+    }
+
     fetch("/api/buzzy/entitlement", { credentials: "same-origin" })
-      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; }); })
-      .then(function (out) {
-        if (!out.ok) {
-          document.getElementById("gate").hidden = false;
-          document.getElementById("gate").querySelector("p").innerHTML =
-            'Sign in as an admin to use this page. An admin is an account whose email is listed in <code>BZ_ADMIN_EMAILS</code>.';
-          return;
-        }
-        load();
-      })
-      .catch(function () { document.getElementById("gate").hidden = false; });
+      .then(function (r) {
+        if (accessDenied(r)) return;
+        if (!r.ok) return unavailable();
+        return r.json().then(function (j) {
+          if (!j || j.ok !== true) return unavailable();
+          return load();
+        });
+      }).catch(unavailable);
 
     function esc(s) {
       return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -131,39 +156,31 @@
     }
 
     function load() {
-      var box = document.getElementById("reports");
-      fetch("/api/buzzy/admin/feedback", { credentials: "same-origin" })
+      showLoadStatus("Loading feedback reports…");
+      return fetch("/api/buzzy/admin/feedback", { credentials: "same-origin", cache: "no-store" })
         .then(function (r) {
-          if (r.status === 403) {
-            document.getElementById("gate").hidden = false;
-            document.getElementById("body").hidden = true;
-            throw new Error("forbidden");
-          }
-          return r.json();
-        })
-        .then(function (j) {
-          if (!j || !j.ok) throw new Error((j && j.error) || "Could not read reports.");
-          document.getElementById("gate").hidden = true;
-          document.getElementById("body").hidden = false;
-          var rows = j.feedback || [];
-          if (!rows.length) { box.innerHTML = '<p class="empty">No reports yet.</p>'; return; }
-          box.innerHTML = rows.map(function (f) {
-            var who = f.email ? esc(f.email) : "anonymous";
-            return '<div class="report">' +
-              '<div class="meta"><code>' + esc(f.ref) + '</code><span>' + esc(new Date(f.created_at).toLocaleString()) + '</span>' +
-              '<span>' + who + '</span><span>' + esc(f.route || f.page_url || "") + '</span><span>status: ' + esc(f.status) + '</span></div>' +
-              '<p>' + esc(f.body) + '</p>' +
-              (f.has_screenshot ? '<button class="ghost" type="button" data-shot="' + esc(f.id) + '">See the screenshot</button><div class="shot" hidden></div>' : "") +
-              '</div>';
-          }).join("");
-        })
-        .catch(function (e) {
-          if (e && e.message === "forbidden") return;
-          box.innerHTML = '<p class="empty">Could not read reports. Try again in a moment.</p>';
-        });
+          if (accessDenied(r)) return;
+          if (!r.ok) return unavailable();
+          return r.json().then(function (j) {
+            if (!j || j.ok !== true || !Array.isArray(j.feedback)) return unavailable();
+            var rows = j.feedback;
+            reports.innerHTML = rows.length ? rows.map(function (f) {
+              var who = f.email ? esc(f.email) : "anonymous";
+              return '<div class="report">' +
+                '<div class="meta"><code>' + esc(f.ref) + '</code><span>' + esc(new Date(f.created_at).toLocaleString()) + '</span>' +
+                '<span>' + who + '</span><span>' + esc(f.route || f.page_url || "") + '</span><span>status: ' + esc(f.status) + '</span></div>' +
+                '<p>' + esc(f.body) + '</p>' +
+                (f.has_screenshot ? '<button class="ghost" type="button" data-shot="' + esc(f.id) + '">See the screenshot</button><div class="shot" hidden></div>' : "") +
+                '</div>';
+            }).join("") : '<p class="empty">No reports yet.</p>';
+            gate.hidden = true;
+            feedbackLoadStatus.hidden = true;
+            testerBody.hidden = false;
+          });
+        }).catch(unavailable);
     }
 
-    document.getElementById("reports").addEventListener("click", function (e) {
+    reports.addEventListener("click", function (e) {
       var b = e.target.closest ? e.target.closest("[data-shot]") : null;
       if (!b) return;
       var id = b.getAttribute("data-shot");
@@ -171,19 +188,28 @@
       if (!box) return;
       if (!box.hidden) { box.hidden = true; b.textContent = "See the screenshot"; return; }
       b.disabled = true;
-      fetch("/api/buzzy/admin/feedback?id=" + encodeURIComponent(id), { credentials: "same-origin" })
-        .then(function (r) { return r.json(); })
-        .then(function (j) {
-          b.disabled = false;
-          if (j && j.ok && j.screenshot) {
-            box.innerHTML = '<img alt="The screenshot attached to report ' + esc(j.id) + '" src="' + esc(j.screenshot) + '" />';
-            box.hidden = false;
-            b.textContent = "Hide the screenshot";
-          } else {
-            b.textContent = "No screenshot on that report";
-          }
+      fetch("/api/buzzy/admin/feedback?id=" + encodeURIComponent(id), { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) {
+          if (accessDenied(r)) return;
+          if (!r.ok) throw new Error("Screenshot unavailable");
+          return r.json().then(function (j) {
+            // Another read may already have observed loss of access.
+            if (!reports.contains(b)) return;
+            b.disabled = false;
+            if (j && j.ok === true && j.screenshot) {
+              box.innerHTML = '<img alt="The screenshot attached to report ' + esc(j.id) + '" src="' + esc(j.screenshot) + '" />';
+              box.hidden = false;
+              b.textContent = "Hide the screenshot";
+            } else {
+              b.textContent = "No screenshot on that report";
+            }
+          });
         })
-        .catch(function () { b.disabled = false; b.textContent = "Could not load it — try again"; });
+        .catch(function () {
+          if (!reports.contains(b)) return;
+          b.disabled = false;
+          b.textContent = "Could not load it — try again";
+        });
     });
 
     document.getElementById("grant").addEventListener("click", function () {
