@@ -636,7 +636,8 @@ export default defineEventHandler(async (event) => {
       : null;
     const pageUrl = pathOnly(raw?.page_url ?? (clean.diag?.page as any)?.url ?? null);
     const route = (typeof raw?.route === "string" ? raw.route.trim().slice(0, 40) : null) || null;
-    const ua = (getHeader(event, "user-agent") || "").slice(0, 400) || null;
+    // Browser information belongs only to the opt-in, sanitized diagnostic.
+    // Leave the legacy nullable UA field untouched, and omit it on new writes.
 
     // A receipt is evidence of a persisted report. Only the ref conflict is
     // retryable; do not hide unrelated database errors.
@@ -645,9 +646,9 @@ export default defineEventHandler(async (event) => {
       const id = newFeedbackId();
       const [saved] = (await sql`
         INSERT INTO buzzy_feedback
-          (id, ref, user_id, body, page_url, route, app_sha, diag, diag_redactions, ip_hash, ua, screenshot)
+          (id, ref, user_id, body, page_url, route, app_sha, diag, diag_redactions, ip_hash, screenshot)
         VALUES (${id}, ${ref}, ${userId}, ${body}, ${pageUrl}, ${route}, ${appSha()},
-                ${diag ? JSON.stringify(diag) : null}::jsonb, ${clean.redactions}, ${hashed}, ${ua}, ${shot.value})
+                ${diag ? JSON.stringify(diag) : null}::jsonb, ${clean.redactions}, ${hashed}, ${shot.value})
         ON CONFLICT (ref) DO NOTHING
         RETURNING ref, created_at
       `) as Array<{ ref: string; created_at: string }>;
