@@ -452,11 +452,22 @@ export async function nextStep(
     userId, prompt: row.prompt, purpose: (row.purpose as ModelPurpose) || "game",
     texturePrompt: row.texture_prompt ?? undefined, pictureId: row.picture_id === null ? null : Number(row.picture_id), repainted: row.repainted,
   };
-  if (bare && memory.pictureId && loadPicture) memory.image = (await loadPicture(memory.pictureId)) ?? undefined;
-  const req = shape ? refineRequest(job.meshyId, memory) : retextureRequest(job.meshyId, memory);
-  const prefix = shape ? "ref" : "rtx";
   // Only for a step that was certainly not started: free to be claimed again.
   const release = async () => { try { await sql`UPDATE buzzy_model3d_jobs SET next_id = NULL WHERE meshy_id = ${job.meshyId} AND next_id = 'pending'`; } catch { /* after three minutes it reads as uncertain */ } };
+  if (bare && (job.kind === "img" || job.kind === "mimg")) {
+    // A label or description isn't a substitute for the chosen picture.
+    // Without its bytes, don't silently spend credits on a words-only repaint.
+    if (memory.pictureId && loadPicture) {
+      try { memory.image = (await loadPicture(memory.pictureId)) ?? undefined; }
+      catch { /* treat an unavailable Library read like a missing file */ }
+    }
+    if (!memory.image) {
+      await release();
+      return { ok: false, code: "reference_unavailable", error: "The original reference image could not be loaded, so no repaint was started." };
+    }
+  }
+  const req = shape ? refineRequest(job.meshyId, memory) : retextureRequest(job.meshyId, memory);
+  const prefix = shape ? "ref" : "rtx";
   if (!req) { await release(); return null; }
   const r = await post(req.path, req.body);
   if (!r.ok) {

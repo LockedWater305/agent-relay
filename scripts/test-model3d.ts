@@ -399,6 +399,52 @@ ok("start → shape done → paint (claimed once) → bare? repaint once; only t
   M.__setMeshyFetchForTests(null);
 });
 
+for (const kind of ["image", "multi"] as const) {
+  ok(`a bare ${kind} model never repaints from words if its reference cannot be read`, async () => {
+    const sent: Array<{ path: string; body: Record<string, unknown> }> = [];
+    M.__setMeshyFetchForTests(async (url, init) => {
+      eq(init.method, "POST", "only synthetic starts are expected:");
+      sent.push({ path: new URL(String(url)).pathname, body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({ result: `reference-${kind}-task-${sent.length}` }), { status: 202 });
+    });
+    try {
+      const userId = `reference-${kind}-owner`, pictureId = 17;
+      const started = await M.startModel({
+        kind, prompt: "A library label, not the reference image", images: kind === "multi" ? [PIC, PIC] : [PIC],
+        purpose: "game", keepLook: true,
+      }, userId, { pictureId });
+      if (!started.ok) throw new Error(JSON.stringify(started));
+      const unreadable = await M.nextStep(started.taskId, userId, "bare", async (id) => {
+        eq(id, pictureId, "read only the recorded reference:");
+        if (kind === "multi") throw new Error("fixture: temporary Library read error");
+        return null;
+      });
+      eq(sent.length, 1, "no paid repaint on a missing reference:");
+      truthy(unreadable && !unreadable.ok && unreadable.code === "reference_unavailable" &&
+        /original reference image.*no repaint/i.test(unreadable.error), JSON.stringify(unreadable));
+      const stillUnavailable = await M.nextStep(started.taskId, userId, "bare", async () => null);
+      truthy(stillUnavailable && !stillUnavailable.ok && stillUnavailable.code === "reference_unavailable", JSON.stringify(stillUnavailable));
+      eq(sent.length, 1, "another poll without the exact reference still cannot start a repaint:");
+      const restored = await M.nextStep(started.taskId, userId, "bare", async (id) => {
+        eq(id, pictureId, "retry reads the same reference:");
+        return PIC;
+      });
+      truthy(restored && restored.ok && "taskId" in restored && restored.taskId.startsWith("rtx."), JSON.stringify(restored));
+      eq(sent.length, 2, "one repaint after a successful reference read:");
+      eq(sent[1]?.path, "/openapi/v1/retexture");
+      eq(sent[1]?.body?.image_style_url, PIC, "send the actual reference bytes:");
+      truthy(!Object.hasOwn(sent[1]?.body ?? {}, "text_style_prompt"), "do not substitute the label");
+      const again = await M.nextStep(started.taskId, userId, "bare", async () => {
+        throw new Error("a confirmed repaint must not need the reference again");
+      });
+      eq(again, restored, "polling again returns the already linked repaint:");
+      eq(sent.length, 2, "no duplicate repaint:");
+    } finally {
+      M.__setMeshyFetchForTests(null);
+    }
+  });
+}
+
 ok("a paid step whose start isn't known is never sent again; a next id is handed out only once written down", async () => {
   let mode: "ok" | "lost" | "5xx" | "402" = "ok";
   let posts = 0;
