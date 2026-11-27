@@ -585,3 +585,94 @@ test('successful runtime retarget suppresses failure from the superseded Setting
   await d.quit();
   assert.equal(d.didExit(), true);
 });
+
+test('runtime recovery UX: Reload refuses the dead endpoint and leaves the draft open', async t => {
+  const f = await fixture(t), page = await f.mount(), d = await desktop(t, [f]);
+  await page.draw();
+  d.replaceRuntime(null);
+  const oldRoute = d.main.url;
+  const before = d.requests.filter(request => request.kind === 'loadURL').length;
+  const reload = d.menu.template.flatMap(item => item.submenu || []).find(item => item.label === 'Reload');
+  reload.click(); await drain();
+  assert.equal(d.requests.filter(request => request.kind === 'loadURL').length, before, 'do not reload a dead server');
+  assert.equal(d.main.url, oldRoute);
+  assert.match(page.el('savedFlag').textContent, /Unsaved/);
+  assert.equal(d.didExit(), false);
+  assert.equal(d.errors.length, 1);
+  assert.match(d.errors[0].message, /open Settings.*reconnect/i);
+});
+
+test('runtime recovery UX: loaded Settings reconnects a same-port runtime without replacing unsaved Sketch', async t => {
+  const f = await fixture(t), page = await f.mount();
+  const g = await fixture(t);
+  const d = await desktop(t, [f, g]), oldRoute = d.main.url, old = d.runtime();
+  d.api.settingsWindowFor(new URL('/buzzy/settings', oldRoute).href); await drain();
+  const settings = d.api.currentSettings();
+  await page.draw();
+  const replacement = { ...old, token: 'synthetic_new_runtime_token'.padEnd(43, 'm') };
+  const sup = d.api.supervisor();
+  d.replaceRuntime(null);
+  let starts = 0;
+  sup.start = async () => { starts++; d.replaceRuntime(replacement); return replacement; };
+  d.menu.template.flatMap(item => item.submenu || []).find(item => item.accelerator === 'CmdOrCtrl+,').click();
+  await drain();
+  assert.equal(starts, 1, 'Opening already-visible Settings recovers the stopped runtime');
+  assert.equal(d.runtime(), replacement);
+  assert.equal(d.api.currentSettings(), settings);
+  assert.equal(d.windows.length, 2);
+  assert.equal(d.main.url, oldRoute);
+  assert.equal(d.api.retargets().size, 0);
+  assert.equal(d.errors.length, 0);
+  await page.save();
+  assert.equal(f.data().board.strokes.length, 3, 'the original in-memory draft can still be saved');
+});
+
+test('runtime recovery UX: changed-port Settings recovery does not navigate away from a draft it cannot save', async t => {
+  const f = await fixture(t), page = await f.mount();
+  const g = await fixture(t);
+  const d = await desktop(t, [f, g]), oldRoute = d.main.url;
+  await page.draw();
+  d.replaceRuntime(null);
+  const settings = d.menu.template.flatMap(item => item.submenu || []).find(item => item.accelerator === 'CmdOrCtrl+,');
+  settings.click(); await drain(); await d.nextNavigation();
+  assert.equal(d.main.url, oldRoute);
+  assert.equal(d.api.retargets().size, 0);
+  assert.match(page.el('savedFlag').textContent, /Unsaved|Could not save|Not saved/);
+  assert.equal(page.el('save').disabled, false);
+  assert.equal(d.errors.length, 1);
+  assert.match(d.errors[0].message, /work.*open|window.*open/i);
+  assert.equal(d.didExit(), false);
+});
+
+test('runtime recovery UX: clean changed-port replacement retargets the existing main route', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t);
+  const d = await desktop(t, [f, g]), original = d.runtime();
+  d.replaceRuntime(null);
+  d.menu.template.flatMap(item => item.submenu || []).find(item => item.accelerator === 'CmdOrCtrl+,').click();
+  await drain(); await d.nextNavigation();
+  assert.notEqual(d.runtime().port, original.port);
+  assert.equal(new URL(d.main.url).port, String(d.runtime().port));
+  assert.match(d.main.url, /\/buzzy\/sketch\?job=job_board$/);
+  assert.equal(new URL(d.api.currentSettings().url).port, String(d.runtime().port));
+  assert.equal(d.errors.length, 0);
+  assert.equal(d.didExit(), false);
+});
+
+test('runtime recovery UX: Settings does not assume ownership of an unrelated unbound replacement', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t);
+  const d = await desktop(t, [f, g]), original = d.runtime();
+  const unrelated = { ...original, port: 7459, token: 'unrelated_fixture_runtime'.padEnd(43, 'q') };
+  d.api.clearBinding();
+  d.replaceRuntime(unrelated);
+  d.menu.template.flatMap(item => item.submenu || []).find(item => item.accelerator === 'CmdOrCtrl+,').click();
+  await drain();
+  assert.equal(d.windows.length, 1);
+  assert.equal(d.api.retargets().size, 0);
+  assert.equal(d.api.bindingState().present, false);
+  assert.equal(d.runtime(), unrelated);
+  assert.equal(d.stops, 0);
+  assert.equal(d.didExit(), false);
+  assert.match(d.errors[0].message, /not ready.*window/i);
+});

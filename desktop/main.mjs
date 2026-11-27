@@ -24,7 +24,7 @@ import { createDocumentTransition } from "./document-transition.mjs";
 import { createOriginalDownloadRefusal } from "./original-download.mjs";
 import {
   allowAudioPermission, connectBaseUrl, createRuntimeAuth, isAppDownload, isAppPage,
-  isConnectNavigation, isTrustedSender, retargetAppPage, safeExternalUrl, sameOrigin, webUrl,
+  isConnectNavigation, isTrustedSender, retargetAppPage, runtimeOrigin, safeExternalUrl, sameOrigin, webUrl,
 } from "./security.mjs";
 
 // FIRST, before anything that can throw. 0.2.0 died at module-link time and left
@@ -552,9 +552,14 @@ function installMenu() {
             },
           },
           { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => {
-            if (acquireLibraryTransition.held()) return;
+            if (quitting || acquireLibraryTransition.held()) return;
             const wc = BrowserWindow.getFocusedWindow()?.webContents;
-            if (trustedContents().includes(wc)) wc.reload();
+            if (!trustedContents().includes(wc)) return;
+            if (!currentRuntimeBinding(supervisor.runtime)) {
+              dialog.showErrorBox("BeeZilla is not connected", "This window is still open. Open Settings from the BeeZilla menu to reconnect before reloading.");
+              return;
+            }
+            wc.reload();
           } },
           { role: "toggleDevTools" },
           { type: "separator" },
@@ -743,12 +748,56 @@ async function performConnect() {
 }
 
 let openingSettings = null;
+let pendingSettingsRuntime = null;
+function pendingSettingsRuntimeMatches(rt) {
+  return rt && pendingSettingsRuntime?.rt === rt && pendingSettingsRuntime.host === rt.host &&
+    pendingSettingsRuntime.port === rt.port && pendingSettingsRuntime.token === rt.token &&
+    pendingSettingsRuntime.generation === runtimeBindingGeneration;
+}
+
+async function recoverRuntimeForSettings() {
+  const existing = supervisor.runtime;
+  // Retry only a replacement started by this menu action. Another failed
+  // handoff can leave a live but unbound runtime and must keep its own guards.
+  if (existing && !pendingSettingsRuntimeMatches(existing)) {
+    throw new Error("The local connection is not ready in this window. Keep BeeZilla open if you have unsaved work.");
+  }
+  const rt = existing ?? await supervisor.start();
+  if (currentRuntimeBinding(supervisor.runtime) && supervisor.runtime === rt) return true;
+  pendingSettingsRuntime = { rt, host: rt.host, port: rt.port, token: rt.token, generation: runtimeBindingGeneration };
+  if (quitting || acquireLibraryTransition.held()) return false;
+  if (!pendingSettingsRuntimeMatches(supervisor.runtime)) throw new Error("The local connection changed. Open Settings to try again.");
+
+  // Same-origin recovery restores access without discarding any open document.
+  if (!runtimeBase || runtimeOrigin(rt) === runtimeBase) {
+    bindRuntime(rt, true);
+    pendingSettingsRuntime = null;
+    return true;
+  }
+  let transition, rebound = false;
+  try {
+    // A port change replaces documents. Use the existing Sketch/Library save
+    // barrier before sending any replacement navigation, not afterwards.
+    transition = await acquireLibraryTransition();
+    if (quitting) return false;
+    if (!pendingSettingsRuntimeMatches(supervisor.runtime)) throw new Error("The local connection changed.");
+    bindRuntime(rt, true);
+    rebound = true;
+    pendingSettingsRuntime = null;
+    return true;
+  } catch {
+    throw new Error("BeeZilla kept your window open because it could not finish saving before reconnecting. Keep it open if you have unsaved work. In Sketch, Export PNG can keep a copy of your drawing.");
+  } finally {
+    await transition?.release({ keepRetiredFrozen: rebound });
+  }
+}
+
 function openSettings() {
   if (quitting || acquireLibraryTransition.held()) return;
   if (settingsWindow) {
     if (settingsWindow.isMinimized()) settingsWindow.restore();
     settingsWindow.focus();
-    if (!settingsPagesToRetry.has(settingsWindow)) return;
+    if (!settingsPagesToRetry.has(settingsWindow) && currentRuntimeBinding(supervisor.runtime)) return;
   }
   // The supervisor shares startup, but each awaiting menu click would still
   // create its own window. Share the entire open, not just the child process.
@@ -761,10 +810,9 @@ function openSettings() {
 }
 
 async function openSettingsWindow() {
-  if (!supervisor.runtime) {
-    const rt = await supervisor.start();
+  if (!currentRuntimeBinding(supervisor.runtime)) {
+    if (!await recoverRuntimeForSettings()) return;
     if (quitting || acquireLibraryTransition.held()) return;
-    bindRuntime(rt, true);
   }
   if (settingsWindow) {
     if (settingsPagesToRetry.has(settingsWindow)) loadSettingsPage(settingsWindow, `${runtimeBase}/buzzy/settings`);
