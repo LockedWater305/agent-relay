@@ -164,10 +164,10 @@ function settingsHarness({ permission, enumerate, abort = true } = {}) {
       this.onstop?.();
     }
   }
-  const logs = [];
+  const logs = [], copied = [];
   Object.assign(w, { AudioContext, MediaRecorder });
   const ctx = createContext({
-    $: node, window: w, MediaRecorder, Blob, AbortController: abort ? AbortController : undefined,
+    $: node, window: w, document: doc, MediaRecorder, Blob, AbortController: abort ? AbortController : undefined,
     appBridge: { log: text => logs.push(text) },
     say: (element, value) => { element.textContent = value; },
     navigator: { mediaDevices: {
@@ -175,7 +175,8 @@ function settingsHarness({ permission, enumerate, abort = true } = {}) {
         const d = deferred(); opening.push({ ...d, constraints }); return d.promise;
       },
       enumerateDevices: enumerate ?? (() => Promise.resolve([])),
-    }, permissions: { query: () => permission ?? Promise.resolve({ state: "prompt" }) } },
+    }, permissions: { query: () => permission ?? Promise.resolve({ state: "prompt" }) },
+      clipboard: { writeText: async text => copied.push(text) } },
     setTimeout: f => { timers.set(++id, f); return id; }, clearTimeout: value => timers.delete(value),
     requestAnimationFrame: f => { frames.set(++id, f); return id; }, cancelAnimationFrame: value => frames.delete(value),
     fetch: (url, init) => { const d = deferred(); requests.push({ ...d, url, init }); return d.promise; },
@@ -186,12 +187,16 @@ function settingsHarness({ permission, enumerate, abort = true } = {}) {
     if (/<section id="microphone"[^>]*\bdata-bz-before-remove\b/.test(settings))
       node("microphone").setAttribute("data-bz-before-remove", "");
     node("mic-test").textContent = "Record 3 s & transcribe";
-    node("mic-device").value = "fixture-A";
+    const select = node("mic-device");
+    select.value = "fixture-A";
+    select.options = [];
+    select.replaceChildren = (...options) => { select.options = options; };
+    node("logs-path").textContent = "Log: /fixture-private-profile/support.log";
     new Script("(function(){\n" + diagnostic + "\n})();").runInContext(ctx);
   }
   mount();
   const emit = (id, type = "click") => node(id).dispatch(type);
-  return { doc, node, w, activity: { opening, recorders, requests, contexts, timers, frames, logs }, emit, mount,
+  return { doc, node, w, activity: { opening, recorders, requests, contexts, timers, frames, logs, copied }, emit, mount,
     select(value) { node("mic-device").value = value; emit("mic-device", "change"); },
     get button() { return node("mic-test"); } };
 }
@@ -508,4 +513,73 @@ test("a Settings permission granted after real shell detach cannot attach to the
   assert.equal(h.activity.requests.length, 0);
   assert.match(h.node("mic-status").textContent, /Microphone ready/);
   await done;
+});
+
+test("Settings microphone denial is actionable and keeps native details private", async () => {
+  const h = settingsHarness({ permission: Promise.resolve({ state: "denied" }) });
+  await flush();
+  assert.match(h.node("mic-status").textContent, /access was denied.*privacy settings/i);
+  assert.equal(h.activity.opening.length, 0);
+  h.emit("mic-allow");
+  const fault = new Error("fixture-native-device-detail");
+  fault.name = "NotAllowedError";
+  h.activity.opening[0].reject(fault); await flush();
+  assert.match(h.node("mic-status").textContent, /access was denied.*privacy settings/i);
+  assert.doesNotMatch(h.activity.logs.join("\n"), /fixture-native-device-detail|fixture-A/);
+});
+
+test("a muted device is not immediately reported ready", async () => {
+  const h = settingsHarness(), stream = fakeStream();
+  stream.tracks[0].muted = true;
+  h.emit("mic-allow");
+  h.activity.opening[0].resolve(stream); await flush();
+  assert.match(h.node("mic-status").textContent, /opened but is muted/);
+  assert.doesNotMatch(h.node("mic-status").textContent, /Microphone ready/);
+});
+
+test("Settings shows its explicit test transcript locally but keeps support diagnostics private", async () => {
+  const h = settingsHarness({ enumerate: () => Promise.resolve([{ kind: "audioinput", label: "fixture-device-label", deviceId: "fixture-A" }]) });
+  const [done] = h.emit("mic-test");
+  const stream = fakeStream();
+  stream.tracks[0].label = "fixture-device-label";
+  h.activity.opening[0].resolve(stream); await flush();
+  [...h.activity.timers.values()][0](); await flush();
+  h.activity.requests[0].resolve(fixtureResponse("fixture-private-spoken-words"));
+  await done;
+  assert.match(h.node("mic-result").textContent, /fixture-private-spoken-words/);
+  await h.emit("mic-copy")[0];
+  const copied = h.activity.copied.at(-1);
+  assert.match(copied, /last result: Transcribed/);
+  assert.doesNotMatch(copied + h.activity.logs.join("\n"), /fixture-private-spoken-words|fixture-device-label|fixture-private-profile|fixture-A/);
+});
+
+test("transcription denial shows the Local Only remedy, not raw response details", async () => {
+  const h = settingsHarness(), [done] = h.emit("mic-test");
+  h.activity.opening[0].resolve(fakeStream()); await flush();
+  [...h.activity.timers.values()][0](); await flush();
+  h.activity.requests[0].resolve({ ok: false, status: 409, json: async () => ({ ok: false,
+    code: "transcription_local_only", error: "fixture-provider-account-detail" }) });
+  await done;
+  assert.match(h.node("mic-result").textContent, /Local Only.*typed chat/i);
+  await h.emit("mic-copy")[0];
+  assert.doesNotMatch(h.node("mic-result").textContent + h.activity.copied.at(-1) + h.activity.logs.join("\n"), /fixture-provider-account-detail/);
+});
+
+test("Settings enumerates device names as text and retains only an available selection", async () => {
+  const label = 'Sand & Stone "Input"';
+  const h = settingsHarness({ enumerate: () => Promise.resolve([
+    { kind: "audioinput", deviceId: "fixture-A", label },
+    { kind: "audioinput", deviceId: "fixture-B", label: "" },
+  ]) });
+  await flush();
+  const select = h.node("mic-device");
+  assert.deepEqual(Array.from(select.options, ({ value, textContent }) => [value, textContent]), [
+    ["", "System default"], ["fixture-A", label], ["fixture-B", "Microphone 2"],
+  ]);
+  assert.equal(select.value, "fixture-A");
+  const missing = settingsHarness({ enumerate: () => Promise.resolve([
+    { kind: "audioinput", deviceId: "fixture-replacement", label: "" },
+  ]) });
+  await flush();
+  assert.equal(missing.node("mic-device").value, "");
 });

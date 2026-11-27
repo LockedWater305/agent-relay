@@ -550,6 +550,25 @@
       // into main.log, so "it didn't hear me" is answerable from disk instead of
       // from memory.
       const micLog = (msg) => { try { void appBridge?.log?.(`mic: ${msg}`); } catch (_) {} };
+      const micAccessDenied = "Microphone access was denied. Allow microphone access for BeeZilla or desktop apps in your system privacy settings, then retry.";
+      const micErrorKind = (error) => ["NotAllowedError", "SecurityError", "NotFoundError", "NotReadableError", "OverconstrainedError", "AbortError"].includes(error?.name)
+        ? error.name : "Error";
+      function transcriptionFailure(code) {
+        switch (code) {
+          case "transcription_local_only": return "Local Only is on. Use typed chat because on-device transcription is not available in this build.";
+          case "transcription_policy_unavailable": return "Your privacy settings could not be checked. Use typed chat or try again.";
+          case "signed_out":
+          case "transcription_session_changed": return "Sign in again before testing transcription.";
+          case "audio_context_changed": return "Microphone authorization changed. Select Record again.";
+          case "audio_input_origin": return "Start the microphone test in the BeeZilla app.";
+          case "transcription_cancelled": return "The transcription was cancelled. Select Record to try again.";
+          case "audio_too_short": return "The clip was too short. Speak during the recording and try again.";
+          case "audio_too_large": return "The recording is too long. Try again with a shorter clip.";
+          case "bad_audio_type":
+          case "bad_audio": return "BeeZilla could not read the clip. Try recording again.";
+          default: return "Transcription failed. Try again or check your inference setup.";
+        }
+      }
       let micStream = null, micPeak = -100, micInfo = { settings: {} }, lastMicResult = "not run";
       let micFrames = 0, micCtxState = "(none)";
       let micGeneration = 0, micAcquisition = null, micMeter = null, micTest = null;
@@ -576,12 +595,18 @@
           const inputs = devices.filter((d) => d.kind === "audioinput");
           const sel = $("mic-device");
           const chosen = sel.value;
-          sel.innerHTML = '<option value="">System default</option>' +
-            inputs.map((d, i) => `<option value="${d.deviceId}">${d.label || `Microphone ${i + 1}`}</option>`).join("");
-          if (chosen) sel.value = chosen;
-          micLog(`devices=${inputs.length} [${inputs.map((d) => d.label || "(unlabelled)").join(" | ")}]`);
+          const option = (value, label) => {
+            const node = document.createElement("option");
+            node.value = value;
+            node.textContent = label;
+            return node;
+          };
+          sel.replaceChildren(option("", "System default"),
+            ...inputs.map((device, i) => option(device.deviceId, device.label || `Microphone ${i + 1}`)));
+          sel.value = inputs.some((device) => device.deviceId === chosen) ? chosen : "";
+          micLog(`devices=${inputs.length}`);
         } catch (err) {
-          if (micCurrent(generation)) micLog(`enumerateDevices failed ${err?.name}: ${err?.message}`);
+          if (micCurrent(generation)) micLog(`enumerateDevices failed ${micErrorKind(err)}`);
         }
       }
 
@@ -628,7 +653,7 @@
           tick();
         } catch (err) {
           stopMeter();
-          micLog(`meter failed ${err?.message}`);
+          micLog(`meter failed ${micErrorKind(err)}`);
         }
       }
 
@@ -648,30 +673,30 @@
           try {
             const audio = { channelCount: 1, echoCancellation: true, noiseSuppression: true };
             if ($("mic-device").value) audio.deviceId = { exact: $("mic-device").value };
-            micLog(`getUserMedia device=${$("mic-device").value || "system default"}`);
+            micLog(`getUserMedia input=${$("mic-device").value ? "selected" : "system default"}`);
             const stream = await navigator.mediaDevices.getUserMedia({ audio });
             if (!current()) { stopTracks(stream); return null; }
             micStream = stream;
             const track = stream.getAudioTracks()[0];
-            micInfo = { label: track?.label || "(unlabelled)", settings: track?.getSettings?.() || {}, readyState: track?.readyState, muted: track?.muted };
+            micInfo = { settings: track?.getSettings?.() || {}, readyState: track?.readyState, muted: track?.muted };
             micLog(`track readyState=${track?.readyState} muted=${track?.muted} enabled=${track?.enabled}`);
-            if (track?.muted) say($("mic-status"), "The device opened but is muted by the system.", "err");
-            micLog(`stream ok label="${micInfo.label}" rate=${micInfo.settings.sampleRate || "?"} ch=${micInfo.settings.channelCount || "?"}`);
-            say($("mic-status"), "Microphone ready — speak and the bar should move.", "ok");
+            micLog(`stream ok rate=${micInfo.settings.sampleRate || "?"} ch=${micInfo.settings.channelCount || "?"}`);
+            if (track?.muted) say($("mic-status"), "The device opened but is muted by the system. Check your input settings before recording.", "err");
+            else say($("mic-status"), "Microphone ready. Speak and the bar should move.", "ok");
             await fillDevices(acquisition.generation);
             if (!current()) return null;
             startMeter(stream);
             return stream;
           } catch (err) {
             if (!current()) return null;
-            const name = err?.name || "Error";
-            const hint =
-              name === "NotAllowedError" ? " — permission was refused (Windows: Settings → Privacy → Microphone)"
-              : name === "NotFoundError" ? " — no input device is present"
-              : name === "NotReadableError" ? " — another app is holding the device"
-              : "";
-            micLog(`getUserMedia failed ${name}: ${err?.message}`);
-            say($("mic-status"), `${name}${hint}`, "err");
+            const name = micErrorKind(err);
+            lastMicResult =
+              name === "NotAllowedError" || name === "SecurityError" ? micAccessDenied
+              : name === "NotFoundError" || name === "OverconstrainedError" ? "This input is unavailable. Select another microphone and retry."
+              : name === "NotReadableError" ? "BeeZilla could not open this microphone. Check whether it is muted or in use, then retry."
+              : "BeeZilla could not open the microphone. Check your input settings and retry.";
+            micLog(`getUserMedia failed ${name}`);
+            say($("mic-status"), lastMicResult, "err");
             stopTracks(micStream);
             micStream = null;
             return null;
@@ -774,7 +799,7 @@
       $("mic-device")?.addEventListener("change", () => {
         if (!micCurrent()) return;
         resetDiagnostics("Input changed. Select Allow microphone or Record to test it.", "Not tested on this input.");
-        micLog(`device changed → ${$("mic-device").value || "default"}`);
+        micLog(`device changed input=${$("mic-device").value ? "selected" : "system default"}`);
       });
 
       micTestButton?.addEventListener("click", async () => {
@@ -805,17 +830,20 @@
           const data = await res.json().catch(() => ({}));
           if (!currentMicTest(test)) return;
           if (!res.ok || !data?.ok) {
-            lastMicResult = `${res.status} ${data?.error || "transcription failed"}`;
-            micLog(`transcribe ${res.status} ${JSON.stringify(data).slice(0, 200)}`);
-            $("mic-result").textContent = `Failed: ${lastMicResult}`;
-            say(status, "The transcriber refused that clip.", "err");
+            const http = Number.isInteger(res.status) ? res.status : "?";
+            lastMicResult = transcriptionFailure(data?.code);
+            micLog(`transcribe failed HTTP=${http} ${lastMicResult}`);
+            $("mic-result").textContent = lastMicResult;
+            say(status, "Transcription did not complete.", "err");
             return;
           }
-          lastMicResult = data.text || "(empty transcript)";
-          micLog(`transcribe ok ms=${data.ms} model=${data.model} text="${(data.text || "").slice(0, 120)}"`);
+          const transcript = typeof data.text === "string" ? data.text : "";
+          const timing = Number.isFinite(data.ms) ? `${Math.round(data.ms)} ms` : "timing unavailable";
+          lastMicResult = transcript ? `Transcribed (${timing})` : "No words in the recording.";
+          micLog(`transcribe ok hasText=${Boolean(transcript)} timing=${timing}`);
           const facts = `peak ${micPeak.toFixed(0)} dBFS · frames ${micFrames} · ctx ${micCtxState} · track ${micInfo.readyState || "?"}`;
-          $("mic-result").textContent = data.text
-            ? `Heard: “${data.text}”  ·  ${data.ms} ms  ·  ${data.model}  ·  ${facts}`
+          $("mic-result").textContent = transcript
+            ? `Heard: “${transcript}”  ·  ${timing}  ·  ${facts}`
             : `Heard nothing. ${facts} — ${
                 micFrames === 0
                   ? "the audio graph never ran, which is a permission or device problem, not a level problem."
@@ -823,11 +851,11 @@
                     ? "the stream is delivering near-silence. On Windows check Settings → Privacy → Microphone → “Let desktop apps access your microphone”; a browser tab has its own grant and can work while the app is refused."
                     : "audio arrived, so the clip was too short or too quiet."
               }`;
-          say(status, data.text ? "Transcribed." : "No words in that clip.", data.text ? "ok" : "err");
+          say(status, transcript ? "Transcribed." : "No words in that clip.", transcript ? "ok" : "err");
         } catch (err) {
           if (currentMicTest(test)) {
-            lastMicResult = `${err?.name || "error"}: ${err?.message || ""}`;
-            micLog(`test threw ${lastMicResult}`);
+            lastMicResult = "The recording or transcription could not finish. Check your microphone and retry.";
+            micLog(`test failed ${micErrorKind(err)}`);
             say(status, lastMicResult, "err");
           }
         } finally {
@@ -843,11 +871,10 @@
         const block = [
           `BeeZilla ${version?.ok ? version.data.version : "?"}`,
           `user agent: ${navigator.userAgent}`,
-          `device: ${micInfo.label || "(none)"} rate=${micInfo.settings.sampleRate || "?"} ch=${micInfo.settings.channelCount || "?"}`,
+          `input: ${$("mic-device").value ? "selected" : "system default"} rate=${micInfo.settings.sampleRate || "?"} ch=${micInfo.settings.channelCount || "?"}`,
           `peak: ${micPeak.toFixed(0)} dBFS · frames ${micFrames} · ctx ${micCtxState}`,
           `track: readyState=${micInfo.readyState || "?"} muted=${micInfo.muted ?? "?"}`,
           `last result: ${lastMicResult}`,
-          `log: ${$("logs-path").textContent || "(unknown)"}`,
         ].join("\n");
         try {
           await navigator.clipboard.writeText(block);
@@ -876,6 +903,7 @@
           if (!micCurrent(generation) || micAcquisition || micStream) return;
           micLog(`permission state=${p.state}`);
           if (p.state === "granted") say($("mic-status"), "Already allowed — press “Record 3 s & transcribe”.", "ok");
+          if (p.state === "denied") { lastMicResult = micAccessDenied; say($("mic-status"), micAccessDenied, "err"); }
         }).catch(() => { if (micCurrent(generation)) micLog("permission query unsupported"); });
       }
     </script>
