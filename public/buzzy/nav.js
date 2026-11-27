@@ -381,6 +381,18 @@
     var cached = readIdentityCache();
     if (cached !== undefined) paint(cached ? cached.name : null, cached ? cached.email : null);
 
+    function isSignedOutSession(res) {
+      return res === null || (res && res.user === null && !res.session);
+    }
+    function clearSignedOut() {
+      sessionRefresh++;
+      sessionKnown = true;
+      localWorkspace = false;
+      writeIdentityCache(null);
+      paint(null, null);
+      chrome.dispatchEvent(new Event("bz:session-ended"));
+    }
+
     function signOut(e) {
       // Repainting removes the clicked button. Do not let an outside-click
       // handler mistake that detached node for a click outside the menu.
@@ -401,12 +413,8 @@
         if (!r.ok || r.redirected) throw new Error("session not confirmed");
         return r.json();
       }).then(function (s) {
-        if (!(s === null || (s && s.user === null && !s.session))) throw new Error("session not confirmed");
-        writeIdentityCache(null);
-        try {
-          window.localStorage.setItem("bz_plan", "null");
-          window.localStorage.setItem("bz_honey", "null");
-        } catch (err) { /* storage unavailable */ }
+        if (!isSignedOutSession(s)) throw new Error("session not confirmed");
+        clearSignedOut();
         // End the document (including its running voice engine) only after
         // the server has confirmed no signed-in session remains.
         window.location.href = "/buzzy/";
@@ -472,16 +480,15 @@
         .then(function (res) {
           // An outage or an older request proves nothing about the current session.
           if (res === undefined || refresh !== sessionRefresh) return;
-          sessionKnown = true;
           var u = res && res.user;
-          localWorkspace = !!(u && u.id === "local_owner" && res.session &&
-            res.session.id === "local-session" && res.session.userId === u.id);
           if (u && (u.name || u.email)) {
+            sessionKnown = true;
+            localWorkspace = !!(u.id === "local_owner" && res.session &&
+              res.session.id === "local-session" && res.session.userId === u.id);
             writeIdentityCache({ name: u.name || u.email, email: u.email || "" });
             paint(u.name || u.email, u.email);
-          } else {
-            writeIdentityCache(null);
-            paint(null, null);
+          } else if (isSignedOutSession(res)) {
+            clearSignedOut();
           }
         })
         .catch(function () { /* keep whatever we painted */ });
@@ -587,17 +594,27 @@
       }
     } catch (e) { /* private mode: the round trip is still the truth */ }
 
+    function writeCache(n) {
+      try { window.localStorage.setItem(CACHE, n === null ? "null" : String(n)); } catch (e) {}
+    }
+    var sessionEnded = false;
+    chrome.addEventListener("bz:session-ended", function () {
+      sessionEnded = true;
+      paint(null);
+      writeCache(null);
+    });
+
     fetch("/api/wallet", { credentials: "same-origin" })
       // 401 is an answer (nobody is signed in), not an outage: clear the chip.
       .then(function (r) { return r.status === 401 ? { balance: null } : r.ok ? r.json() : undefined; })
       .then(function (d) {
-        if (d === undefined) return; // inconclusive: keep whatever we painted
+        if (sessionEnded || d === undefined) return; // do not repaint from a pre-logout request
         if (d && typeof d.balance === "number") {
           paint(d.balance);
-          try { window.localStorage.setItem(CACHE, String(d.balance)); } catch (e) {}
+          writeCache(d.balance);
         } else {
           paint(null);
-          try { window.localStorage.setItem(CACHE, "null"); } catch (e) {}
+          writeCache(null);
         }
       })
       .catch(function () { /* keep whatever we painted */ });
@@ -851,6 +868,8 @@
     function paint(d) {
       if (!d || !d.plan) {
         a.textContent = "";
+        a.removeAttribute("title");
+        a.className = "bz-plan";
         a.style.display = "none";
         return;
       }
@@ -867,11 +886,18 @@
     var cached = readCache();
     if (cached) paint(cached);
 
+    var sessionEnded = false;
+    chrome.addEventListener("bz:session-ended", function () {
+      sessionEnded = true;
+      paint(null);
+      writeCache(null);
+    });
+
     fetch("/api/buzzy/entitlement", { credentials: "same-origin" })
       // 401 is an answer (nobody is signed in), not an outage: clear the chip.
       .then(function (r) { return r.status === 401 ? { ok: false } : r.ok ? r.json() : undefined; })
       .then(function (d) {
-        if (!d || typeof d.ok === "undefined") return; // transport oddity: keep the cache
+        if (sessionEnded || !d || typeof d.ok === "undefined") return;
         if (d.ok && d.plan) {
           writeCache(d);
           paint(d);

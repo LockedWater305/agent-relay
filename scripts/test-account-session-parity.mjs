@@ -3,12 +3,14 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { readFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright";
 
 const root = new URL("../public/buzzy/", import.meta.url);
 const [nav, login] = await Promise.all(["nav.js", "login.html"].map(f => readFile(new URL(f,root))));
 const user = { id:"fixture-user", name:"Fixture Reader", email:"fixture@example.test" };
 const local = { id:"local_owner", name:"Local Owner", email:"owner@beezilla.local" };
+const isIndicator = pathname => pathname==="/api/wallet" || pathname==="/api/buzzy/entitlement";
 const shell = '<!doctype html><html><head><script src="/buzzy/nav.js" defer></script></head><body><header><nav></nav></header><main>Fixture page</main></body></html>';
 let scenario, posts;
 const api = http.createServer((req,res) => {
@@ -19,6 +21,10 @@ const api = http.createServer((req,res) => {
   if(path.startsWith("/buzzy/") && !path.includes(".")){res.writeHead(200,{"content-type":"text/html"});return res.end(shell);}
   if(path==="/api/auth/sign-in/email" && req.method==="POST"){res.setHeader("Set-Cookie","fixture=synthetic; HttpOnly; Path=/; SameSite=Strict");return json(200,{user});}
   if(path==="/api/auth/get-session"){return json(200,scenario==="local"?{session:{id:"local-session",userId:local.id},user:local}:req.headers.cookie?.includes("fixture=synthetic")?{session:{id:"session-fixture",userId:user.id},user}:null);}
+  if(isIndicator(path)){
+    if(!req.headers.cookie?.includes("fixture=synthetic"))return json(401,{});
+    return json(200,path==="/api/wallet"?{balance:4321}:{ok:true,plan:"pro",remaining:{inference:19},planUntil:"2027-01-02"});
+  }
   if(path==="/api/auth/sign-out" && req.method==="POST"){
     ++posts;
     if(scenario==="failure")return json(500,{message:"fixture unavailable"});
@@ -34,13 +40,23 @@ const origin="http://127.0.0.1:"+api.address().port;
 let browser;
 try{
   browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH||undefined});
-  for(const mode of ["failure","offline","bad-body","delayed","expired","local","another-tab","restored-page-event"]){
+  for(const mode of ["failure","offline","bad-body","delayed","expired","local","another-tab","restored-page-event","late-indicators"]){
     scenario=mode;posts=0; const ctx=await browser.newContext();
+    let delayPrivateResponses=false, releasePrivateResponses;
+    const privateResponseGate=new Promise(resolve=>{releasePrivateResponses=resolve;});
+    let countHeld=0, markHeld;
+    const heldResponses=new Promise(resolve=>{markHeld=resolve;});
     try {
       let attempts=0;
-      await ctx.route("**/*",r=>{
+      await ctx.route("**/*",async r=>{
         const u=new URL(r.request().url());
         if(u.origin!==origin) return r.abort();
+        if(delayPrivateResponses && isIndicator(u.pathname)){
+          const response=await r.fetch();
+          if(++countHeld===2)markHeld();
+          await privateResponseGate;
+          return r.fulfill({response});
+        }
         if(u.pathname==="/api/auth/sign-out" && r.request().method()==="POST"){
           ++attempts;
           if(scenario==="offline")return r.abort("internetdisconnected");
@@ -57,7 +73,15 @@ try{
         await Promise.all([page.waitForURL("**/buzzy/profile"),page.locator("#submit").click()]);
       }
       await page.waitForFunction(n=>document.getElementById("accountLink")?.textContent===n,mode==="local"?local.name:user.name);
+      const indicatorCase=["another-tab","restored-page-event","late-indicators"].includes(mode);
+      if(indicatorCase)await page.waitForFunction(()=>document.getElementById("bzPlanChip")?.textContent==="PRO" && /4,321/.test(document.getElementById("bzHoneyChip")?.textContent||""));
+      delayPrivateResponses=mode==="late-indicators";
+      const staleResponses=delayPrivateResponses?["/api/wallet","/api/buzzy/entitlement"].map(path=>page.waitForResponse(r=>new URL(r.url()).pathname===path)) : [];
       await Promise.all([page.waitForResponse(r=>new URL(r.url()).pathname==="/api/auth/get-session"),page.reload()]);
+      if(delayPrivateResponses)await Promise.race([
+        heldResponses,
+        sleep(2500,undefined,{ref:false}).then(()=>{throw new Error("indicator responses were not held before expiry");}),
+      ]);
       await page.waitForFunction(n=>document.getElementById("accountLink")?.textContent===n,mode==="local"?local.name:user.name);
       // Force an authoritative session read in this page's lifecycle before testing the menu.
 
@@ -77,7 +101,7 @@ try{
         assert.match(await menu.innerText(),/local workspace/i);
         assert.equal(await menu.getByRole("button",{name:"Log out"}).count(),0);
         assert.equal(posts,0);
-      }else if(mode==="another-tab" || mode==="restored-page-event"){
+      }else if(indicatorCase){
         const documentKey=await page.evaluate(()=>window.__sessionFixtureDoc=Math.random());
         const reread=page.waitForResponse(r=>new URL(r.url()).pathname==="/api/auth/get-session");
         if(mode==="another-tab"){
@@ -99,6 +123,19 @@ try{
         await page.waitForFunction(()=>document.getElementById("accountLink")?.textContent==="Sign in");
         assert.equal(await menu.count(),0);
         assert.equal(await page.evaluate(()=>window.__sessionFixtureDoc),documentKey,"old document updated without reload");
+        if(mode==="late-indicators"){
+          releasePrivateResponses();
+          const responses=await Promise.all(staleResponses);
+          assert.deepEqual(await Promise.all(responses.map(r=>r.status())),[200,200],"old authenticated responses arrived after logout");
+          await Promise.all(responses.map(r=>r.finished()));
+          // Allow the response JSON/DOM microtasks to settle before asserting.
+          await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+        }
+        const indicators=await page.evaluate(()=>{
+          const plan=document.getElementById("bzPlanChip"),honey=document.getElementById("bzHoneyChip");
+          return {plan:plan.textContent,planTitle:plan.getAttribute("title"),hidden:plan.style.display==="none",honey:honey.textContent,honeyTitle:honey.title,cache:[localStorage.bz_plan,localStorage.bz_honey]};
+        });
+        assert.deepEqual(indicators,{plan:"",planTitle:null,hidden:true,honey:"\u25c8",honeyTitle:"",cache:["null","null"]},"no previous plan, usage, billing date or Honey balance remains in DOM or persistent cache");
       }else{
         const before=await page.evaluate(()=>{localStorage.setItem("bz_plan",'"fixture-plan"');localStorage.setItem("bz_honey","5");return [localStorage.bz_identity,localStorage.bz_plan,localStorage.bz_honey];});
         await menu.getByRole("button",{name:"Log out"}).click();
@@ -125,6 +162,6 @@ try{
       }
       assert.deepEqual(pageErrors,[]);
       console.log("PASS",mode,"sign-in/refresh/identity/logout");
-    }catch(e){process.exitCode=1;console.error("FAIL",mode,e.message);}finally{await ctx.close();}
+    }catch(e){process.exitCode=1;console.error("FAIL",mode,e.message);}finally{releasePrivateResponses();await ctx.close();}
   }
 }finally{await browser?.close();api.closeAllConnections();await new Promise(r=>api.close(r));}
