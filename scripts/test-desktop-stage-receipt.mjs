@@ -7,7 +7,16 @@ import { join } from "node:path";
 import { finishCheckout, observeCheckout, observeStagedRuntime } from "../desktop/stage-receipt.mjs";
 
 const gitAvailable = spawnSync("git", ["--version"]).status === 0;
-const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding:"utf8", stdio:["ignore","pipe","pipe"] }).trim();
+const git = (cwd, ...args) => execFileSync("git", args, {
+  cwd, encoding:"utf8", stdio:["ignore","pipe","pipe"],
+  // Git hooks and some CI wrappers export GIT_DIR/GIT_INDEX_FILE. Fixture
+  // commits must always stay in our disposable repo, never the caller's.
+  env:{
+    ...Object.fromEntries(Object.entries(process.env).filter(([key])=>!/^GIT_/i.test(key))),
+    GIT_CONFIG_NOSYSTEM:"1",
+    GIT_CONFIG_GLOBAL:join(cwd,".git","fixture-unused-global-config"),
+  },
+}).trim();
 function scratch(t) {
   const dir=mkdtempSync(join(tmpdir(),"bee-stage-receipt-"));
   t.after(()=>rmSync(dir,{recursive:true,force:true}));
@@ -86,12 +95,16 @@ test("Git directory and worktree environment do not relabel the local checkout",
   const real=repo(t), other=repo(t);
   const expected=observeCheckout(real);
   git(other,"-c","user.name=Fixture","-c","user.email=fixture@example.invalid","commit","--allow-empty","-qm","other");
-  assert.notEqual(git(other,"rev-parse","HEAD"),expected.commit);
+  const otherHead=git(other,"rev-parse","HEAD");
+  assert.notEqual(otherHead,expected.commit);
   const paths={GIT_DIR:join(other,".git"),GIT_WORK_TREE:other,GIT_INDEX_FILE:join(other,".git","index")};
   const previous=Object.fromEntries(Object.keys(paths).map(key=>[key,process.env[key]]));
   try {
     Object.assign(process.env,paths);
     assert.deepEqual(observeCheckout(real),expected);
+    const isolated=repo(t);
+    assert.equal(observeCheckout(isolated).state,"git-clean");
+    assert.equal(git(other,"rev-parse","HEAD"),otherHead,"fixture commits never update the redirected repository");
   } finally {
     for (const [key,value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
