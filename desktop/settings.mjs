@@ -160,13 +160,12 @@ export function createSettingsHandlers({ dataDir, supervisor, cipher = {}, befor
         baseUrl: cfg.baseUrl ?? "",
         model: cfg.model ?? "",
         expiresAt: cfg.expiresAt ?? "",
-      }, cipher);
+      }, cipher, adoption ? { connectedOwner: adoption.connectedOwner } : undefined);
       // The inference record above is the commit point. An older search token
       // no longer matches it, even if this optional mint could not be saved.
       let searchSaved = null;
       let searchError = null;
       if (provider === "beezilla" && adoption) {
-        adoption.onCommitted?.();
         if (adoption.search) {
           try {
             const search = saveManagedSearchStore(dir, {

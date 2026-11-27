@@ -39,26 +39,74 @@ export function storePath(dataDir) {
 const validConnection = (id) => typeof id === "string" &&
   /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id);
 
-// undefined means a legacy/no record; null means a connection cannot safely
-// be identified. Read the pairing marker without decrypting either key.
-export function managedSearchConnection(dataDir) {
+// undefined means absent; null means we cannot safely read the record.
+function readCredentialRecord(dataDir) {
   try {
     const raw = JSON.parse(readFileSync(storePath(dataDir), "utf8"));
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-    if (!Object.hasOwn(raw, "managedConnectionId")) return undefined;
-    return validConnection(raw.managedConnectionId) ? raw.managedConnectionId : null;
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
   } catch (error) {
     return error?.code === "ENOENT" ? undefined : null;
   }
 }
 
+function connectionId(raw) {
+  if (raw === null) return null;
+  if (!raw || !Object.hasOwn(raw, "managedConnectionId")) return undefined;
+  return validConnection(raw.managedConnectionId) ? raw.managedConnectionId : null;
+}
+
+// The pairing marker is non-secret; reading it does not decrypt either key.
+export function managedSearchConnection(dataDir) {
+  return connectionId(readCredentialRecord(dataDir));
+}
+
 export function hasRemovableInference(dataDir) {
+  const raw = readCredentialRecord(dataDir);
+  return raw !== undefined && !(raw && validConnection(raw.managedConnectionId)
+    && Object.keys(raw).every((key) => key === "managedConnectionId" || key === "connectedOwner"));
+}
+
+function ownerDisplay(profile) {
+  const email = typeof profile?.email === "string" ? profile.email.trim() : "";
+  if (!email) return null;
+  return { name: typeof profile.name === "string" ? profile.name.trim() : "", email };
+}
+
+function protectConnectedOwner(profile, cipher, managedConnectionId) {
+  const display = ownerDisplay(profile);
+  if (!display || !cipher.encryptOwner) return null;
   try {
-    const raw = JSON.parse(readFileSync(storePath(dataDir), "utf8"));
-    return !(raw && validConnection(raw.managedConnectionId) && Object.keys(raw).length === 1);
-  } catch (error) {
-    return error?.code !== "ENOENT";
+    const encrypted = Buffer.from(cipher.encryptOwner(JSON.stringify({ ...display, managedConnectionId })));
+    return encrypted.length ? encrypted.toString("base64") : null;
+  } catch {
+    // Optional profile must not prevent a valid credential commit. Never write
+    // plaintext or leave an old connected profile in place instead.
+    return null;
   }
+}
+
+// Internal desktop presentation only, not used by Settings status or CLI.
+// undefined permits an existing, unmodified legacy sidecar. null is deliberate
+// fallback: unavailable, untrusted, or a new connection with no usable profile.
+export function loadConnectedOwner(dataDir, cipher = {}) {
+  const raw = readCredentialRecord(dataDir);
+  const id = connectionId(raw);
+  if (id === null) return null;
+  if (!raw || !Object.hasOwn(raw, "connectedOwner")) return undefined;
+  if (!id || typeof raw.connectedOwner !== "string" || !raw.connectedOwner || !cipher.decrypt) return null;
+  try {
+    const display = JSON.parse(cipher.decrypt(Buffer.from(raw.connectedOwner, "base64")));
+    return display?.managedConnectionId === id ? ownerDisplay(display) : null;
+  } catch {
+    return null;
+  }
+}
+
+function preserveConnectedOwner(raw, id) {
+  if (id === null) return { connectedOwner: null };
+  return raw && Object.hasOwn(raw, "connectedOwner")
+    ? { connectedOwner: id && typeof raw.connectedOwner === "string" ? raw.connectedOwner : null }
+    : {};
 }
 
 export function writeCredentialRecord(file, value) {
@@ -125,9 +173,10 @@ export function isExpired(cred, now = Date.now()) {
 /**
  * @param {string} dataDir
  * @param {{ provider: string, key: string, baseUrl?: string, model?: string }} cfg
- * @param {{ encrypt?: (s: string) => Buffer|string }} cipher
+ * @param {{ encrypt?: (s: string) => Buffer|string, encryptOwner?: (s: string) => Buffer|string }} cipher
+ * @param {{connectedOwner?: {name?: string, email?: string}|null}} adoption Internal Connect metadata
  */
-export function saveInference(dataDir, cfg, cipher = {}) {
+export function saveInference(dataDir, cfg, cipher = {}, adoption = {}) {
   if (!PROVIDERS.has(cfg.provider)) throw new Error(`unknown provider: ${cfg.provider}`);
   const key = (cfg.key ?? "").trim();
   if (!key) throw new Error("a key is required");
@@ -138,7 +187,8 @@ export function saveInference(dataDir, cfg, cipher = {}) {
     : key;
 
   const baseUrl = (cfg.baseUrl ?? "").trim();
-  const priorConnection = managedSearchConnection(dataDir);
+  const prior = readCredentialRecord(dataDir);
+  const priorConnection = connectionId(prior);
   const managedConnectionId = cfg.provider === "beezilla" || priorConnection === null
     ? randomUUID()
     : priorConnection;
@@ -151,16 +201,28 @@ export function saveInference(dataDir, cfg, cipher = {}) {
     keyCipher,
     updatedAt: new Date().toISOString(),
     ...(managedConnectionId ? { managedConnectionId } : {}),
+    ...(cfg.provider === "beezilla"
+      ? { connectedOwner: protectConnectedOwner(adoption.connectedOwner, cipher, managedConnectionId) }
+      : preserveConnectedOwner(prior, priorConnection)),
   };
+  // Connection generation, credential, and display disposition become visible
+  // together. No post-commit profile write can leave another account displayed.
   writeCredentialRecord(storePath(dataDir), payload);
-  return { ...payload, keyCipher: undefined };
+  const { connectedOwner: _display, ...credential } = payload;
+  return { ...credential, keyCipher: undefined };
 }
 
 export function clearInference(dataDir) {
-  const id = managedSearchConnection(dataDir);
-  // Removing inference must not reactivate an unpaired legacy search token.
-  if (id !== undefined) writeCredentialRecord(storePath(dataDir), { managedConnectionId: id ?? randomUUID() });
-  else rmSync(storePath(dataDir), { force: true });
+  const raw = readCredentialRecord(dataDir);
+  const id = connectionId(raw);
+  // Removing inference does not unlink the connected profile or reactivate an
+  // unpaired legacy search token. An old unmarked installation stays legacy.
+  if (id !== undefined) writeCredentialRecord(storePath(dataDir), {
+    managedConnectionId: id ?? randomUUID(), ...preserveConnectedOwner(raw, id),
+  });
+  else if (raw && Object.hasOwn(raw, "connectedOwner")) {
+    writeCredentialRecord(storePath(dataDir), { managedConnectionId: randomUUID(), connectedOwner: null });
+  } else rmSync(storePath(dataDir), { force: true });
 }
 
 /** Never let a key reach a log line, an error message or a `--show` output. */

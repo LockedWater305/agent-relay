@@ -2,7 +2,11 @@
 // providers, real accounts, or a DB. Disk writes are synthetic temporary identity records.
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as inference from "./lib/inference.mjs";
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
@@ -17,8 +21,8 @@ const main=read("desktop/main.mjs"), settingsSource=read("desktop/settings.mjs")
 const start=main.indexOf("function identityFile()");
 const end=main.indexOf("// Only values this process injected",start);
 assert.ok(start>=0&&end>start);
-assert.match(main,/onCommitted:\s*\(\)\s*=>\s*saveIdentity\(outcome.account\)/);
-assert.match(main,/beforeRestart:[\s\S]*?applyIdentityToEnv\(\)/);
+assert.match(main,/connectedOwner:\s*outcome.account/);
+assert.match(main,/beforeRestart:[\s\S]*?await applyIdentityToEnv\(\)/);
 const identity=main.slice(start,end);
 const alpha={name:"Fixture Alpha",email:"alpha@example.invalid"};
 const beta={name:"Fixture Beta",email:"beta@example.invalid"};
@@ -26,6 +30,18 @@ const generic={name:"Owner",email:"owner@beezilla.local"};
 const origin="http://127.0.0.1:8090";
 const localToken="fixture-only-local-launch-token";
 const names=["BZ_LOCAL_OWNER_NAME","BZ_LOCAL_OWNER_EMAIL"];
+const testKey=Buffer.alloc(32,0x51); // Fixture only, never an app credential.
+const encrypt=value=>{
+  const iv=randomBytes(12);
+  const aead=createCipheriv("aes-256-gcm",testKey,iv);
+  return Buffer.concat([iv,aead.update(value,"utf8"),aead.final(),aead.getAuthTag()]);
+};
+const decrypt=value=>{
+  const aead=createDecipheriv("aes-256-gcm",testKey,value.subarray(0,12));
+  aead.setAuthTag(value.subarray(-16));
+  return Buffer.concat([aead.update(value.subarray(12,-16)),aead.final()]).toString("utf8");
+};
+const secured={encrypt,encryptOwner:encrypt,decrypt};
 const compile=path=>ts.transpileModule(read(path),{fileName:path,compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2023}}).outputText;
 const localSource=compile("src/lib/local-owner.ts");
 const authSource=compile("src/lib/auth-api.nitro.ts");
@@ -35,29 +51,32 @@ const load=(text,env,deps)=>{
     require(name){assert.ok(Object.hasOwn(deps,name),"closed fixture dependency: "+name);return deps[name];}});
   return exports;
 };
-async function setup(t, explicit={}){
+async function setup(t, explicit={}, {cipher=secured, seeded}={}){
   const dir=mkdtempSync(join(tmpdir(),"bz-local-owner-fixture-"));
   t.after(()=>rmSync(dir,{recursive:true,force:true}));
   const file=join(dir,"identity.json");
+  if(seeded)writeFileSync(file,JSON.stringify(seeded));
+  const stored=join(dir,"inference.json");
   const logs=[];
   const quiet={log:(...items)=>logs.push(items.join(" ")),warn:(...items)=>logs.push(items.join(" "))};
-  const env={...explicit};
+  let env, boots=0, persistedRow, app, mintCount=0, rejectDecrypt=false;
   const supervisor={dataDir:dir,runtime:{port:8090},async isHealthy(){return true;},async stop(){},async start(){
     boots++;
     await spawnLocal();
     return this.runtime;
   }};
-  let boots=0, persistedRow, app, credential=null, mintCount=0, rejectIdentityWrites=false;
-  const launcher=vm.createContext({supervisor,process:{env},join,existsSync,mkdirSync,readFileSync,console:quiet,
-    writeFileSync(path,data){
-      assert.equal(path,file);
-      if(rejectIdentityWrites)throw Object.assign(new Error("fixture-private-path"),{code:"EACCES"});
-      writeFileSync(path,data);
-    },
-  });
-  vm.runInContext(identity,launcher);
-  const apply=vm.runInContext("applyIdentityToEnv",launcher);
-  const save=vm.runInContext("saveIdentity",launcher);
+  const newLauncher=()=>{
+    env={...explicit};
+    const launcher=vm.createContext({supervisor,process:{env},join,readFileSync,console:quiet,Buffer,
+      runtimeLib:async()=>inference,safeStorage:{decryptString(value){
+        if(rejectDecrypt)throw Error("fixture unavailable");
+        return decrypt(value);
+      }},
+    });
+    vm.runInContext(identity,launcher);
+    return vm.runInContext("applyIdentityToEnv",launcher);
+  };
+  let apply=newLauncher();
   async function spawnLocal(){
     const snapshot={...env,BZ_LOCAL_TOKEN:localToken};
     const owner=load(localSource,snapshot,{
@@ -87,12 +106,7 @@ async function setup(t, explicit={}){
     return {name:data.user.name,email:data.user.email};
   };
   const libs={
-    "scripts/lib/inference.mjs":{
-      loadInference:()=>credential,resolveInference:()=>credential,
-      redactKey:()=>"[fixture]",hasRemovableInference:()=>!!credential,isExpired:()=>false,
-      saveInference:(_dir,data)=>credential={...data,source:"store",encrypted:true,managedConnectionId:"fixture-connection"},
-      clearInference:()=>{credential=null;},
-    },
+    "scripts/lib/inference.mjs":inference,
     "scripts/lib/search-keys.mjs":{
       resolveSearch:()=>null,loadManagedSearch:()=>null,saveManagedSearch:()=>{throw Error("fixture has no search mint");},
     },
@@ -107,7 +121,7 @@ async function setup(t, explicit={}){
     throw Error("unexpected settings fixture import "+path);
   });
   await implemented.evaluate();
-  const settings=implemented.namespace.createSettingsHandlers({dataDir:()=>dir,supervisor,beforeRestart:async()=>apply()});
+  const settings=implemented.namespace.createSettingsHandlers({dataDir:()=>dir,supervisor,cipher,beforeRestart:async()=>apply()});
   async function connect(profile,mintOk=true){
     const got=await connectAccount({
       baseUrl:origin,open:async url=>{assert.equal(new URL(url).origin,origin);},
@@ -119,13 +133,14 @@ async function setup(t, explicit={}){
         return profile?{status:200,user:profile}:{status:503,user:null};
       },
     });
-    if(got.ok){const change=await settings.saveInference({provider:"beezilla",key:got.token,baseUrl:got.baseUrl},{onCommitted:()=>save(got.account),search:null});assert.equal(change.restarted,true);}
+    if(got.ok){const change=await settings.saveInference({provider:"beezilla",key:got.token,baseUrl:got.baseUrl},{connectedOwner:got.account,search:null});assert.equal(change.restarted,true);}
     return got;
   }
-  await spawnLocal();
-  return {connect,settings,owner:readOwner,file,logs,boots:()=>boots,storedLease:()=>credential?.key,
-    rejectIdentityWrites(shouldReject){rejectIdentityWrites=shouldReject;},
-    async restart(){apply();await spawnLocal();},env};
+  await apply();await spawnLocal();
+  return {dir,connect,settings,owner:readOwner,file,stored,logs,boots:()=>boots,
+    loseDecrypt(){rejectDecrypt=true;},
+    async relaunch(){apply=newLauncher();await apply();await spawnLocal();},
+  };
 }
 
 test("local Profile adopts the successful linked identity and keeps it through BYOK and Remove key",async t=>{
@@ -157,19 +172,17 @@ test("a successful replacement connection with unavailable profile returns to lo
   assert.equal(connection.ok,true);
   assert.equal(connection.account,undefined);
   assert.deepEqual(await f.owner(),generic);
-  await f.restart();
+  await f.relaunch();
   assert.deepEqual(await f.owner(),generic,"fallback survives another boot");
 });
 
 for(const backup of ["missing","corrupt"]){
   test(`restoring a ${backup} display-identity backup withdraws only launcher-injected overrides`,async t=>{
     const manual={name:"Fixture Explicit Local",email:"explicit@example.invalid"};
-    const f=await setup(t,{[names[0]]:manual.name,[names[1]]:manual.email});
-    assert.deepEqual(await f.owner(),manual);
-    await f.connect(alpha);
+    const f=await setup(t,{[names[0]]:manual.name,[names[1]]:manual.email},{seeded:alpha});
     assert.deepEqual(await f.owner(),alpha);
     if(backup==="missing")rmSync(f.file);else writeFileSync(f.file,"{not JSON: private marker");
-    await f.restart();
+    await f.relaunch();
     assert.deepEqual(await f.owner(),manual);
     assert.ok(f.logs.every(line=>!line.includes(alpha.email)&&!line.includes("private marker")));
   });
@@ -183,38 +196,112 @@ test("valid Beta identity replaces both fields and survives a later key switch",
   assert.deepEqual(await f.owner(),beta);
 });
 
-for(const profile of [beta,null]){
-  test(`a failed sidecar write cannot reload the prior account after a replacement with ${profile?"a known profile":"no profile"}`,async t=>{
-    const f=await setup(t);
-    await f.connect(alpha);
-    assert.deepEqual(await f.owner(),alpha);
-    const oldLease=f.storedLease();
-    const oldDisk=readFileSync(f.file,"utf8");
 
-    f.rejectIdentityWrites(true);
-    assert.equal((await f.connect(profile)).ok,true);
-    assert.ok(f.storedLease()!==oldLease,"the replacement credential committed");
-    assert.equal(f.boots(),2,"both Connect attempts restarted the local runtime");
-    assert.equal(readFileSync(f.file,"utf8"),oldDisk,"simulated EACCES left the previous sidecar intact");
-    assert.deepEqual(await f.owner(),profile??generic);
-    await f.settings.saveInference({provider:"byok",key:"fixture-independent-key"});
-    assert.deepEqual(await f.owner(),profile??generic,"another same-launcher restart cannot restore the old sidecar");
-    assert.ok(f.logs.some(line=>line.includes("could not save identity.json")));
-    assert.ok(f.logs.every(line=>!line.includes(alpha.email)&&!line.includes(beta.email)&&!line.includes("fixture-private-path")));
-  });
-}
+test("legacy survives BYOK and Remove, then new Alpha -> BYOK/Remove -> Beta -> unavailable consistently relaunches",async t=>{
+  const f=await setup(t,{}, {seeded:{name:"Fixture Legacy",email:"legacy@example.invalid"}});
+  const legacy=await f.owner();
+  const untouched=readFileSync(f.file,"utf8");
+  await f.settings.saveInference({provider:"byok",key:"fixture-byok"});
+  await f.settings.clear("inference");
+  assert.ok(!existsSync(f.stored),"legacy clear still removes only old unmarked credential");
+  await f.relaunch();
+  assert.deepEqual(await f.owner(),legacy);
 
-test("a successful later write clears the lifetime fallback and returns to the disk-backed path",async t=>{
-  const f=await setup(t);
   await f.connect(alpha);
-  f.rejectIdentityWrites(true);
+  const alphaMarker=inference.managedSearchConnection(f.dir);
+  await f.settings.saveInference({provider:"byok",key:"fixture-independent-key"});
+  assert.equal(inference.managedSearchConnection(f.dir),alphaMarker);
+  await f.settings.clear("inference");
+  assert.equal(inference.hasRemovableInference(f.dir),false);
+  assert.equal(inference.managedSearchConnection(f.dir),alphaMarker);
+  assert.equal(inference.loadInference(f.dir,secured),null);
+  await f.relaunch();
+  assert.deepEqual(await f.owner(),alpha);
+
+  await f.connect(beta);
+  assert.notEqual(inference.managedSearchConnection(f.dir),alphaMarker);
+  await f.relaunch();
+  assert.deepEqual(await f.owner(),beta);
+  const raw=readFileSync(f.stored,"utf8");
+  const protectedValue=JSON.parse(raw).connectedOwner;
+  assert.equal(typeof protectedValue,"string");
+  for(const value of [f.settings.status(),inference.loadInference(f.dir,secured),inference.resolveInference(f.dir,secured),inference.saveInference(f.dir,{provider:"byok",key:"fixture-later-key"},secured)]){
+    const publicJson=JSON.stringify(value);
+    for(const secret of [beta.name,beta.email,protectedValue,"connectedOwner"])assert.ok(!publicJson.includes(secret));
+  }
+  for(const fragment of [beta.name,beta.email,JSON.stringify(beta),Buffer.from(JSON.stringify(beta)).toString("base64")]){
+    assert.ok(!raw.includes(fragment));
+  }
+  assert.equal(readFileSync(f.file,"utf8"),untouched,"legacy backup was not written or removed");
   await f.connect(null);
+  assert.equal(JSON.parse(readFileSync(f.stored,"utf8")).connectedOwner,null);
+  await f.relaunch();
   assert.deepEqual(await f.owner(),generic);
-  f.rejectIdentityWrites(false);
+});
+
+test("no protected identity encryption never writes plaintext or reopens the legacy owner",async t=>{
+  const explicit={name:"Fixture Explicit",email:"explicit@example.invalid"};
+  const env={[names[0]]:explicit.name,[names[1]]:explicit.email};
+  const f=await setup(t,env,{cipher:{encrypt,decrypt},seeded:alpha});
+  assert.deepEqual(await f.owner(),alpha);
+  await f.connect(beta);
+  assert.equal(JSON.parse(readFileSync(f.stored,"utf8")).connectedOwner,null);
+  await f.relaunch();
+  assert.deepEqual(await f.owner(),explicit);
+});
+
+test("protected identity encryption may fail independently without adopting stale plaintext",async t=>{
+  const f=await setup(t,{}, {cipher:{encrypt,encryptOwner(){throw Error("private fixture marker");},decrypt},seeded:alpha});
+  await f.connect(beta);await f.relaunch();
+  assert.deepEqual(await f.owner(),generic);
+  assert.equal(JSON.parse(readFileSync(f.stored,"utf8")).connectedOwner,null);
+  assert.ok(f.logs.every(line=>!line.includes("private fixture marker")));
+});
+
+test("unavailable decryption of a bound profile does not reopen a valid legacy sidecar",async t=>{
+  const f=await setup(t,{}, {seeded:alpha});
   await f.connect(beta);
   assert.deepEqual(await f.owner(),beta);
-  assert.equal(JSON.parse(readFileSync(f.file,"utf8")).email,beta.email);
-  rmSync(f.file); // Only the fixture-owned file; models an absent sidecar.
-  await f.restart();
+  f.loseDecrypt();
+  await f.relaunch();
+  assert.deepEqual(await f.owner(),generic);
+  assert.match(readFileSync(f.file,"utf8"),/Fixture Alpha/);
+});
+
+test("a mismatched protected owner generation fails closed",async t=>{
+  const f=await setup(t,{}, {seeded:alpha});
+  await f.connect(beta);
+  const raw=JSON.parse(readFileSync(f.stored,"utf8"));
+  raw.managedConnectionId=randomUUID();
+  writeFileSync(f.stored,JSON.stringify(raw));
+  await f.relaunch();
+  assert.deepEqual(await f.owner(),generic);
+});
+
+test("actual CLI diagnostics and key commands never expose connected display",async t=>{
+  const f=await setup(t,{}, {seeded:alpha});
+  await f.connect(beta);
+  const expectedId=inference.managedSearchConnection(f.dir);
+  const cli=fileURLToPath(new URL("../bin/beezilla.mjs",import.meta.url));
+  const run=(...args)=>{
+    const call=spawnSync(process.execPath,[cli,...args],{env:{PATH:process.env.PATH,BZ_DATA_DIR:f.dir},encoding:"utf8",timeout:5000});
+    assert.equal(call.error,undefined);
+    const output=call.stdout+call.stderr;
+    const ownerCipher=JSON.parse(readFileSync(f.stored,"utf8")).connectedOwner;
+    for(const fragment of [beta.name,beta.email,ownerCipher,"connectedOwner"].filter(Boolean))assert.ok(!output.includes(fragment));
+    return {status:call.status,output};
+  };
+  assert.match(run("doctor").output,/inference configured/);
+  assert.match(run("status").output,/not running/i);
+  assert.match(run("key","show").output,/none configured/);
+  assert.equal(run("key","set","--key","fixture-cli-byok-unencrypted").status,0);
+  assert.equal(inference.managedSearchConnection(f.dir),expectedId);
+  assert.match(run("key","show").output,/byok/);
+  assert.equal(run("key","clear").status,0);
+  assert.equal(inference.managedSearchConnection(f.dir),expectedId);
+  await f.relaunch();
+  assert.deepEqual(await f.owner(),beta);
+  assert.equal(run("key","set","--provider","beezilla","--token","fixture-cli-managed-unverified").status,0);
+  await f.relaunch();
   assert.deepEqual(await f.owner(),generic);
 });

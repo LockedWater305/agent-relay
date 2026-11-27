@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,7 +13,7 @@ import {
   isTrustedSender, retargetAppPage, runtimeOrigin, safeExternalUrl, webUrl,
 } from "../desktop/security.mjs";
 import { createSettingsHandlers } from "../desktop/settings.mjs";
-import { loadInference } from "./lib/inference.mjs";
+import { loadConnectedOwner, loadInference, saveInference } from "./lib/inference.mjs";
 
 const base = "http://127.0.0.1:7331";
 const token = "a".repeat(43);
@@ -261,39 +262,78 @@ test("Save/Clear transactions are serialized through health, restart and endpoin
 });
 
 test("local owner profile stays available to the runtime but is not copied into startup diagnostics", async () => {
-  const { existsSync, mkdirSync, writeFileSync } = await import("node:fs");
   const dir = mkdtempSync(join(tmpdir(), "desktop-profile-log-"));
   const lines = [];
-  const env = {};
+  const env = { BZ_LOCAL_OWNER_NAME: "Fixture Local Default", BZ_LOCAL_OWNER_EMAIL: "explicit@example.invalid" };
+  const explicit = { ...env };
   const source = readFileSync(new URL("../desktop/main.mjs", import.meta.url), "utf8");
   const start = source.indexOf("function identityFile()");
   const end = source.indexOf("\n// Only values this process injected", start);
   assert.ok(start >= 0 && end > start);
-  const { saveIdentity, applyIdentityToEnv } = runInNewContext(
-    source.slice(start, end) + "\n({ saveIdentity, applyIdentityToEnv })",
+  assert.equal([...source.matchAll(/await applyIdentityToEnv\(\);\s*await applyStoredInferenceToEnv\(\);/g)].length, 2);
+  const fixtureKey = Buffer.alloc(32, 0x42);
+  const encryptOwner = (value) => {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", fixtureKey, iv);
+    return Buffer.concat([iv, cipher.update(value, "utf8"), cipher.final(), cipher.getAuthTag()]);
+  };
+  let denyDecrypt = false;
+  const decryptString = (value) => {
+    if (denyDecrypt) throw new Error("fixture-decrypt-diagnostic-private-marker");
+    const cipher = createDecipheriv("aes-256-gcm", fixtureKey, value.subarray(0, 12));
+    cipher.setAuthTag(value.subarray(-16));
+    return Buffer.concat([cipher.update(value.subarray(12, -16)), cipher.final()]).toString("utf8");
+  };
+  const applyIdentityToEnv = runInNewContext(
+    source.slice(start, end) + "\napplyIdentityToEnv",
     {
-      supervisor: { dataDir: dir }, process: { env },
-      existsSync, mkdirSync, writeFileSync, readFileSync, join,
+      supervisor: { dataDir: dir }, process: { env }, readFileSync, join, Buffer,
+      runtimeLib: async (dependency) => {
+        assert.equal(dependency, "scripts/lib/inference.mjs");
+        return { loadConnectedOwner };
+      },
+      safeStorage: { decryptString },
       console: { log: (...args) => lines.push(args.join(" ")), warn: (...args) => lines.push(args.join(" ")) },
     },
   );
-  const profile = { name: "Fixture Local Owner", email: "fixture-owner@example.invalid" };
+  const legacy = { name: "Fixture Legacy Owner", email: "fixture-legacy@example.invalid" };
+  const connected = { name: "Fixture Connected Owner", email: "fixture-connected@example.invalid" };
+  const identityPath = join(dir, "identity.json");
+  const corruption = "fixture-profile-content-private-marker";
+  const assertProjected = ({ name, email }) => {
+    assert.equal(env.BZ_LOCAL_OWNER_NAME, name);
+    assert.equal(env.BZ_LOCAL_OWNER_EMAIL, email);
+  };
   try {
-    saveIdentity(profile);
-    assert.equal(env.BZ_LOCAL_OWNER_NAME, profile.name);
-    assert.equal(env.BZ_LOCAL_OWNER_EMAIL, profile.email);
-    const identityPath = join(dir, "identity.json");
-    const saved = JSON.parse(readFileSync(identityPath, "utf8"));
-    assert.equal(saved.name, profile.name);
-    assert.equal(saved.email, profile.email);
-    assert.ok(!lines.join("\n").includes(profile.name));
-    assert.ok(!lines.join("\n").includes(profile.email));
-    assert.match(lines.join("\n"), /local owner profile loaded/);
-    assert.match(lines.join("\n"), /local owner profile saved/);
-    writeFileSync(identityPath, "fixture-profile-content");
-    applyIdentityToEnv();
-    assert.match(lines.at(-1), /could not read identity.json/);
-    assert.ok(!lines.at(-1).includes("fixture-profile-content"));
+    const legacyData = JSON.stringify(legacy);
+    writeFileSync(identityPath, legacyData);
+    await applyIdentityToEnv();
+    assertProjected(legacy);
+    writeFileSync(identityPath, corruption);
+    await applyIdentityToEnv();
+    assert.deepEqual(env, explicit);
+    assert.match(lines.at(-1), /local owner profile unavailable/);
+    writeFileSync(identityPath, legacyData);
+
+    saveInference(dir, { provider: "beezilla", key: "fixture-only-key" },
+      { encrypt: encryptOwner, encryptOwner }, { connectedOwner: connected });
+    const raw = readFileSync(join(dir, "inference.json"), "utf8");
+    const envelope = JSON.parse(raw).connectedOwner;
+    assert.equal(typeof envelope, "string");
+    assert.ok(envelope.length > 0);
+    assert.ok(!raw.includes(connected.name) && !raw.includes(connected.email));
+    await applyIdentityToEnv();
+    assertProjected(connected);
+    assert.equal(readFileSync(identityPath, "utf8"), legacyData);
+
+    denyDecrypt = true;
+    await applyIdentityToEnv();
+    assert.deepEqual(env, explicit, "a failed protected profile must never revive the legacy identity");
+    const diagnostics = lines.join("\n");
+    for (const privateValue of [legacy.name, legacy.email, connected.name, connected.email, envelope, corruption,
+      "fixture-only-key", "fixture-decrypt-diagnostic-private-marker", identityPath]) {
+      assert.ok(!diagnostics.includes(privateValue));
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

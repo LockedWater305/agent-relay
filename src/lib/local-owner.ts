@@ -29,9 +29,8 @@ export const LOCAL_OWNER_EMAIL = "owner@beezilla.local";
 
 /**
  * The identity the desktop should show. A connected BeeZilla account supplies its
- * own name/email (the shell writes `identity.json` and exports these before the
- * runtime starts), so the owner sees "Shane" instead of the synthetic "Owner" the
- * moment they sign in. Falls back to the local defaults — a local install never
+ * own name/email from the shell's committed connection record. The shell exports
+ * these before the runtime starts, so signing in replaces the synthetic "Owner". Falls back to the local defaults — a local install never
  * requires an account.
  */
 const ownerIdentity = () => ({

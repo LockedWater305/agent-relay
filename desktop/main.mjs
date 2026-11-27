@@ -11,7 +11,7 @@
  * produces a window where every API call 401s while the preload "looks right".
  */
 import { app, BrowserWindow, Menu, session, shell, dialog, safeStorage, ipcMain, systemPreferences } from "electron";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { RuntimeSupervisor } from "./supervisor.mjs";
@@ -265,25 +265,16 @@ function confineAppWindow(win) {
 }
 
 /**
- * Identity for the local runtime.
- *
- * Without this the window shows the synthetic local row — name "Owner",
- * `owner@beezilla.local` — even right after the user signed in with their real
- * account, which reads as "the app doesn't know me". A connected account's
- * name/email is written to `<dataDir>/identity.json` and exported into the
- * runtime's environment before it starts, so the owner row adopts it.
+ * Project connected display metadata into the single local owner before the
+ * child starts. Only an untouched legacy credential can read identity.json;
+ * an unavailable or unreadable bound profile uses explicit/local defaults.
  */
 function identityFile() {
   return join(supervisor.dataDir, "identity.json");
 }
 
 const injectedOwnerEnv = new Map();
-// The credential commits first. A failed profile write must not make this
-// launcher trust the previous account's sidecar on any child restart.
-let unsavedOwnerIdentity = null;
-function applyIdentityToEnv() {
-  // Remove only this launcher's previous overrides; a missing/partial backup
-  // or a new account is not permission to reuse details from the older one.
+async function applyIdentityToEnv() {
   for (const [key, { previous, value }] of injectedOwnerEnv) {
     if (process.env[key] !== value) continue;
     if (previous === undefined) delete process.env[key];
@@ -291,9 +282,11 @@ function applyIdentityToEnv() {
   }
   injectedOwnerEnv.clear();
   try {
-    const id = unsavedOwnerIdentity ?? (existsSync(identityFile())
-      ? JSON.parse(readFileSync(identityFile(), "utf8"))
-      : null);
+    const { loadConnectedOwner } = await runtimeLib("scripts/lib/inference.mjs");
+    let id = loadConnectedOwner(supervisor.dataDir, {
+      decrypt: (b) => safeStorage.decryptString(Buffer.from(b)),
+    });
+    if (id === undefined) id = JSON.parse(readFileSync(identityFile(), "utf8"));
     const name = typeof id?.name === "string" ? id.name.trim() : "";
     const email = typeof id?.email === "string" ? id.email.trim() : "";
     if (!email) return;
@@ -302,32 +295,9 @@ function applyIdentityToEnv() {
       injectedOwnerEnv.set(key, { previous: process.env[key], value });
       process.env[key] = value;
     }
-    if (!unsavedOwnerIdentity) console.log("[desktop] local owner profile loaded");
   } catch (err) {
-    // JSON parser errors can quote the file contents. Log only the failure type.
-    const reason = err instanceof SyntaxError ? " (invalid JSON)" : "";
-    console.warn(`[desktop] could not read identity.json${reason}`);
+    if (err?.code !== "ENOENT") console.warn("[desktop] local owner profile unavailable");
   }
-}
-
-function saveIdentity(account) {
-  const email = typeof account?.email === "string" ? account.email.trim() : "";
-  const name = email && typeof account?.name === "string" ? account.name.trim() : "";
-  const nextIdentity = { name, email };
-  try {
-    mkdirSync(supervisor.dataDir, { recursive: true });
-    // Called only when a new managed connection commits. An unavailable
-    // profile must not leave the prior account displayed under the new key.
-    writeFileSync(identityFile(), JSON.stringify({ ...nextIdentity, savedAt: new Date().toISOString() }, null, 2) + "\n");
-    unsavedOwnerIdentity = null;
-    console.log(email ? "[desktop] local owner profile saved" : "[desktop] connected profile unavailable; using local owner settings");
-  } catch {
-    // Keep even an empty replacement for the life of this launcher. Do not
-    // delete the old sidecar or change the credential commit on write failure.
-    unsavedOwnerIdentity = nextIdentity;
-    console.warn("[desktop] could not save identity.json; check that the local data directory is writable");
-  }
-  applyIdentityToEnv();
 }
 
 // Only values this process injected may be withdrawn on the next Save/Remove.
@@ -465,6 +435,12 @@ function registerSettingsIpc() {
       hasInjectedInferenceKey,
       cipher: {
         encrypt: (s) => safeStorage.encryptString(s),
+        encryptOwner: (s) => {
+          if (!safeStorage.isEncryptionAvailable() || safeStorage.getSelectedStorageBackend?.() === "basic_text") {
+            throw new Error("private profile storage unavailable");
+          }
+          return safeStorage.encryptString(s);
+        },
         decrypt: (b) => safeStorage.decryptString(Buffer.from(b)),
       },
       beforeRestart: async () => {
@@ -475,7 +451,7 @@ function registerSettingsIpc() {
         clearRuntimeAuth();
         settingsPreviousBinding = binding ? { binding, clearedGeneration: runtimeBindingGeneration } : null;
         // Identity first: the runtime reads BZ_LOCAL_OWNER_* at spawn.
-        applyIdentityToEnv();
+        await applyIdentityToEnv();
         await applyStoredInferenceToEnv();
         await applyStoredMusicToEnv();
       },
@@ -750,7 +726,8 @@ function settingsWindowFor(url) {
  *
  * The token is minted inside our own page (session cookie stays there) and handed
  * straight to the credential store; the store restart then puts it in the runtime's
- * environment. Nothing about the account itself is copied locally.
+ * environment. Only optional protected display metadata is kept locally; the
+ * hosted session stays in the Connect window's own partition.
  */
 let connecting = null;
 function connectManagedAccount() {
@@ -836,7 +813,7 @@ async function performConnect() {
     model: outcome.model,
     expiresAt: outcome.expiresAt,
   }, {
-    onCommitted: () => saveIdentity(outcome.account),
+    connectedOwner: outcome.account,
     search: outcome.search?.ok ? {
       token: outcome.search.token, gateway: outcome.search.endpoint, expiresAt: outcome.search.expiresAt,
     } : null,
@@ -860,7 +837,7 @@ async function performConnect() {
   if (restartFailure) {
     return { ok: false, error: "Account credentials were saved, but BeeZilla did not restart. Retry from Settings without force-quitting." };
   }
-  return { ...outcome, token: undefined, search: { ...outcome.search, ...(saved.searchError ? { ok: false, error: saved.searchError } : {}), token: undefined, saved: searchSaved }, savedTo: saved.saved?.key };
+  return { ...outcome, token: undefined, account: undefined, search: { ...outcome.search, ...(saved.searchError ? { ok: false, error: saved.searchError } : {}), token: undefined, saved: searchSaved }, savedTo: saved.saved?.key };
 }
 
 let openingSettings = null;
@@ -1199,7 +1176,7 @@ app.whenReady().then(async () => {
     // discard request records and never modify responses or grant authority.
     session.defaultSession.webRequest.onCompleted((details) => { desktopCsp.finished(details); originalDownloadRefusal.finished(details); });
     session.defaultSession.webRequest.onErrorOccurred((details) => { desktopCsp.finished(details); originalDownloadRefusal.finished(details); });
-    applyIdentityToEnv();
+    await applyIdentityToEnv();
     await applyStoredInferenceToEnv();
     await applyStoredMusicToEnv();
     settingsHandlers = await registerSettingsIpc();

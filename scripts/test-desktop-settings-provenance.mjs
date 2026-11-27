@@ -27,7 +27,9 @@ const read = (name) => fs.readFileSync(path.join(ROOT, name), "utf8");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 function assertRetirementMarkerOnly(file) {
   const record = JSON.parse(fs.readFileSync(file, "utf8"));
-  assert.deepEqual(Object.keys(record), ["managedConnectionId"]);
+  // An unreadable record retires stale Search and refuses legacy owner fallback.
+  assert.deepEqual(Object.keys(record), ["managedConnectionId", "connectedOwner"]);
+  assert.equal(record.connectedOwner, null, "retirement retains no display details");
   assert.match(record.managedConnectionId, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
 }
 const quiet = { log() {}, warn() {}, error() {} };
