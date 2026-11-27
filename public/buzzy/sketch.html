@@ -463,6 +463,7 @@
     canvas.addEventListener("pointerdown", function (e) {
       if (!editable()) return;
       if (tool === "select") {
+        if (drag) return;
         var hit = hitTest(pt(e));
         selectedStroke = hit ? hit.id : null;
         if (selected) { selected = null; renderImages(); }
@@ -551,9 +552,10 @@
         wrap.addEventListener("pointerdown", function (e) {
           if (tool !== "select" || !editable() || !wrap.isConnected || images.indexOf(im) < 0) return;
           e.stopPropagation();
+          if (drag) return;
           selected = im;
           if (selectedStroke) { selectedStroke = null; redraw(); }
-          drag = { image: im, mode: e.target === handle ? "resize" : "move", sx: e.clientX, sy: e.clientY, ox: im.x, oy: im.y, ow: im.w, oh: im.h };
+          drag = { image: im, pointerId: e.pointerId, mode: e.target === handle ? "resize" : "move", sx: e.clientX, sy: e.clientY, ox: im.x, oy: im.y, ow: im.w, oh: im.h };
           renderImages();
         });
         layers.appendChild(wrap);
@@ -561,7 +563,7 @@
       });
     }
     window.addEventListener("pointermove", function (e) {
-      if (!drag || !editable() || !drag.wrap?.isConnected) return;
+      if (!drag || e.pointerId !== drag.pointerId || !editable() || !drag.wrap?.isConnected) return;
       var im = drag.image;
       if (images.indexOf(im) < 0) return;
       var dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
@@ -582,8 +584,9 @@
       }
       drag.changed = true;
     });
-    function finishImageDrag() {
-      if (drag && drag.changed && images.indexOf(drag.image) >= 0 && hydrated && ownsPage()) changed();
+    function finishImageDrag(e) {
+      if (!drag || (e && e.pointerId !== drag.pointerId)) return;
+      if (drag.changed && images.indexOf(drag.image) >= 0 && hydrated && ownsPage()) changed();
       drag = null;
     }
     window.addEventListener("pointerup", finishImageDrag);

@@ -500,3 +500,47 @@ test('drag keeps updating the live image wrapper after a separate dropped image 
  assert.equal(imageWrappers(p)[1].style.left,images[1].x+10+'px');assert.equal(imageWrappers(p)[1].style.top,images[1].y-5+'px');
  assert.equal(f.data().board.images[1].x,images[1].x+10);assert.equal(f.data().board.images[2].url,'/synthetic/another.png');
 });
+
+function touchImage(p,index,pointerId,mode='move'){
+ const wrap=imageWrappers(p)[index];assert.ok(wrap);
+ wrap.dispatch('pointerdown',{pointerId,pointerType:'touch',isPrimary:pointerId===31,
+   target:mode==='resize'?wrap.children[1]:wrap,clientX:400,clientY:100});
+}
+test('another touch cannot move the selected image while its owning pointer is held',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount();
+ touchImage(p,1,31);assert.deepEqual(selectedImages(p),[1]);
+ f.event('pointermove',{pointerId:47,pointerType:'touch',isPrimary:false,clientX:575,clientY:310});
+ assert.equal(imageWrappers(p)[1].style.left,images[1].x+'px');assert.equal(imageWrappers(p)[1].style.top,images[1].y+'px');
+ f.event('pointermove',{pointerId:31,pointerType:'touch',isPrimary:true,clientX:415,clientY:107});
+ f.event('pointerup',{pointerId:31,pointerType:'touch'});await f.timers(1200);
+ const expected=plain(images);expected[1].x+=15;expected[1].y+=7;
+ assert.equal(f.posts().length,1);assert.deepEqual(f.data().board.images,expected);
+});
+for(const ending of ['pointerup','pointercancel'])test('another touch '+ending+' cannot end or save the owning touch resize',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount();touchImage(p,1,31,'resize');
+ f.event('pointermove',{pointerId:31,pointerType:'touch',clientX:415,clientY:108});
+ f.event(ending,{pointerId:47,pointerType:'touch',isPrimary:false});await f.timers(1200);assert.equal(f.posts().length,0);
+ f.event('pointermove',{pointerId:31,pointerType:'touch',clientX:430,clientY:114});
+ assert.equal(imageWrappers(p)[1].style.width,images[1].w+30+'px');
+ f.event('pointerup',{pointerId:31,pointerType:'touch'});await f.timers(1200);
+ const expected=plain(images);expected[1].w+=30;expected[1].h+=14;
+ assert.equal(f.posts().length,1);assert.deepEqual(f.data().board.images,expected);
+});
+for(const target of ['image','canvas'])test('a second touch down on '+target+' does not steal current image selection or ownership',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount();touchImage(p,1,31);
+ if(target==='image')touchImage(p,0,47);
+ else p.el('board').dispatch('pointerdown',{pointerId:47,pointerType:'touch',isPrimary:false,clientX:6,clientY:8});
+ assert.deepEqual(selectedImages(p),[1]);
+ f.event('pointermove',{pointerId:31,pointerType:'touch',clientX:420,clientY:110});
+ f.event('pointerup',{pointerId:31,pointerType:'touch'});await f.timers(1200);
+ const expected=plain(images);expected[1].x+=20;expected[1].y+=10;
+ assert.deepEqual(f.data().board.images,expected);assert.equal(f.posts().length,1);
+});
+test('explicit Save still settles an owned mouse drag without a pointerup event',async t=>{
+ const images=identityImages(),f=await fixture(t,identityBoard(images)),p=await f.mount();
+ imageWrappers(p)[1].dispatch('pointerdown',{pointerId:1,pointerType:'mouse',isPrimary:true,clientX:400,clientY:100});
+ f.event('pointermove',{pointerId:1,pointerType:'mouse',clientX:422,clientY:109});await p.save();
+ const expected=plain(images);expected[1].x+=22;expected[1].y+=9;
+ assert.deepEqual(f.data().board.images,expected);assert.equal(f.posts().length,1);
+ f.event('pointerup',{pointerId:1,pointerType:'mouse'});await f.timers(1200);assert.equal(f.posts().length,1);
+});
