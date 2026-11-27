@@ -397,6 +397,27 @@
       if (leaveAfterLogout) window.location.href = "/buzzy/";
     }
 
+    function confirmLogout(attempt, canRetry) {
+      var readback = sessionRefresh;
+      return fetch("/api/auth/get-session", { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) {
+          if (attempt !== logoutAttempt) return;
+          if (!r.ok || r.redirected) throw new Error("session not confirmed");
+          return r.json();
+        })
+        .then(function (s) {
+          if (attempt !== logoutAttempt) return;
+          // A cross-tab hint starts a new check, but it isn't auth proof. A
+          // null captured before that check cannot clear or close this page.
+          if (readback !== sessionRefresh) {
+            if (canRetry) return confirmLogout(attempt, false);
+            throw new Error("session changed during logout confirmation");
+          }
+          if (!isSignedOutSession(s)) throw new Error("session not confirmed");
+          clearSignedOut();
+        });
+    }
+
     function signOut(e) {
       // Repainting removes the clicked button. Do not let an outside-click
       // handler mistake that detached node for a click outside the menu.
@@ -414,15 +435,7 @@
         if (!r.ok || r.redirected) throw new Error("logout not confirmed");
         // A successful HTTP response alone does not prove this browser's
         // session ended (a proxy can return an HTML success page).
-        return fetch("/api/auth/get-session", { credentials: "same-origin", cache: "no-store" });
-      }).then(function (r) {
-        if (attempt !== logoutAttempt) return;
-        if (!r.ok || r.redirected) throw new Error("session not confirmed");
-        return r.json();
-      }).then(function (s) {
-        if (attempt !== logoutAttempt) return;
-        if (!isSignedOutSession(s)) throw new Error("session not confirmed");
-        clearSignedOut();
+        return confirmLogout(attempt, true);
       }).catch(function () {
         if (attempt !== logoutAttempt) return;
         logoutPending = false;

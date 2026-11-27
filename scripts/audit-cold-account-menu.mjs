@@ -195,6 +195,7 @@ try {
     const s=await (await verified).json();
     assert.equal(s.session.userId,s.user.id);assert.equal(s.user.name,user.name);
     await untilAccount(p,user.name);
+    return s.user.id;
   };
 
   scenario="hosted";
@@ -242,6 +243,60 @@ try {
     const late=await ui(pOld);
     observe("old logout rejection must not repaint replacement account menu",late,late.alert!==null);
   } finally { releaseLogout(); await pending.close(); }
+
+  // Real logout returns a null session; hold that already-read response while
+  // ordinary Beta sign-in emits the real cross-tab storage event. Independently
+  // hold Alpha's new server check so the old null reaches JS first.
+  scenario="hosted";
+  const reordered=await makeContext(null), rOld=await reordered.newPage(), rNew=await reordered.newPage();
+  await enter(rOld,hosted.A);
+  await rOld.evaluate(()=>{
+    window.__observedOwners=[];
+    window.addEventListener("storage",event=>{
+      if(event.key==="bz_identity")window.__observedOwners.push(event.newValue);
+    });
+  });
+  let releaseAlpha, releaseBeta, alphaCaptured, betaCaptured;
+  const alphaGate=new Promise(resolve=>{releaseAlpha=resolve;});
+  const betaGate=new Promise(resolve=>{releaseBeta=resolve;});
+  const observedAlpha=new Promise(resolve=>{alphaCaptured=resolve;});
+  const observedBeta=new Promise(resolve=>{betaCaptured=resolve;});
+  let requests=0;
+  await rOld.route("**/api/auth/get-session",async route=>{
+    const index=++requests;
+    const response=await route.fetch({headers:{...route.request().headers(),"x-forwarded-for":"127.0.0.1"}});
+    if(index===1){alphaCaptured(await response.json());await alphaGate;}
+    else{betaCaptured(await response.json());await betaGate;}
+    await route.fulfill({response});
+  });
+  try {
+    await rOld.locator("#accountLink").click();await rOld.getByRole("button",{name:"Log out",exact:true}).click();
+    assert.equal(await Promise.race([observedAlpha,sleep(5000,undefined,{ref:false}).then(()=>{throw Error("no Alpha readback");})]),null);
+    const betaId=await enter(rNew,hosted.B);
+    await rOld.waitForFunction(id=>window.__observedOwners?.some(raw=>JSON.parse(raw)?.id===id),betaId);
+    assert.equal((await Promise.race([observedBeta,sleep(5000,undefined,{ref:false}).then(()=>{throw Error("no independent Beta recheck");})])).user.id,betaId);
+    await rNew.evaluate(()=>{
+      window.__nullPublications=0;
+      window.addEventListener("storage",event=>{
+        if(event.key==="bz_identity"&&event.newValue==="null")window.__nullPublications++;
+      });
+    });
+    const completedOldRead=expected(rOld,"/api/auth/get-session");
+    releaseAlpha();
+    assert.equal((await completedOldRead).status(),200);await sleep(160);
+    const during=await ui(rOld);
+    const publications=await rNew.evaluate(()=>window.__nullPublications);
+    observe("superseded Alpha logout null must not navigate or publish sign-out before Beta is independently verified",
+      { ...during, publications }, during.path!=="/buzzy/profile"||during.name!==""||publications!==0);
+    releaseBeta();
+    await untilAccount(rOld,hosted.B.name);
+    await untilAccount(rNew,hosted.B.name);
+    if(during.path==="/buzzy/profile"){
+      await rOld.locator("#accountLink").click();
+      const final=await ui(rOld);
+      assert.equal(final.logout,"Log out");assert.equal(final.disabled,false);assert.equal(final.alert,null);
+    }
+  } finally { releaseAlpha();releaseBeta();await reordered.close(); }
 
   if(findings)process.exitCode=1;
 } finally {
