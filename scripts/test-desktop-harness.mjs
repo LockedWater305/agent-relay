@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
+import { isAppPage, webUrl } from "../desktop/security.mjs";
 import test from "node:test";
 import {
   configureDesktopTestApp, createDesktopSandbox, desktopLaunchPlan,
@@ -19,7 +20,7 @@ const plan = (options = {}) => desktopLaunchPlan({
   root: "/project with spaces", paths: fixturePaths, mode: "firstrun", platform: "darwin", sourceEnv: {}, ...options,
 });
 const goodOutput = (page = "/buzzy/talk") =>
-  `[desktop] runtime ready on 127.0.0.1:12345\n[desktop] loadURL resolved http://127.0.0.1:12345${page}\n`;
+  `[desktop] runtime ready on 127.0.0.1:12345\n[desktop-test] owned main page loaded http://127.0.0.1:12345${page}\n`;
 const result = (changes = {}) => ({
   code: 0, signal: null, error: null, timedOut: false, outputLimit: false, out: goodOutput(), ...changes,
 });
@@ -160,7 +161,7 @@ test("positive launch needs clean exit, ready runtime, and the expected local pa
   assert.equal(desktopLaunchStatus(result({ out: goodOutput("/buzzy/settings") }), "/buzzy/settings").ok, true);
   for (const bad of [
     { code: 1 }, { code: null }, { signal: "SIGSEGV" }, { timedOut: true }, { error: "spawn ENOENT" },
-    { outputLimit: true }, { out: "" }, { out: "[desktop] loadURL resolved http://127.0.0.1:12345/buzzy/talk\n" },
+    { outputLimit: true }, { out: "" }, { out: "[desktop-test] owned main page loaded http://127.0.0.1:12345/buzzy/talk\n" },
     { out: "[desktop] runtime ready on 127.0.0.1:12345\n" },
     { out: goodOutput("/buzzy/settings") },
     { out: goodOutput().replace("http://127.0.0.1:12345", "https://remote.invalid") },
@@ -276,7 +277,7 @@ test("uncertain process cleanup fails and retains only its temporary data", asyn
 });
 
 const readyLine = (port) => `[desktop] runtime ready on 127.0.0.1:${port}\n`;
-const pageLine = (port) => `[desktop] loadURL resolved http://127.0.0.1:${port}/buzzy/talk\n`;
+const pageLine = (port) => `[desktop-test] owned main page loaded http://127.0.0.1:${port}/buzzy/talk\n`;
 for (const [name, out] of [
   ["different port", readyLine(12345) + pageLine(12346)],
   ["old port after runtime replacement", readyLine(12345) + readyLine(12346) + pageLine(12345)],
@@ -365,4 +366,90 @@ test("Settings evidence requires actual committed route of the current owned win
   }
   assert.deepEqual(await simulateSettingsCompletion({ committed: "http://127.0.0.1:12345/buzzy/landing" }), []);
   assert.deepEqual(await simulateSettingsCompletion({ firstrun: false }), []);
+});
+
+const mainLoader = mainSource.slice(mainSource.indexOf("async function loadMainPage("), mainSource.indexOf("\nfunction installMenu("));
+const activeMainMarker = "[desktop-test] owned main page loaded ";
+
+async function simulateMainCompletion({ request = "/buzzy/talk", committed = request, change = "",
+  probe = true, packaged = false, generic = false } = {}) {
+  const port = 12345;
+  const base = "http://127.0.0.1:" + port;
+  const requested = new URL(request, base).href;
+  assert.equal(isAppPage(requested, base), true);
+  let binding = { base }, resolveLoad;
+  const lines = [readyLine(port).trimEnd()];
+  const win = {
+    isDestroyed: () => change === "destroyed",
+    webContents: { getURL: () => new URL(committed, base).href },
+    loadURL: url => {
+      assert.equal(url, requested);
+      return new Promise(resolve => { resolveLoad = resolve; });
+    },
+  };
+  const ctx = {
+    runtimeBase: base, mainPagesToRetry: new WeakMap(), mainPagesLoaded: new WeakSet(),
+    canReopenMainWindow: true, mainWindow: win, quitting: false, app: { isPackaged: packaged },
+    process: { env: probe ? { BZ_TEST_ROOT: "/fixture-only" } : {} },
+    supervisor: { runtime: {} }, currentRuntimeBinding: () => binding, webUrl, isAppPage,
+    setTimeout: () => 1, clearTimeout() {},
+    console: { log: line => lines.push(line) },
+  };
+  const load = runInNewContext(mainLoader + "\nloadMainPage", ctx);
+  const finished = load(win, requested);
+  if (change === "same-port-rebind") {
+    binding = { base };
+    lines.push(readyLine(port).trimEnd());
+  }
+  if (change === "previous-window") {
+    ctx.mainWindow = {};
+    lines.push(readyLine(port).trimEnd());
+  }
+  if (change === "retired") binding = null;
+  if (change === "quit") ctx.quitting = true;
+  if (generic) lines.push("[desktop-test] page loaded " + requested);
+  resolveLoad();
+  assert.equal(await finished, true, "readiness instrumentation does not change product load semantics");
+  const out = lines.join("\n") + "\n";
+  return result({ out, stdout: out, stderr: "" });
+}
+
+test("a committed allowed same-origin redirect is evidence for the actual main route, not its request", async () => {
+  const receipt = await simulateMainCompletion({ request: "/buzzy/library.html", committed: "/buzzy/library" });
+  assert.equal(desktopLaunchStatus(receipt, "/buzzy/library.html").ok, false);
+  assert.equal(desktopLaunchStatus(receipt, "/buzzy/library").ok, true);
+  const otherWindow = await simulateMainCompletion({ committed: "/buzzy/landing", generic: true });
+  assert.equal(desktopLaunchStatus(otherWindow).ok, false);
+});
+
+test("late completion from a retired same-port binding or prior main window is not proof", async () => {
+  for (const change of ["same-port-rebind", "previous-window", "destroyed", "retired", "quit"]) {
+    const receipt = await simulateMainCompletion({ change });
+    assert.equal(desktopLaunchStatus(receipt).ok, false, change);
+    assert.equal(receipt.stdout.includes(activeMainMarker), false, change);
+  }
+});
+
+test("the actual owned main document proves only its origin and path in the unpackaged test entry", async () => {
+  for (const path of ["/buzzy/talk", "/buzzy/settings"]) {
+    const receipt = await simulateMainCompletion({ request: path + "?fixture=private#fixture-hidden" });
+    assert.equal(desktopLaunchStatus(receipt, path).ok, true);
+    const proof = receipt.stdout.split("\n").find(line => line.startsWith(activeMainMarker));
+    assert.equal(proof, activeMainMarker + "http://127.0.0.1:12345" + path);
+  }
+  for (const options of [{ probe: false }, { packaged: true }]) {
+    const receipt = await simulateMainCompletion(options);
+    assert.match(receipt.stdout, /\[desktop\] loadURL resolved /, "diagnostic stays unchanged");
+    assert.equal(desktopLaunchStatus(receipt).ok, false);
+  }
+});
+
+test("generic and requested URL lines or stderr cannot stand in for owned main proof", () => {
+  const diagnostic = readyLine(12345) + "[desktop] loadURL resolved http://127.0.0.1:12345/buzzy/talk\n" +
+    "[desktop-test] page loaded http://127.0.0.1:12345/buzzy/talk\n";
+  assert.equal(desktopLaunchStatus(result({ out: diagnostic })).ok, false);
+  const positive = activeMainMarker + "http://127.0.0.1:12345/buzzy/talk\n";
+  assert.equal(desktopLaunchStatus(result({
+    stdout: diagnostic, stderr: positive, out: diagnostic + positive,
+  })).ok, false);
 });

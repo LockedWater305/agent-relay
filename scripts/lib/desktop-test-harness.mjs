@@ -185,7 +185,7 @@ export async function runDesktopLaunch(plan, {
 }
 
 export function desktopLaunchStatus(result, page = "/buzzy/talk") {
-  return launchStatus(result, page, /^\[desktop\] loadURL resolved (\S+)$/);
+  return launchStatus(result, page, /^\[desktop-test\] owned main page loaded (\S+)$/);
 }
 
 export function desktopFirstRunSettingsStatus(result) {

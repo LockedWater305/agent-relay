@@ -568,6 +568,7 @@ async function retryMainPage(win) {
 
 async function loadMainPage(win, url) {
   const base = runtimeBase;
+  const openingBinding = !app.isPackaged && process.env.BZ_TEST_ROOT ? currentRuntimeBinding(supervisor.runtime) : null;
   mainPagesToRetry.delete(win);
   let timer;
   try {
@@ -576,6 +577,15 @@ async function loadMainPage(win, url) {
       new Promise((resolve) => { timer = setTimeout(() => resolve(false), 30_000); }),
     ]);
     console.log(`[desktop] loadURL ${loaded ? "resolved" : "TIMED OUT"} ${url}`);
+    // The requested URL above is diagnostic; the fixture requires the actual
+    // committed page of this still-owned main window and exact runtime binding.
+    if (loaded && openingBinding && !quitting && mainWindow === win && !win.isDestroyed() &&
+        openingBinding === currentRuntimeBinding(supervisor.runtime)) {
+      const actual = webUrl(win.webContents.getURL());
+      if (actual && isAppPage(actual.href, openingBinding.base)) {
+        console.log("[desktop-test] owned main page loaded " + actual.origin + actual.pathname);
+      }
+    }
     if (!loaded && canReopenMainWindow) throw new Error("Main page timed out");
     return true;
   } catch (error) {
