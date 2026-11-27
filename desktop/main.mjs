@@ -67,6 +67,7 @@ app.commandLine.appendSwitch("disable-http-cache");
 process.on("exit", (code) => console.log(`[desktop] exiting code=${code}`));
 
 let mainWindow = null;
+let mainReopenPage = null;
 let settingsWindow = null;
 let runtimeBase = null;
 const trustedContents = () => [mainWindow, settingsWindow]
@@ -110,6 +111,8 @@ function guardLibraryWindowClose(win) {
       let transition, closed = false;
       try {
         transition = await acquireLibraryTransition();
+        const closingMain = win === mainWindow;
+        const savedPage = closingMain ? transition.targets.find((item) => item.wc === contents) : null;
         // close() can be prevented by the renderer. Do not skip its lease
         // cleanup merely because close() returned or override unload security.
         closed = await new Promise((resolve) => {
@@ -117,7 +120,16 @@ function guardLibraryWindowClose(win) {
             win.removeListener("closed", didClose);
             contents.removeListener("will-prevent-unload", didPrevent);
           };
-          const didClose = () => { cleanup(); resolve(true); };
+          const didClose = () => {
+            // Remember only the verified local document from a completed close,
+            // not a cancelled close, a request in flight, or another window.
+            if (closingMain) {
+              mainReopenPage = savedPage && isAppPage(savedPage.url, savedPage.base)
+                ? { url: savedPage.url, base: savedPage.base } : null;
+            }
+            cleanup();
+            resolve(true);
+          };
           const didPrevent = () => { cleanup(); allowed = false; resolve(false); };
           win.once("closed", didClose);
           contents.once("will-prevent-unload", didPrevent);
@@ -880,10 +892,13 @@ async function createWindow() {
   // BZ_PROBE_URL lets a test load a real product page (e.g. the settings screen)
   // and drive it, instead of a synthetic probe document.
   const probePath = process.env.BZ_PROBE_PATH;
+  const reopenTarget = mainReopenPage
+    ? retargetAppPage(mainReopenPage.url, mainReopenPage.base, base)
+    : `${base}/buzzy/talk`;
   const target =
     process.env.BZ_PROBE_URL ||
     (probePath ? `${base}${probePath}` : null) ||
-    (probe && testPageUrl ? testPageUrl : `${base}/buzzy/talk`);
+    (probe && testPageUrl ? testPageUrl : reopenTarget);
   if (typeof target !== "string" || (!isAppPage(target, base) && target !== testPageUrl)) throw new Error("The desktop entry point must be a local BeeZilla app page.");
   const loaded = await Promise.race([
     mainWindow.loadURL(target).then(() => true),

@@ -149,6 +149,7 @@ export async function desktop(t,fixtures,options={}) {
  }
  const main=await load(resolve(root,'desktop/main.mjs'));await main.evaluate();assert.equal(typeof ready,'function');await ready();api=context.__desktopTest;assert.ok(api);assert.equal(errors.length,0,'main startup: '+JSON.stringify(errors));
  const initialMain=api.currentMain();assert.ok(initialMain);
+ if(options.bootProbeOnly)delete proc.env.BZ_PROBE_PATH;
  async function quit(){const e=event();await Promise.all(app.listeners('before-quit').map(fn=>fn(e)));return e;}
  const d={api:{...api,auth},main:initialMain,windows,errors,logs,requests,messages,menu,app,ipc,
   runtime:()=>currentRuntime,didExit:()=>exitCode!==null,exitCode:()=>exitCode,quit,
@@ -736,3 +737,54 @@ for (const platform of ['darwin', 'win32']) {
     assert.equal(d.errors.length, 0);
   });
 }
+
+for (const changePort of [false, true]) {
+  test(`resident navigation: guarded main close and reopen remembers the app route, port change=${changePort}`, async t => {
+    const f = await fixture(t); await f.mount();
+    const g = await fixture(t);
+    const d = await desktop(t, [f, g], { bootProbeOnly: true }), oldRuntime = d.runtime();
+    const target = new URL('/buzzy/library?view=work#pinned', d.main.url);
+    assert.equal(d.main.webContents.windowOpenHandler({ url: target.href }).action, 'deny');
+    await drain();
+    assert.equal(d.main.url, target.href);
+    await d.close();
+    assert.equal(d.main.isDestroyed(), true);
+    assert.equal(d.stops, 0);
+    assert.equal(d.didExit(), false);
+    if (changePort) d.replaceRuntime(null);
+    d.app.emit(changePort ? 'second-instance' : 'activate', {}, false);
+    await drain();
+    assert.equal(d.windows.length, 2);
+    const reopened = new URL(d.api.currentMain().url);
+    assert.equal(reopened.port, String(d.runtime().port));
+    assert.equal(reopened.port === target.port, !changePort);
+    assert.equal(reopened.pathname + reopened.search + reopened.hash, '/buzzy/library?view=work#pinned');
+    assert.equal(d.starts, changePort ? 2 : 1);
+  });
+}
+
+test('resident navigation: a document outside the application allowlist is not remembered', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t);
+  const d = await desktop(t, [f, g], { bootProbeOnly: true });
+  f.h.location.href = new URL('/api/buzzy/assets/uploaded.html', d.main.url).href;
+  await d.close();
+  assert.equal(d.main.isDestroyed(), true);
+  d.app.emit('activate', {}, false); await drain();
+  assert.equal(new URL(d.api.currentMain().url).pathname, '/buzzy/talk');
+  assert.equal(d.starts, 1);
+});
+
+test('last window close uses normal Quit on win32', async t => {
+  const f = await fixture(t), page = await f.mount();
+  const d = await desktop(t, [f], { platform: 'win32' });
+  await page.draw();
+  await d.close();
+  assert.equal(d.main.isDestroyed(), true);
+  assert.equal(f.data().board.strokes.length, 3);
+  d.app.emit('window-all-closed'); await drain();
+  assert.equal(d.didExit(), true);
+  assert.equal(d.stops, 1);
+  assert.equal(f.posts().length, 1);
+  assert.equal(d.errors.length, 0);
+});
