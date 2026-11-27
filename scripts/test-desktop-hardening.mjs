@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import {
   allowAudioPermission, connectBaseUrl, createRuntimeAuth, isAppPage, isConnectNavigation,
-  isTrustedSender, retargetAppPage, runtimeOrigin, safeExternalUrl,
+  isTrustedSender, retargetAppPage, runtimeOrigin, safeExternalUrl, webUrl,
 } from "../desktop/security.mjs";
 import { createSettingsHandlers } from "../desktop/settings.mjs";
 import { loadInference } from "./lib/inference.mjs";
@@ -187,4 +187,55 @@ test("main wiring retains guards, isolated cloud session and extensionless setti
   assert.match(src, /fromPartition\("persist:beezilla-connect"\)/);
   assert.match(src, /settingsWindowFor\(`\$\{runtimeBase\}\/buzzy\/settings`\)/);
   assert.equal((src.match(/onBeforeSendHeaders\(/g) ?? []).length, 1);
+});
+
+// Exercise the callbacks as Electron registers them, without opening real devices.
+function mediaSessionFixture() {
+  const source = readFileSync(new URL("../desktop/main.mjs", import.meta.url), "utf8");
+  const block = /function installMediaPermissions\(\) \{[\s\S]*?\n\}/.exec(source);
+  assert.ok(block, "main must wire the tested session policy");
+  const wc = makeContents(base + "/buzzy/project?job=fixture-willow#private-notes");
+  const callbacks = {}, logs = [];
+  const defaultSession = {
+    setPermissionRequestHandler(fn) { callbacks.request = fn; },
+    setPermissionCheckHandler(fn) { callbacks.check = fn; },
+    setDevicePermissionHandler(fn) { callbacks.device = fn; },
+  };
+  runInNewContext(block[0] + "\ninstallMediaPermissions();", {
+    session: { defaultSession }, trustedContents: () => [wc], runtimeBase: base,
+    allowAudioPermission, webUrl, logLine: (_level, args) => logs.push(args.join(" ")),
+    setTimeout: () => {}, // OS availability is independent of a permission decision.
+  });
+  return { wc, callbacks, logs };
+}
+
+test("permission diagnostics retain decisions and requester origins, not document locations", () => {
+  const { wc, callbacks, logs } = mediaSessionFixture();
+  const results = [];
+  const details = { isMainFrame: true, mediaTypes: ["audio"], requestingUrl: wc.getURL() };
+  callbacks.request(wc, "media", result => results.push(result), details);
+  callbacks.request(wc, "media", result => results.push(result), {
+    ...details, isMainFrame: false, requestingUrl: "https://other.example/private/fixture-finch?name=fixture-coral",
+  });
+  assert.deepEqual(results, [true, false]);
+  assert.deepEqual(logs, [
+    "[perm] request media ← " + base + " → allow",
+    "[perm] request media ← https://other.example → deny",
+  ]);
+  assert.equal(callbacks.check(wc, "media", base, { isMainFrame: true, mediaType: "audio" }), true);
+  assert.equal(callbacks.check(wc, "media", "file:///fixture-private/draft.txt", { isMainFrame: true, mediaType: "audio" }), false);
+  assert.deepEqual(logs.slice(-2), [
+    "[perm] check media(audio) ← " + base + " → allow",
+    "[perm] check media(audio) ← unknown → deny",
+  ]);
+});
+
+test("permission denial still calls Electron back once when the window is retired", () => {
+  const { wc, callbacks, logs } = mediaSessionFixture();
+  wc.isDestroyed = () => true;
+  wc.getURL = () => { throw new Error("fixture: disposed WebContents"); };
+  const results = [];
+  callbacks.request(wc, "media", result => results.push(result), {});
+  assert.deepEqual(results, [false]);
+  assert.deepEqual(logs, ["[perm] request media ← unknown → deny"]);
 });

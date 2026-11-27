@@ -898,7 +898,9 @@ function installMediaPermissions() {
       contents: trustedContents(), webContents: wc, base: runtimeBase,
       permission, origin: details?.requestingUrl, details, request: true,
     });
-    logLine("log", [`[perm] request ${permission} ← ${wc?.getURL?.() ?? "?"} → ${allowed ? "allow" : "deny"}`]);
+    // A permission diagnostic needs the requester’s origin, not a private document URL.
+    // Never query a retired WebContents just to log a denial.
+    logLine("log", [`[perm] request ${permission} ← ${webUrl(details?.requestingUrl)?.origin ?? "unknown"} → ${allowed ? "allow" : "deny"}`]);
     callback(allowed);
   });
   // Device permission is for USB/HID/serial, not microphones. No such device
@@ -924,7 +926,7 @@ function installMediaPermissions() {
       permission, origin: requestingOrigin, details,
     });
     logLine("log", [
-      `[perm] check ${permission}${details?.mediaType ? `(${details.mediaType})` : ""} ← ${requestingOrigin} → ${allowed ? "allow" : "deny"}`,
+      `[perm] check ${permission}${details?.mediaType ? `(${details.mediaType})` : ""} ← ${webUrl(requestingOrigin)?.origin ?? "unknown"} → ${allowed ? "allow" : "deny"}`,
     ]);
     return allowed;
   });
