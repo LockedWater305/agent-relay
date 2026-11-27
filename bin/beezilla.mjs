@@ -44,10 +44,11 @@ function dataDir() {
 const DATA = dataDir();
 const RUNTIME_FILE = join(DATA, "runtime.json");
 
-function readRuntime() {
+function readRuntime({ reportError = false } = {}) {
   try {
     return JSON.parse(readFileSync(RUNTIME_FILE, "utf8"));
-  } catch {
+  } catch (error) {
+    if (reportError) throw error;
     return null;
   }
 }
@@ -131,10 +132,27 @@ async function cmdServe(argv) {
 }
 
 async function cmdStatus() {
-  const rt = readRuntime();
-  if (!rt) {
-    console.log("not running");
-    return 0;
+  let rt;
+  try {
+    rt = readRuntime({ reportError: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      console.log("not running");
+      return 0;
+    }
+    // JSON parser messages may contain snippets of the discovery token.
+    console.error(error instanceof SyntaxError
+      ? "[beezilla] runtime.json contains invalid JSON; local runtime status is unknown"
+      : "[beezilla] could not read runtime.json; local runtime status is unknown");
+    return 1;
+  }
+  // Only probe the install's documented loopback discovery contract. A bad
+  // record is distinct from both an absent record and a stale known endpoint.
+  if (!rt || rt.host !== "127.0.0.1" || !Number.isInteger(rt.port) || rt.port < 1 || rt.port > 65535 ||
+      !Number.isInteger(rt.pid) || rt.pid < 1 || typeof rt.startedAt !== "string" || !rt.startedAt ||
+      typeof rt.dataDir !== "string" || !rt.dataDir) {
+    console.error("[beezilla] runtime.json contains invalid local discovery data; local runtime status is unknown");
+    return 1;
   }
   const up = await healthy(rt);
   if (!up) {
