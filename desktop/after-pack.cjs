@@ -16,7 +16,7 @@
  */
 "use strict";
 
-const { cpSync, existsSync, readdirSync } = require("node:fs");
+const { cpSync, lstatSync, readFileSync, readdirSync } = require("node:fs");
 const { join } = require("node:path");
 
 /** Where resources/ lives inside the unpacked app for this platform. */
@@ -28,19 +28,52 @@ function resourcesDir(context) {
   return join(appOutDir, "resources");
 }
 
+function readRuntimeReceipt(stage) {
+  let receipt;
+  try { receipt = JSON.parse(readFileSync(join(stage, "MANIFEST.json"), "utf8")).stagedRuntime; }
+  catch { throw new Error("afterPack: no readable stage receipt — rebuild with `node dist.mjs stage`"); }
+  if (receipt?.scope !== "desktop/stage/app" || receipt.algorithm !== "sha256-tree-v1" ||
+      typeof receipt.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(receipt.sha256) ||
+      !Number.isSafeInteger(receipt.files) || receipt.files < 1 ||
+      !Number.isSafeInteger(receipt.bytes) || receipt.bytes < 1) {
+    throw new Error("afterPack: stage receipt has no usable runtime digest — rebuild with `node dist.mjs stage`");
+  }
+  return receipt;
+}
+
 exports.default = async function afterPack(context) {
   const app = join(resourcesDir(context), "app");
-  const src = join(__dirname, "stage", "app", "node_modules");
-  if (!existsSync(join(app, "package.json"))) {
+  const stage = join(__dirname, "stage");
+  const stageApp = join(stage, "app");
+  const src = join(stageApp, "node_modules");
+  if (!lstatSync(app, { throwIfNoEntry: false })?.isDirectory() ||
+      !lstatSync(join(app, "package.json"), { throwIfNoEntry: false })?.isFile()) {
     throw new Error(`afterPack: no runtime at ${app} — extraResources did not copy stage/app`);
   }
-  if (!existsSync(src) || readdirSync(src).length === 0) {
+  if (!lstatSync(src, { throwIfNoEntry: false })?.isDirectory() || readdirSync(src).length === 0) {
     throw new Error(`afterPack: no staged node_modules at ${src} — run \`node dist.mjs stage\` first`);
   }
-  // Force the JS traversal: native recursive copy can retain absolute .bin
-  // symlinks despite dereference:true, leaving the package tied to the builder.
-  cpSync(src, join(app, "node_modules"), { recursive: true, dereference: true, filter: () => true });
-  console.log(`  • afterPack: production node_modules added under ${app}`);
+
+  const expected = readRuntimeReceipt(stage);
+  const { observeStagedRuntime } = await import("./stage-receipt.mjs");
+  const verify = (directory, label) => {
+    const observed = observeStagedRuntime(directory);
+    if (observed.sha256 !== expected.sha256 || observed.files !== expected.files || observed.bytes !== expected.bytes) {
+      throw new Error(`afterPack: ${label} does not match the stage receipt — rebuild the desktop output`);
+    }
+  };
+  verify(stageApp, "staged runtime");
+
+  const target = join(app, "node_modules");
+  if (!lstatSync(target, { throwIfNoEntry: false })) {
+    // Force the JS traversal rather than a native copy that can retain .bin
+    // symlinks. A valid staged receipt already forbids links in these bytes.
+    cpSync(src, target, { recursive: true, dereference: true, filter: () => true });
+  }
+  // Do not merge or overwrite dependencies left by an old unpacked app. The
+  // exact final runtime (including extraResources) must match as one tree.
+  verify(app, "unpacked runtime");
+  console.log(`  • afterPack: staged and unpacked runtime bytes verified at ${app}`);
 };
 
 // For tests.

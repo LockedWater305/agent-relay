@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { copyProductionDependency } from "../desktop/stage-inputs.mjs";
+import { observeStagedRuntime } from "../desktop/stage-receipt.mjs";
 
 const desktopDir = fileURLToPath(new URL("../desktop/", import.meta.url));
 const hookSource = join(desktopDir, "after-pack.cjs");
@@ -36,6 +37,7 @@ function fixture(t, platform = "win32") {
   mkdirSync(dirname(hookPath), { recursive: true });
   // Copy the real hook unchanged so its __dirname-relative stage is isolated.
   copyFileSync(hookSource, hookPath);
+  copyFileSync(join(desktopDir,"stage-receipt.mjs"), join(dirname(hookPath),"stage-receipt.mjs"));
   assert.deepEqual(readFileSync(hookPath), readFileSync(hookSource));
   const hook = require(hookPath);
   const context = {
@@ -47,14 +49,21 @@ function fixture(t, platform = "win32") {
   const resources = platform === "darwin" || platform === "mas"
     ? join(context.appOutDir, "BeeZilla Test Product.app", "Contents", "Resources")
     : join(context.appOutDir, "resources");
+  const stage=join(root, "desktop", "stage"), stageApp=join(stage,"app");
   return {
-    hook, context, resources,
+    hook, context, resources, stage, stageApp,
     app: join(resources, "app"),
-    stagedDependencies: join(root, "desktop", "stage", "app", "node_modules"),
+    stagedDependencies: join(stageApp,"node_modules"),
   };
 }
 
 const runtimeManifest = Buffer.from('{"name":"synthetic-runtime","private":true}\n');
+function recordStage(f) {
+  writeFile(join(f.stageApp,"package.json"),runtimeManifest);
+  const receipt=observeStagedRuntime(f.stageApp);
+  assert.match(receipt.sha256,/^[0-9a-f]{64}$/);
+  writeFile(join(f.stage,"MANIFEST.json"),JSON.stringify({ stagedRuntime:receipt }));
+}
 const dependencyFiles = [
   ["plain/package.json", Buffer.from('{"name":"plain","version":"1.0.0"}\n')],
   ["plain/index.js", Buffer.from("module.exports = 'synthetic dependency';\n")],
@@ -73,6 +82,7 @@ for (const platform of ["win32", "linux", "darwin", "mas"]) {
       writeFile(join(f.stagedDependencies, path), bytes);
     }
 
+    recordStage(f);
     await f.hook.default(f.context);
 
     for (const [path, bytes] of dependencyFiles) {
@@ -135,6 +145,7 @@ test("the explicit application file allowlist excludes the build-time hook and s
       `build.files must name explicit existing files, not patterns or directories: ${entry}`);
     assert.notEqual(realpathSync(path), realpathSync(hookSource), "afterPack is build-time only");
     assert.notEqual(realpathSync(path), realpathSync(join(desktopDir, "stage-inputs.mjs")), "staging guards are build-time only");
+    assert.notEqual(realpathSync(path), realpathSync(join(desktopDir, "stage-receipt.mjs")), "the packaging receipt guard is build-time only");
   }
 });
 
@@ -150,14 +161,19 @@ for (const boundary of ["stage", "afterPack"]) {
     const bin = "outer/node_modules/.bin/synthetic";
     const target = "outer/node_modules/inner/bin/cli.mjs";
     writeFile(join(f.app, "package.json"), runtimeManifest);
-    writeFile(join(f.stagedDependencies, "outer/package.json"), '{"name":"outer"}\n');
-    writeFile(join(f.stagedDependencies, target), bytes);
-    mkdirSync(dirname(join(f.stagedDependencies, bin)), { recursive: true });
-    symlinkSync("../inner/bin/cli.mjs", join(f.stagedDependencies, bin), "file");
-    assert.ok(lstatSync(join(f.stagedDependencies, bin)).isSymbolicLink());
+    const raw = boundary === "stage" ? f.stagedDependencies : join(f.stage,"raw-installed-dependencies");
+    writeFile(join(raw, "outer/package.json"), '{"name":"outer"}\n');
+    writeFile(join(raw, target), bytes);
+    mkdirSync(dirname(join(raw, bin)), { recursive: true });
+    symlinkSync("../inner/bin/cli.mjs", join(raw, bin), "file");
+    assert.ok(lstatSync(join(raw, bin)).isSymbolicLink());
     const output = join(f.app, "node_modules");
-    if (boundary === "stage") stageDependencyCopy(f.stagedDependencies, output);
-    else await f.hook.default(f.context);
+    if (boundary === "stage") stageDependencyCopy(raw, output);
+    else {
+      stageDependencyCopy(raw, f.stagedDependencies);
+      recordStage(f);
+      await f.hook.default(f.context);
+    }
     const copied = join(output, bin);
     assert.equal(lstatSync(copied).isSymbolicLink(), false, "must not retain builder symlink");
     assert.ok(lstatSync(copied).isFile());
@@ -168,3 +184,45 @@ for (const boundary of ["stage", "afterPack"]) {
     assert.deepEqual(readFileSync(copied), bytes);
   });
 }
+
+function seedForIntegrity(t) {
+  const f=fixture(t);
+  writeFile(join(f.app,"package.json"),runtimeManifest);
+  writeFile(join(f.stageApp,"generated.mjs"),"// exact runtime");
+  writeFile(join(f.app,"generated.mjs"),"// exact runtime");
+  writeFile(join(f.stagedDependencies,"plain","index.js"),"module.exports = 1;");
+  return f;
+}
+test("nonempty stage without an integrity receipt cannot enter packaging",async t=>{
+  const f=seedForIntegrity(t);
+  await assert.rejects(f.hook.default(f.context),/no readable stage receipt/i);
+  assert.equal(existsSync(join(f.app,"node_modules")),false);
+});
+test("same-size mutation of stage dependency is refused before copying",async t=>{
+  const f=seedForIntegrity(t);
+  recordStage(f);
+  writeFile(join(f.stagedDependencies,"plain","index.js"),"module.exports = 2;");
+  await assert.rejects(f.hook.default(f.context),/staged runtime.*does not match/i);
+  assert.equal(existsSync(join(f.app,"node_modules")),false);
+});
+test("same-size unpacked extraResource drift cannot complete afterPack",async t=>{
+  const f=seedForIntegrity(t);
+  recordStage(f);
+  writeFile(join(f.app,"generated.mjs"),"// stale runtime");
+  await assert.rejects(f.hook.default(f.context),/unpacked runtime.*does not match/i);
+});
+test("preexisting unpacked dependencies aren't merged or replaced when inconsistent",async t=>{
+  const f=seedForIntegrity(t);
+  recordStage(f);
+  const prior=join(f.app,"node_modules","plain","index.js");
+  writeFile(prior,"module.exports = 2;");
+  await assert.rejects(f.hook.default(f.context),/unpacked runtime.*does not match/i);
+  assert.equal(readFileSync(prior,"utf8"),"module.exports = 2;");
+});
+test("an already exact unpacked runtime can be checked again without copying",async t=>{
+  const f=seedForIntegrity(t);
+  recordStage(f);
+  await f.hook.default(f.context);
+  await f.hook.default(f.context);
+  assert.deepEqual(observeStagedRuntime(f.app),observeStagedRuntime(f.stageApp));
+});
