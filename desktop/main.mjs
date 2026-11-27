@@ -277,12 +277,27 @@ function identityFile() {
   return join(supervisor.dataDir, "identity.json");
 }
 
+const injectedOwnerEnv = new Map();
 function applyIdentityToEnv() {
+  // Remove only this launcher's previous overrides; a missing/partial backup
+  // or a new account is not permission to reuse details from the older one.
+  for (const [key, { previous, value }] of injectedOwnerEnv) {
+    if (process.env[key] !== value) continue;
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+  }
+  injectedOwnerEnv.clear();
   try {
     if (!existsSync(identityFile())) return;
     const id = JSON.parse(readFileSync(identityFile(), "utf8"));
-    if (id?.name) process.env.BZ_LOCAL_OWNER_NAME = String(id.name);
-    if (id?.email) process.env.BZ_LOCAL_OWNER_EMAIL = String(id.email);
+    const name = typeof id?.name === "string" ? id.name.trim() : "";
+    const email = typeof id?.email === "string" ? id.email.trim() : "";
+    if (!email) return;
+    for (const [key, value] of [["BZ_LOCAL_OWNER_NAME", name], ["BZ_LOCAL_OWNER_EMAIL", email]]) {
+      if (!value) continue;
+      injectedOwnerEnv.set(key, { previous: process.env[key], value });
+      process.env[key] = value;
+    }
     console.log("[desktop] local owner profile loaded");
   } catch (err) {
     // JSON parser errors can quote the file contents. Log only the failure type.
@@ -292,12 +307,15 @@ function applyIdentityToEnv() {
 }
 
 function saveIdentity(account) {
-  if (!account?.email) return;
+  const email = typeof account?.email === "string" ? account.email.trim() : "";
+  const name = email && typeof account?.name === "string" ? account.name.trim() : "";
   try {
     mkdirSync(supervisor.dataDir, { recursive: true });
-    writeFileSync(identityFile(), JSON.stringify({ ...account, savedAt: new Date().toISOString() }, null, 2) + "\n");
+    // Called only when a new managed connection commits. An unavailable
+    // profile must not leave the prior account displayed under the new key.
+    writeFileSync(identityFile(), JSON.stringify({ name, email, savedAt: new Date().toISOString() }, null, 2) + "\n");
     applyIdentityToEnv();
-    console.log("[desktop] local owner profile saved");
+    console.log(email ? "[desktop] local owner profile saved" : "[desktop] connected profile unavailable; using local owner settings");
   } catch {
     console.warn("[desktop] could not save identity.json; check that the local data directory is writable");
   }
