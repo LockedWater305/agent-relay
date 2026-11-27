@@ -7,7 +7,7 @@ import test from 'node:test';
 const html=readFileSync(process.env.BZ_FRESH_DEADLINE_TALK_FIXTURE ??
  new URL('../public/buzzy/talk.html',import.meta.url),'utf8');
 function cut(a,b){const start=html.indexOf(a),end=html.indexOf(b,start+1);assert.ok(start>=0&&end>start,a);return html.slice(start,end);}
-const source=cut('    function submitPaper(payload) {','    function readThisBody(')+'\n'+
+const source=cut('    function submitPaper(','    function readThisBody(')+'\n'+
  cut('    var latestFreshChatSend = null;','        // Voice turns take the streaming lane')+
  '\nreturn await postOnce(); } finally {} }\nreturn {text:sendChatMessage,paper:submitPaper,isBusy(){return paperBusy;},setEpoch(value){chatEpoch=value;}};';
 async function scenario(spec){
