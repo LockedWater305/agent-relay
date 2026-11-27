@@ -1110,15 +1110,19 @@ app.on("before-quit", async (event) => {
   if (quitting) { event.preventDefault(); return; }
   quitting = true;
   event.preventDefault();
-  let transition;
+  let transition, stoppingDatabase = false;
   try {
     transition = await acquireLibraryTransition();
+    stoppingDatabase = true;
     await supervisor.stop();
+    stoppingDatabase = false;
     clearRuntimeAuth();
     app.exit(0);
   } catch (error) {
     quitting = false;
-    dialog.showErrorBox("BeeZilla stayed open", `${error.message}\n\nRetry when Sketch and Library changes can be saved and the local database can stop safely.`);
+    dialog.showErrorBox("BeeZilla stayed open", stoppingDatabase
+      ? "Sketch and Library finished saving. BeeZilla could not confirm the local database stopped. Wait a moment, then choose Quit again."
+      : `${error.message}\n\nRetry when Sketch and Library changes can be saved and the local database can stop safely.`);
   } finally {
     await transition?.release();
   }

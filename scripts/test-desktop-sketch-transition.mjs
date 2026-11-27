@@ -173,6 +173,40 @@ test('reconstructed actual Quit storage failure preserves runtime and draft for 
  await d.quit();assert.equal(d.didExit(),false);assert.equal(d.runtime(),original);assert.equal(d.stops,0);assert.equal(f.data().board.strokes.length,2);assert.ok(d.errors.length);
  f.failSave(false);await d.quit();assert.equal(d.didExit(),true);assert.equal(f.data().board.strokes.length,3);
 });
+test('native Quit gives one database-stop message, not save guidance when saves succeeded', async t => {
+  const f = await fixture(t), page = await f.mount(), d = await desktop(t, [f]);
+  assert.ok(d.menu.template.flatMap(item => item.submenu || []).some(item => item.role === 'quit'));
+  const sup = d.api.supervisor(), originalStop = sup.stop.bind(sup);
+  const entered = f.defer(), finish = f.defer();
+  let attempts = 0;
+  sup.stop = async () => {
+    attempts++;
+    entered.resolve();
+    await finish.promise;
+    throw Error('fixture: local database has not stopped at /private/profile/path');
+  };
+  await page.draw();
+  const quitting = d.quit();
+  await entered.promise;
+  assert.equal(f.data().board.strokes.length, 3, 'save passed before database stop');
+  await d.quit(); await d.quit();
+  assert.equal(attempts, 1);
+  assert.equal(d.errors.length, 0, 'no prompt while shutdown is still in progress');
+  finish.resolve(); await quitting;
+  assert.equal(d.didExit(), false);
+  assert.equal(d.stops, 0);
+  assert.equal(d.errors.length, 1);
+  assert.match(d.errors[0].message, /Sketch and Library.*finished saving/i);
+  assert.match(d.errors[0].message, /database.*wait.*Quit again/i);
+  assert.doesNotMatch(d.errors[0].message, /private\/profile|changes can be saved/);
+  assert.equal(d.api.held(), false);
+  sup.stop = originalStop;
+  await d.quit();
+  assert.equal(d.didExit(), true);
+  assert.equal(d.errors.length, 1);
+  assert.equal(f.posts().length, 1, 'retry does not submit the accepted save again');
+});
+
 test('reconstructed actual Quit waits for a pending response body and does not duplicate an accepted Save',async t=>{
  const f=await fixture(t),p=await f.mount(),d=await desktop(t,[f]),gate=f.defer();let accepted=false;
  f.transport=async(req,next)=>{const response=await next();if(req.method==='POST'){accepted=true;return {ok:true,status:200,json:async()=>{await gate.promise;return response.json();}};}return response;};
@@ -237,7 +271,7 @@ test('normal window close saves, observes destruction, and does not stop the sha
  const f=await fixture(t),p=await f.mount(),d=await desktop(t,[f]);await p.draw();await d.close();assert.equal(d.main.isDestroyed(),true);assert.equal(f.data().board.strokes.length,3);assert.equal(d.stops,0);
 });
 test('prevented window close releases the matching writer and can be retried without overriding unload',async t=>{
- const f=await fixture(t),p=await f.mount(),d=await desktop(t,[f]);d.main.preventUnload=true;await p.draw();await d.close();assert.equal(d.main.isDestroyed(),false);assert.equal(d.main.lastUnloadEvent.prevented,false,'no override of Electron unload prevention');assert.equal(d.api.held(),false);assert.equal(p.el('save').disabled,false);assert.equal(f.data().board.strokes.length,3);
+ const f=await fixture(t),p=await f.mount(),d=await desktop(t,[f]);d.main.preventUnload=true;await p.draw();await d.close();assert.equal(d.main.isDestroyed(),false);assert.equal(d.main.lastUnloadEvent.prevented,false,'no override of Electron unload prevention');assert.equal(d.errors.length,0,'user-cancelled close is not a save error');assert.equal(d.api.held(),false);assert.equal(p.el('save').disabled,false);assert.equal(f.data().board.strokes.length,3);
  await p.draw();d.main.preventUnload=false;await d.close();assert.equal(d.main.isDestroyed(),true);assert.equal(f.data().board.strokes.length,4);
 });
 test('multiwindow Quit drains both captured mounted pages before stopping',async t=>{
