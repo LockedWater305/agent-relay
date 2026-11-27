@@ -19,7 +19,8 @@
  *   <install>/resources/app/            .output/ scripts/ bin/ package.json node_modules/
  */
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireServerEntry, writeCspManifest } from "../scripts/build-desktop-csp.mjs";
@@ -69,7 +70,13 @@ function runCli(cwd, entry, args, env = process.env) {
   execFileSync(process.execPath, [entry, ...args], { cwd, env, stdio: "inherit", shell: false });
 }
 
-async function stage() {
+function runBuilder(builder, args, attempt) {
+  // Only the direct locked packaging CLI receives the ID. Neither prebuild
+  // child commands nor a separate electron-builder invocation can claim it.
+  runCli(DESKTOP, builder, args, { ...process.env, BZ_DESKTOP_STAGE_ATTEMPT: attempt });
+}
+
+async function stage(receiptFile) {
   const checkoutBefore = observeCheckout(ROOT);
   const vite = lockedCli(ROOT, "vite", "bin/vite.js");
   // Calling Vite directly bypasses npm's prebuild hooks. A clean source tree
@@ -175,7 +182,7 @@ async function stage() {
   // Logical file bytes, not filesystem block allocation. No platform command
   // (du is normally absent on Windows) or bogus zero if reading fails.
   const megabytes = stagedRuntime.bytes === null ? null : Math.round(stagedRuntime.bytes / 1e6);
-  writeFileSync(RECEIPT, JSON.stringify({
+  writeFileSync(receiptFile, JSON.stringify({
     stagedAt: new Date().toISOString(),
     version: JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version,
     productionPackages: copied,
@@ -338,11 +345,11 @@ function localTestBanner() {
  * target writes the app under dist-desktop/ (macOS: mac-arm64/BeeZilla.app,
  * Windows: win-unpacked/). It is not an installer and not a release.
  */
-function packDir(builder) {
+function packDir(builder, attempt) {
   const flag = { darwin: "--mac", win32: "--win", linux: "--linux" }[process.platform];
   if (!flag) throw new Error(`no electron-builder target for ${process.platform}`);
   log(`running electron-builder ${flag} dir (unpacked, no installer, no publish)…`);
-  runCli(DESKTOP, builder, [flag, "dir", "--publish", "never"]);
+  runBuilder(builder, [flag, "dir", "--publish", "never"], attempt);
   // The production node_modules is added by the afterPack hook (after-pack.cjs)
   // for every target, because extraResources drops a top-level node_modules.
   // Check it really landed: without it the packaged runtime cannot start.
@@ -369,6 +376,8 @@ function unpackedResources() {
 
 const mode = process.argv[2] ?? "stage";
 if (mode === "stage" || mode === "all" || mode === "dir") {
+  const attempt = randomBytes(16).toString("hex");
+  const pending = join(STAGE_LOCK, `pending-${process.pid}-${attempt}.json`);
   const priorStage = lstatSync(STAGE, { throwIfNoEntry: false });
   if (priorStage && !priorStage.isDirectory()) throw new Error("desktop/stage must be a real directory");
   mkdirSync(STAGE, { recursive: true });
@@ -385,19 +394,23 @@ if (mode === "stage" || mode === "all" || mode === "dir") {
     const builder = mode === "all" || mode === "dir"
       ? lockedCli(DESKTOP, "electron-builder", "cli.js")
       : null;
-    await stage();
+    await stage(pending);
     if (mode === "all") {
       log("running electron-builder…");
-      runCli(DESKTOP, builder, ["--win", "nsis", "--publish", "never"]);
+      runBuilder(builder, ["--win", "nsis", "--publish", "never"], attempt);
       log("installer written to dist-desktop/");
     }
-    if (mode === "dir") packDir(builder);
+    if (mode === "dir") packDir(builder, attempt);
+    // Commit the receipt atomically only after the stage and any requested
+    // packaging succeed. A hard stop cannot publish a provisional receipt.
+    renameSync(pending, RECEIPT);
   } catch (error) {
     // A later failure (including afterPack/packager failure) cannot leave
     // successful evidence from this attempt either.
     rmSync(RECEIPT, { force: true });
     throw error;
   } finally {
+    rmSync(pending, { force: true });
     rmdirSync(STAGE_LOCK);
   }
 }

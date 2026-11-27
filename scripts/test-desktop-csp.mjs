@@ -333,7 +333,8 @@ test("build/package/start wiring includes the manifest and never suppresses warn
   assert.ok(!desktopPkg.build.files.includes("build-desktop-csp.mjs"));
   assert.match(dist, /await writeCspManifest\(ROOT\)/);
   assert.ok(dist.indexOf("await writeCspManifest(ROOT)") < dist.indexOf('for (const dir of [".output"'));
-  assert.match(dist, /await stage\(\)/);
+  assert.match(dist, /await stage\(pending\)/);
+  assert.ok(dist.indexOf("await stage(pending)") < dist.indexOf("renameSync(pending, RECEIPT)"));
   assert.match(main, /session\.defaultSession\.webRequest\.onHeadersReceived/);
   assert.ok(main.includes('urls: ["http://127.0.0.1:*/*"]'), "the transport filter includes runtime ports, while policy scope checks the exact current origin");
   assert.match(main, /manifest: loadCspManifest\(ROOT\)/);

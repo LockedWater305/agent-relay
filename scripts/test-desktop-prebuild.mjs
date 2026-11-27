@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createRequire } from "node:module";
@@ -169,6 +169,52 @@ test("a failed builder preflight for pack:dir invalidates the old stage receipt 
   assert.equal(existsSync(receipt),false);
 });
 
+for (const mode of ["dir", "all"]) {
+  test(`${mode} passes only provisional evidence to its matching builder and promotes it after success`, t => {
+    const {dir,out}=outputFixture(t,"valid");
+    const meta={name:"electron-builder",version:"1.0.0",bin:{"electron-builder":"cli.js"}};
+    out("desktop/package-lock.json",JSON.stringify({packages:{"node_modules/electron-builder":{...meta,integrity:"fixture"}}}));
+    out("desktop/node_modules/electron-builder/package.json",JSON.stringify(meta));
+    out("package.json",'{"version":"0.0.1","dependencies":{"@electric-sql/pglite":"1.0.0"}}');
+    out("node_modules/@electric-sql/pglite/package.json",'{"name":"@electric-sql/pglite","version":"1.0.0"}');
+    // Exercise the real all-path pin gate using an inert fixture-only entry.
+    out("publishers.json",'{"publishers":[{"keyId":"fixture-only"}]}');
+    cpSync(new URL("../desktop/after-pack.cjs",import.meta.url),join(dir,"desktop/after-pack.cjs"));
+    out("desktop/node_modules/electron-builder/cli.js",`
+      const assert=require("node:assert/strict"), fs=require("node:fs"), path=require("node:path");
+      const hook=require(path.resolve("after-pack.cjs"));
+      const stage=path.resolve("stage"), lock=path.join(stage,".build-lock");
+      const mode=${JSON.stringify(mode)}, platform=mode==="all"?"win32":process.platform;
+      const outputName={win32:"win-unpacked",linux:"linux-unpacked",darwin:"mac"}[platform];
+      const appOutDir=path.resolve("..","dist-desktop",outputName);
+      const context={appOutDir,electronPlatformName:platform,packager:{appInfo:{productFilename:"BeeZilla"}}};
+      assert.equal(process.argv.at(-2),"--publish");
+      assert.equal(process.argv.at(-1),"never");
+      assert.equal(fs.existsSync(path.join(stage,"MANIFEST.json")),false,
+        "a stage must not look committed before its packer has succeeded");
+      const attempt=process.env.BZ_DESKTOP_STAGE_ATTEMPT;
+      assert.match(attempt,/^[0-9a-f]{32}$/);
+      assert.deepEqual(fs.readdirSync(lock),["pending-"+process.ppid+"-"+attempt+".json"]);
+      const app=path.join(hook.resourcesDir(context),"app");
+      fs.cpSync(path.join(stage,"app"),app,{recursive:true,filter:p=>path.basename(p)!=="node_modules"});
+      (async()=>{
+        delete process.env.BZ_DESKTOP_STAGE_ATTEMPT;
+        await assert.rejects(hook.default(context),/no live matching desktop build attempt/i);
+        process.env.BZ_DESKTOP_STAGE_ATTEMPT=attempt==="0".repeat(32)?"1".repeat(32):"0".repeat(32);
+        await assert.rejects(hook.default(context),/no live matching desktop build attempt/i);
+        assert.equal(fs.existsSync(path.join(app,"node_modules")),false);
+        process.env.BZ_DESKTOP_STAGE_ATTEMPT=attempt;
+        await hook.default(context);
+      })().catch(error=>{console.error(error);process.exitCode=1;});
+    `);
+    const packed=invoke(dir,false,mode);
+    assert.equal(packed.status,0,packed.stdout+packed.stderr);
+    assert.match(packed.stdout,/staged and unpacked runtime bytes verified/i);
+    assert.match(JSON.parse(readFileSync(join(dir,"desktop/stage/MANIFEST.json"),"utf8")).stagedRuntime.sha256,/^[0-9a-f]{64}$/);
+    assert.equal(existsSync(join(dir,"desktop/stage/.build-lock")),false);
+  });
+}
+
 test("a competing stage cannot invalidate the active owner receipt during packaging",async t=>{
   const {dir,out}=outputFixture(t,"valid");
   const meta={name:"electron-builder",version:"1.0.0",bin:{"electron-builder":"cli.js"}};
@@ -188,21 +234,28 @@ test("a competing stage cannot invalidate the active owner receipt during packag
   const settled=once(owner,"exit");
   void settled.catch(()=>{});
   const receipt=join(dir,"desktop/stage/MANIFEST.json");
+  const lock=join(dir,"desktop/stage/.build-lock");
   try {
     const deadline=Date.now()+3500;
     while(!existsSync(ready)&&Date.now()<deadline) await new Promise(r=>setTimeout(r,20));
     assert.ok(existsSync(ready),"fixture owner never reached its synthetic builder");
-    const active=readFileSync(receipt,"utf8");
+    assert.equal(existsSync(receipt),false);
+    const entries=readdirSync(lock);
+    assert.equal(entries.length,1);
+    const pending=join(lock,entries[0]);
+    const active=readFileSync(pending,"utf8");
     const contender=invoke(dir);
     assert.notEqual(contender.status,0,contender.stdout+contender.stderr);
     assert.match(contender.stderr,/another desktop.*stage|another desktop.*packaging/i);
-    assert.equal(readFileSync(receipt,"utf8"),active);
+    assert.equal(readFileSync(pending,"utf8"),active);
+    assert.equal(existsSync(receipt),false);
   } finally {
     writeFileSync(finish,"finish");
     await settled;
   }
   // This owner was scripted to fail, not to produce an app or installer.
   assert.equal(existsSync(receipt),false);
+  assert.equal(existsSync(lock),false);
   const retry=invoke(dir);
   assert.equal(retry.status,0,retry.stdout+retry.stderr);
   assert.ok(existsSync(receipt));

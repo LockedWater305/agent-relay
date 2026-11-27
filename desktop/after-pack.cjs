@@ -28,9 +28,35 @@ function resourcesDir(context) {
   return join(appOutDir, "resources");
 }
 
-function readRuntimeReceipt(stage) {
+function stageReceiptFile(stage) {
+  const lock = join(stage, ".build-lock");
+  const lockStat = lstatSync(lock, { throwIfNoEntry: false });
+  const attempt = process.env.BZ_DESKTOP_STAGE_ATTEMPT;
+  if (!lockStat && attempt === undefined) return join(stage, "MANIFEST.json");
+
+  // electron-builder 26 invokes afterPack in its own JS process, which dist
+  // starts directly. The attempt ID is not a portable lock override: it must
+  // name a real pending receipt bound to this child's still-live parent.
+  const owner = process.ppid;
+  if (lockStat?.isDirectory() && /^[a-f0-9]{32}$/.test(attempt ?? "") &&
+      Number.isSafeInteger(owner) && owner > 1) {
+    const pending = join(lock, `pending-${owner}-${attempt}.json`);
+    if (lstatSync(pending, { throwIfNoEntry: false })?.isFile()) {
+      try {
+        process.kill(owner, 0); // Liveness check only; sends no signal.
+        return pending;
+      } catch { /* Refuse if the original parent cannot be verified. */ }
+    }
+  }
+  throw new Error(
+    "afterPack: no live matching desktop build attempt — wait for the owner or remove an abandoned " +
+    "desktop/stage/.build-lock only after confirming all desktop builds have stopped; then run `node dist.mjs stage`"
+  );
+}
+
+function readRuntimeReceipt(receiptFile) {
   let receipt;
-  try { receipt = JSON.parse(readFileSync(join(stage, "MANIFEST.json"), "utf8")).stagedRuntime; }
+  try { receipt = JSON.parse(readFileSync(receiptFile, "utf8")).stagedRuntime; }
   catch { throw new Error("afterPack: no readable stage receipt — rebuild with `node dist.mjs stage`"); }
   if (receipt?.scope !== "desktop/stage/app" || receipt.algorithm !== "sha256-tree-v1" ||
       typeof receipt.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(receipt.sha256) ||
@@ -54,8 +80,9 @@ exports.default = async function afterPack(context) {
     throw new Error(`afterPack: no staged node_modules at ${src} — run \`node dist.mjs stage\` first`);
   }
 
-  const expected = readRuntimeReceipt(stage);
   const { observeStagedRuntime } = await import("./stage-receipt.mjs");
+  const receiptFile = stageReceiptFile(stage);
+  const expected = readRuntimeReceipt(receiptFile);
   const verify = (directory, label) => {
     const observed = observeStagedRuntime(directory);
     if (observed.sha256 !== expected.sha256 || observed.files !== expected.files || observed.bytes !== expected.bytes) {
@@ -73,6 +100,12 @@ exports.default = async function afterPack(context) {
   // Do not merge or overwrite dependencies left by an old unpacked app. The
   // exact final runtime (including extraResources) must match as one tree.
   verify(app, "unpacked runtime");
+  const currentReceiptFile = stageReceiptFile(stage);
+  const current = readRuntimeReceipt(currentReceiptFile);
+  if (currentReceiptFile !== receiptFile || current.sha256 !== expected.sha256 ||
+      current.files !== expected.files || current.bytes !== expected.bytes) {
+    throw new Error("afterPack: stage receipt changed during packaging — rebuild the desktop output");
+  }
   console.log(`  • afterPack: staged and unpacked runtime bytes verified at ${app}`);
 };
 

@@ -93,6 +93,37 @@ for (const platform of ["win32", "linux", "darwin", "mas"]) {
   });
 }
 
+test("a standalone afterPack refuses the old receipt while an abandoned stage lock remains", async (t) => {
+  const f = fixture(t);
+  writeFile(join(f.app, "package.json"), runtimeManifest);
+  writeFile(join(f.stagedDependencies, "plain/index.js"), "// inert fixture");
+  recordStage(f);
+  const lock = join(f.stage, ".build-lock");
+  mkdirSync(lock);
+  // Equivalent to an interrupted attempt between lock acquisition and old
+  // MANIFEST invalidation; no build process was started or killed.
+  await assert.rejects(f.hook.default(f.context), /no live matching desktop build attempt/i);
+  assert.equal(existsSync(join(f.app, "node_modules")), false);
+  // Control: completed standalone stages (with no lock) remain supported.
+  rmSync(lock, { recursive: true });
+  await f.hook.default(f.context);
+});
+
+test("abandoned provisional evidence cannot survive synthetic lock cleanup", async (t) => {
+  const f = fixture(t);
+  writeFile(join(f.app, "package.json"), runtimeManifest);
+  writeFile(join(f.stagedDependencies, "plain/index.js"), "// inert fixture");
+  recordStage(f);
+  const manifest = join(f.stage, "MANIFEST.json"), lock = join(f.stage, ".build-lock");
+  writeFile(join(lock, "pending-999999-0123456789abcdef0123456789abcdef.json"), readFileSync(manifest));
+  rmSync(manifest);
+  // Models stopping after staging but before the builder reports success.
+  await assert.rejects(f.hook.default(f.context), /no live matching desktop build attempt/i);
+  rmSync(lock, { recursive: true });
+  await assert.rejects(f.hook.default(f.context), /no readable stage receipt/i);
+  assert.equal(existsSync(join(f.app, "node_modules")), false);
+});
+
 test("missing packaged runtime manifest rejects even when staged dependencies exist", async (t) => {
   const f = fixture(t);
   writeFile(join(f.app, "index.mjs"), "// synthetic runtime without its manifest\n");
