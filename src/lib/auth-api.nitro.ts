@@ -22,9 +22,13 @@ export default defineEventHandler(async (event) => {
     if (path === "/api/auth/get-session" || path.endsWith("/get-session")) {
       const headers = new Headers(event.req.headers as unknown as Record<string, string>);
       const user = await resolveLocalRequester(headers);
-      if (!user) return null;
+      // A bare null is an empty body in H3, not the JSON null Better Auth
+      // returns. Shared clients interpret a non-JSON body as an outage and
+      // retain the cached identity rather than accepting the session denial.
+      const responseOptions = { headers: { "cache-control": "no-store" } };
+      if (!user) return Response.json(null, responseOptions);
       const now = new Date();
-      return {
+      return Response.json({
         session: {
           id: "local-session",
           userId: user.id,
@@ -44,7 +48,7 @@ export default defineEventHandler(async (event) => {
           createdAt: now.toISOString(),
           updatedAt: now.toISOString(),
         },
-      };
+      }, responseOptions);
     }
   }
   return handleAuthRequest(event.req as Request);
