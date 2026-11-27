@@ -51,9 +51,26 @@ export function decodeSnapshot(snapshot) {
   return { legacy, pending };
 }
 
-function snapshotScript(nonce, freeze) {
+// Establish the actual DOM document before queueing any storage operation.
+function captureDocumentScript(url, proposedId) {
   return `(() => {
-    ${freeze ? `window.__bzLibraryVaultBarrier = ${JSON.stringify(nonce)}; window.BeeZillaLibraryVault?.freeze();` : `if (window.__bzLibraryVaultBarrier !== ${JSON.stringify(nonce)}) throw new Error("Library page changed during migration");`}
+    if (location.href !== ${JSON.stringify(url)}) throw new Error("Library page changed during migration");
+    if (!Object.hasOwn(document, "__bzLibraryVaultDocumentId")) {
+      Object.defineProperty(document, "__bzLibraryVaultDocumentId", { value: ${JSON.stringify(proposedId)} });
+    }
+    return document.__bzLibraryVaultDocumentId;
+  })()`;
+}
+
+function snapshotScript(nonce, freeze, generation, url, documentId) {
+  return `(() => {
+    if (document.__bzLibraryVaultDocumentId !== ${JSON.stringify(documentId)} || location.href !== ${JSON.stringify(url)}) throw new Error("Library page changed during migration");
+    ${freeze ? `
+    if ((window.__bzLibraryVaultGeneration ?? 0) >= ${generation}) throw new Error("This Library migration is no longer current");
+    window.__bzLibraryVaultGeneration = ${generation};
+    window.__bzLibraryVaultBarrier = ${JSON.stringify(nonce)};
+    window.BeeZillaLibraryVault?.freeze();
+    ` : `if (window.__bzLibraryVaultBarrier !== ${JSON.stringify(nonce)}) throw new Error("Library page changed during migration");`}
     const legacy = localStorage.getItem(${JSON.stringify(LEGACY_KEY)});
     const pending = []; let bytes = legacy?.length || 0;
     for (let i = 0; i < localStorage.length; i++) {
@@ -68,36 +85,47 @@ function snapshotScript(nonce, freeze) {
   })()`;
 }
 
-function acknowledgeScript(nonce, pending) {
+function acknowledgeScript(nonce, pending, url, documentId) {
   return `(() => {
-    if (window.__bzLibraryVaultBarrier !== ${JSON.stringify(nonce)}) throw new Error("Library page changed before acknowledgment");
+    if (document.__bzLibraryVaultDocumentId !== ${JSON.stringify(documentId)} || location.href !== ${JSON.stringify(url)} || window.__bzLibraryVaultBarrier !== ${JSON.stringify(nonce)}) throw new Error("Library page changed before acknowledgment");
     for (const item of ${JSON.stringify(pending)}) if (localStorage.getItem(item.key) === item.raw) localStorage.removeItem(item.key);
     return true;
   })()`;
 }
 
 /** Serialize restart/close/quit so one transition cannot unfreeze another. */
-export function createLibraryTransition({ getContents, getBase, getRuntime, fetchImpl = fetch, testPageUrl = null, rendererCleanupTimeoutMs = 15_000 }) {
-  let tail = Promise.resolve();
+export function createLibraryTransition({ getContents, getBase, getRuntime, fetchImpl = fetch, testPageUrl = null, rendererCleanupTimeoutMs = 15_000, rendererWaitTimeoutMs = 15_000 }) {
+  let tail = Promise.resolve(), lastGeneration = 0;
   return async function acquire({ allowDeferred = false } = {}) {
     let unlock;
     const previous = tail;
     tail = new Promise((resolve) => { unlock = resolve; });
     await previous;
-    const nonce = randomUUID(), windows = [];
-    let released = false;
+    const nonce = randomUUID(), generation = ++lastGeneration, windows = [];
+    let released = null;
     const trusted = (wc, base) => isTrustedSender({ sender: wc, senderFrame: wc.mainFrame }, { base, contents: getContents(), testPageUrl });
     const verify = (item) => {
-      if (!getContents().includes(item.wc) || item.wc.isDestroyed() || item.wc.mainFrame !== item.frame || item.wc.getURL() !== item.url || !trusted(item.wc, item.base)) throw new Error("The Library window changed during migration. Retry from the current window.");
+      if (released) throw new Error("This Library migration is no longer current.");
+      if (item.navigated || !getContents().includes(item.wc) || item.wc.isDestroyed() || item.wc.mainFrame !== item.frame || item.wc.getURL() !== item.url || !trusted(item.wc, item.base)) throw new Error("The Library window changed during migration. Retry from the current window.");
     };
     async function releaseWindow(item, skip, keepRetiredFrozen) {
       // A successful port replacement retires the old origin. Unlock main
       // coordination, but never let a late cleanup resume a newer freeze.
-      if (skip.includes(item.wc) || item.wc.isDestroyed() || !getContents().includes(item.wc) || item.wc.mainFrame !== item.frame || !trusted(item.wc, item.base) || (keepRetiredFrozen && getBase() !== item.base)) return;
+      if (!item.documentId || skip.includes(item.wc) || item.wc.isDestroyed() || !getContents().includes(item.wc) || item.wc.mainFrame !== item.frame || !trusted(item.wc, item.base) || (keepRetiredFrozen && getBase() !== item.base)) return;
       let timer;
       try {
         await Promise.race([
-          item.wc.executeJavaScript(`(() => { if(window.__bzLibraryVaultBarrier === ${JSON.stringify(nonce)}) { delete window.__bzLibraryVaultBarrier; window.BeeZillaLibraryVault?.resume(); } })()`),
+          item.wc.executeJavaScript(`(() => {
+            if (document.__bzLibraryVaultDocumentId !== ${JSON.stringify(item.documentId)} || (window.__bzLibraryVaultGeneration ?? 0) > ${generation}) return;
+            const ownsFreeze = window.__bzLibraryVaultBarrier === ${JSON.stringify(nonce)};
+            if (!ownsFreeze && location.href !== ${JSON.stringify(item.url)}) return;
+            // Retire this generation even if the first freeze never ran.
+            window.__bzLibraryVaultGeneration = ${generation};
+            if (ownsFreeze) {
+              delete window.__bzLibraryVaultBarrier;
+              window.BeeZillaLibraryVault?.resume();
+            }
+          })()`),
           new Promise((resolve) => { timer = setTimeout(resolve, rendererCleanupTimeoutMs); }),
         ]);
       } catch { /* a destroyed/replaced document has no old freeze to release */ }
@@ -105,10 +133,35 @@ export function createLibraryTransition({ getContents, getBase, getRuntime, fetc
     }
     const release = async ({ skip = [], keepRetiredFrozen = false } = {}) => {
       if (released) return;
-      released = true;
+      released = { skip, keepRetiredFrozen };
       try { await Promise.all(windows.map((item) => releaseWindow(item, skip, keepRetiredFrozen))); }
-      finally { unlock(); }
+      finally {
+        for (const item of windows) item.wc.removeListener?.("did-navigate", item.onNavigation);
+        unlock();
+      }
     };
+    async function rendererCall(item, source, mightFreeze = false) {
+      verify(item);
+      const pending = item.wc.executeJavaScript(source);
+      if (mightFreeze) {
+        const cleanupLate = () => {
+          if (released) return releaseWindow(item, released.skip, released.keepRetiredFrozen);
+        };
+        void pending.then(cleanupLate, cleanupLate).catch(() => {});
+      }
+      let timer;
+      try {
+        const result = await Promise.race([
+          pending,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("The Library renderer did not respond. Keep BeeZilla open and retry.")), rendererWaitTimeoutMs);
+          }),
+        ]);
+        verify(item);
+        return result;
+      } finally { clearTimeout(timer); }
+    }
+
     async function request(rt, suffix, body) {
       const base = runtimeOrigin(rt), token = rt.token;
       if (typeof token !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) throw new Error("The local runtime has no authenticated Library connection.");
@@ -150,15 +203,14 @@ export function createLibraryTransition({ getContents, getBase, getRuntime, fetc
       return data;
     }
     async function flush(rt = getRuntime()) {
+      if (released) throw new Error("This Library migration is no longer current.");
       if (!windows.length) return;
       // Capture again after every async boundary. Writers are frozen; a changed
       // nonce catches same-URL reloads, and a late external write forces retry.
       for (let pass = 0; pass < 3; pass++) {
         const snapshots = [];
         for (const item of windows) {
-          verify(item);
-          const raw = await item.wc.executeJavaScript(snapshotScript(nonce, false));
-          verify(item);
+          const raw = await rendererCall(item, snapshotScript(nonce, false, generation, item.url, item.documentId));
           snapshots.push({ item, raw, decoded: decodeSnapshot(raw) });
         }
         if (!snapshots.some(({ decoded }) => decoded.legacy.length || decoded.pending.length)) return;
@@ -193,19 +245,15 @@ export function createLibraryTransition({ getContents, getBase, getRuntime, fetc
               committed.push(exact.hash);
             }
             if (expected.size) throw new Error("Some Library records were not saved. Their local copies are unchanged.");
-            await item.wc.executeJavaScript(snapshotScript(nonce, false));
-            verify(item);
+            await rendererCall(item, snapshotScript(nonce, false, generation, item.url, item.documentId));
           }
           if (committed.length) {
-            await item.wc.executeJavaScript(acknowledgeScript(nonce, eligible.map(({ key, raw }) => ({ key, raw }))));
-            verify(item);
+            await rendererCall(item, acknowledgeScript(nonce, eligible.map(({ key, raw }) => ({ key, raw })), item.url, item.documentId));
           }
         }
         let changed = false;
         for (const { item, raw } of snapshots) {
-          verify(item);
-          const latest = await item.wc.executeJavaScript(snapshotScript(nonce, false));
-          verify(item);
+          const latest = await rendererCall(item, snapshotScript(nonce, false, generation, item.url, item.documentId));
           // A completed pending POST may remove an acknowledged outbox key;
           // deletion is safe. New or modified record bytes require another pass.
           const before = new Map(raw.pending.map((row) => [row.key, row.raw]));
@@ -219,10 +267,16 @@ export function createLibraryTransition({ getContents, getBase, getRuntime, fetc
       const base = getBase();
       for (const wc of getContents()) {
         if (!trusted(wc, base)) continue;
-        const item = { wc, frame: wc.mainFrame, url: wc.getURL(), base };
+        const item = { wc, frame: wc.mainFrame, url: wc.getURL(), base, navigated: false };
+        // Committed main-frame navigation, not in-page route changes. A
+        // matching URL and frame object can survive a reload while a probe waits.
+        item.onNavigation = () => { item.navigated = true; };
+        wc.on?.("did-navigate", item.onNavigation);
         windows.push(item);
-        await wc.executeJavaScript(snapshotScript(nonce, true));
-        verify(item);
+        const documentId = await rendererCall(item, captureDocumentScript(item.url, randomUUID()));
+        if (typeof documentId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(documentId)) throw new Error("The Library window could not confirm its document.");
+        item.documentId = documentId;
+        await rendererCall(item, snapshotScript(nonce, true, generation, item.url, item.documentId), true);
       }
       if (getRuntime() || !allowDeferred) await flush();
       return { flush, release };

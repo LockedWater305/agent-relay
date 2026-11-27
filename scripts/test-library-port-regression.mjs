@@ -49,6 +49,7 @@ async function scenario() {
  // Deliberately do not refresh the pending client: the real main barrier must
  // drain before the origin is replaced, even if a scheduled save has not run.
  let currentUrl=before+'/buzzy/library?job=audit_job',runtime={host:'127.0.0.1',port:7331,token:'a'.repeat(43)};
+ Object.defineProperty(first.context, 'location', { get: () => ({href:currentUrl}) });
  const listeners={},navigations=[],scheduled=[];
  vm.runInNewContext(preload,{require:()=>({contextBridge:{exposeInMainWorld(){}},ipcRenderer:{on:(name,fn)=>{listeners[name]=fn;},invoke:async()=>({ok:true})}}),process:{isMainFrame:true},window:{location:{replace:url=>{navigations.push(url);currentUrl=url;}}},URL,setTimeout:fn=>scheduled.push(fn),clearTimeout(){}});
  const wc={id:1,mainFrame:{url:currentUrl},isDestroyed:()=>false,getURL:()=>currentUrl,send:(channel,data)=>listeners[channel]?.({},data),executeJavaScript:async code=>vm.runInContext(code,first.context)};

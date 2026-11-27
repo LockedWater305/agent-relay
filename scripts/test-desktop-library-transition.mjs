@@ -1,6 +1,7 @@
 /** Actual migration barrier with isolated renderer VMs and a transactional local
  * API double. No Electron, real documents, credentials, sockets or disk DB. */
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
@@ -11,16 +12,21 @@ const legacy=(rows)=>JSON.stringify(Object.fromEntries([...new Set(rows.map(r=>r
 const env=(r,generation='0',storeId=STORE)=>JSON.stringify({version:1,storeId,generation,record:r});
 function renderer(id,values={}) {
  const data=new Map(Object.entries(values)),reads=[],scripts=[],state={frozen:false,destroyed:false};
- const window={BeeZillaLibraryVault:{freeze(){state.frozen=true;},resume(){state.frozen=false;}}};
  const storage={get length(){return data.size;},key:i=>[...data.keys()][i]??null,getItem:key=>{reads.push(key);return data.get(key)??null;},
   setItem:(key,value)=>data.set(key,String(value)),removeItem:key=>data.delete(key)};
- const context=vm.createContext({window,localStorage:storage});
- const wc={id,mainFrame:{url:'http://127.0.0.1:7331/buzzy/library?job=job_fixture'},
+ let window, context;
+ const wc=Object.assign(new EventEmitter(),{id,mainFrame:{url:'http://127.0.0.1:7331/buzzy/library?job=job_fixture'},
   isDestroyed:()=>state.destroyed,getURL(){return this.mainFrame.url;},
-  executeJavaScript:async source=>{scripts.push(source);return vm.runInContext(source,context);}};
- return {wc,state,window,data,reads,scripts};
+  executeJavaScript:async source=>{scripts.push(source);return vm.runInContext(source,context);}});
+ const reload=()=>{
+  state.frozen=false;
+  window={BeeZillaLibraryVault:{freeze(){state.frozen=true;},resume(){state.frozen=false;}}};
+  context=vm.createContext({window,document:{},localStorage:storage,location:{get href(){return wc.getURL();}}});
+ };
+ reload();
+ return {wc,state,get window(){return window;},data,reads,scripts,reload};
 }
-function setup(values={}, count=1, rendererCleanupTimeoutMs) {
+function setup(values={}, count=1, rendererCleanupTimeoutMs, rendererWaitTimeoutMs) {
  const ui=Array.from({length:count},(_,i)=>renderer(i+1,i===0?values:{}));
  const rows=new Map(),requests=[]; let generation='0',runtime={host:'127.0.0.1',port:7331,token:'syntheticToken'.repeat(4)},base='http://127.0.0.1:7331';
  let intercept=null;
@@ -41,7 +47,7 @@ function setup(values={}, count=1, rendererCleanupTimeoutMs) {
   });
   return Response.json({...meta,stored});
  };
- const acquire=createLibraryTransition({getContents:()=>ui.map(x=>x.wc),getBase:()=>base,getRuntime:()=>runtime,fetchImpl,rendererCleanupTimeoutMs});
+ const acquire=createLibraryTransition({getContents:()=>ui.map(x=>x.wc),getBase:()=>base,getRuntime:()=>runtime,fetchImpl,rendererCleanupTimeoutMs,rendererWaitTimeoutMs});
  return {ui,rows,requests,acquire,get runtime(){return runtime;},set runtime(value){runtime=value;},set base(value){base=value;},
   set generation(value){generation=value;},set intercept(value){intercept=value;}};
 }
@@ -258,4 +264,110 @@ test('a stalled Library thaw does not block other windows or acquire again', asy
   assert.equal(p.state.frozen, true);
   await next.release();
   assert.ok(s.ui.every(x => !x.state.frozen));
+});
+
+async function boundedLibraryWait(promise) {
+ let timer;
+ try {
+  return await Promise.race([promise,new Promise((_,reject)=>{
+   timer=setTimeout(()=>reject(Error('The renderer kept the Library coordinator locked')),750);
+  })]);
+ } finally { clearTimeout(timer); }
+}
+
+for (const reload of [false,true]) for (const when of ['before retry','during retry','after retry']) {
+ test(`late Library freeze cannot take back its retired lease ${when}; new document=${reload}`,async t=>{
+  const raw=legacy([record()]),s=setup({[LEGACY_KEY]:raw},1,40,40),p=s.ui[0];
+  const gate=Promise.withResolvers(), execute=p.wc.executeJavaScript.bind(p.wc);
+  let late;
+  p.wc.executeJavaScript=source=>{
+   if(!late && source.includes('window.BeeZillaLibraryVault?.freeze()')){
+    late=gate.promise.then(()=>execute(source)).then(value=>({ok:true,value}),error=>({ok:false,error}));
+    return late.then(result=>{if(!result.ok)throw result.error;return result.value;});
+   }
+   return execute(source);
+  };
+  t.after(()=>gate.resolve());
+  await assert.rejects(boundedLibraryWait(s.acquire()),/Library renderer did not respond/);
+  assert.equal(p.state.frozen,false);
+  assert.equal(p.data.get(LEGACY_KEY),raw);
+  assert.equal(s.requests.length,0);
+  if(reload){
+   const oldWindow=p.window,frame=p.wc.mainFrame,href=p.wc.getURL();
+   p.reload();
+   assert.notEqual(p.window,oldWindow);assert.equal(p.wc.mainFrame,frame);assert.equal(p.wc.getURL(),href);
+  }
+  const oldMayFinish=async()=>{
+   const reads=p.reads.length;
+   gate.resolve();assert.equal((await late).ok,false);
+   assert.equal(p.reads.length,reads);
+  };
+  if(when==='before retry'){
+   await oldMayFinish();assert.equal(p.state.frozen,false);
+   if(reload)assert.equal(p.window.__bzLibraryVaultGeneration,undefined);
+  }
+  const retry=await s.acquire(),nonce=p.window.__bzLibraryVaultBarrier;
+  if(when==='during retry'){
+   await oldMayFinish();assert.equal(p.window.__bzLibraryVaultBarrier,nonce);
+   assert.equal(p.state.frozen,true);
+  }
+  await retry.release();
+  if(when==='after retry')await oldMayFinish();
+  assert.equal(p.state.frozen,false);assert.equal(p.window.__bzLibraryVaultBarrier,undefined);
+  assert.equal(p.data.get(LEGACY_KEY),raw);assert.equal(s.rows.size,1);
+ });
+}
+
+for(const phase of ['identity probe','snapshot','acknowledgment'])test(`stalled Library ${phase} is bounded and a matching retry preserves data`,async t=>{
+ const key=PENDING_PREFIX+'one',raw=env(record()),s=setup({[key]:raw},1,40,40),p=s.ui[0];
+ const gate=Promise.withResolvers(),execute=p.wc.executeJavaScript.bind(p.wc);
+ let late;
+ const matches=source=>phase==='identity probe'
+  ? source.includes('Object.defineProperty(document, "__bzLibraryVaultDocumentId"')
+  : phase==='snapshot'
+   ? source.includes('const legacy =')&&!source.includes('window.BeeZillaLibraryVault?.freeze()')
+   : source.includes('localStorage.removeItem(item.key)');
+ p.wc.executeJavaScript=source=>{
+  if(!late&&matches(source)){
+   late=gate.promise.then(()=>execute(source)).then(()=>true,()=>false);
+   return late.then(ok=>{if(!ok)throw Error('retired renderer action');});
+  }
+  return execute(source);
+ };
+ t.after(()=>gate.resolve());
+ const action=s.acquire();
+ await assert.rejects(boundedLibraryWait(action),/Library renderer did not respond/);
+ assert.equal(p.state.frozen,false);assert.equal(p.data.get(key),raw);
+ if(phase==='identity probe')p.reload();
+ const reads=p.reads.length;
+ gate.resolve();
+ assert.equal(await late,phase==='identity probe');
+ assert.equal(p.reads.length,reads);assert.equal(p.data.get(key),raw);
+ assert.equal(p.state.frozen,false);
+ const retry=await s.acquire();await retry.release();
+ assert.equal(s.rows.size,1);assert.equal(p.data.has(key),false);
+});
+
+test('same-URL replacement while the identity probe is pending does not take over the operation', async () => {
+ const raw=legacy([record()]),s=setup({[LEGACY_KEY]:raw},1,100,100),p=s.ui[0];
+ const entered=Promise.withResolvers(),gate=Promise.withResolvers(),execute=p.wc.executeJavaScript.bind(p.wc);
+ let delayed=false;
+ p.wc.executeJavaScript=source=>{
+  if(!delayed&&source.includes('Object.defineProperty(document, "__bzLibraryVaultDocumentId"')){
+   delayed=true;entered.resolve();
+   return gate.promise.then(()=>execute(source));
+  }
+  return execute(source);
+ };
+ const attempt=s.acquire();
+ const result=assert.rejects(attempt,/window changed/i);
+ await entered.promise;
+ p.reload();p.wc.emit('did-navigate',{},p.wc.getURL(),200,'OK');
+ gate.resolve();
+ await result;
+ assert.equal(p.wc.listenerCount('did-navigate'),0);
+ assert.equal(p.reads.length,0);assert.equal(s.requests.length,0);assert.equal(p.state.frozen,false);
+ const retry=await s.acquire();await retry.release();
+ assert.equal(s.rows.size,1);
+ assert.equal(p.wc.listenerCount('did-navigate'),0);
 });
