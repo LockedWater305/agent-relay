@@ -1775,6 +1775,9 @@ export default defineEventHandler(async (event) => {
       setResponseStatus(event, 401);
       return { ok: false, error: "Sign in required", code: "signed_out" };
     }
+    setResponseHeader(event, "cache-control", "private, no-store");
+    // Binding the reply to the authenticated owner makes a cookie-switch race safe.
+    setResponseHeader(event, "x-bz-account-owner", encodeURIComponent(user.id));
     return { ok: true, ...(await describeEntitlement(user.id)) };
   }
 

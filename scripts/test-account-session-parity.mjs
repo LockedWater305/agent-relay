@@ -23,6 +23,7 @@ const api = http.createServer((req,res) => {
   if(path==="/api/auth/get-session"){return json(200,scenario==="local"?{session:{id:"local-session",userId:local.id},user:local}:req.headers.cookie?.includes("fixture=synthetic")?{session:{id:"session-fixture",userId:user.id},user}:null);}
   if(isIndicator(path)){
     if(!req.headers.cookie?.includes("fixture=synthetic"))return json(401,{});
+    res.setHeader("x-bz-account-owner",encodeURIComponent(user.id));
     return json(200,path==="/api/wallet"?{balance:4321}:{ok:true,plan:"pro",remaining:{inference:19},planUntil:"2027-01-02"});
   }
   if(path==="/api/auth/sign-out" && req.method==="POST"){

@@ -10,7 +10,7 @@
  * Sold by whom and bought by whom are different questions, and only the first one
  * leaves the server. `sales` returns counts and totals; `buyer_id` is never selected.
  */
-import { defineEventHandler, getMethod, readBody, setResponseStatus } from "h3";
+import { defineEventHandler, getMethod, readBody, setResponseHeader, setResponseStatus } from "h3";
 import { getSessionUserFromHeaders } from "@/lib/auth/verify.server";
 import { getSql } from "@/lib/db";
 import { getBundle } from "@/lib/private/registry";
@@ -55,6 +55,9 @@ export default defineEventHandler(async (event) => {
 
   // ── GET /api/wallet ─────────────────────────────────────────────────────────
   if (rest.length === 0 && method === "GET") {
+    setResponseHeader(event, "cache-control", "private, no-store");
+    // The browser verifies the reply belongs to the session it is displaying.
+    setResponseHeader(event, "x-bz-account-owner", encodeURIComponent(user.id));
     const [summary, entries, owned] = await Promise.all([
       walletSummary(q, user.id),
       ledger(q, user.id, 25),

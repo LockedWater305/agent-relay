@@ -312,6 +312,13 @@
     fill();
   }
 
+  function storedOwner(raw) {
+    try {
+      var value = JSON.parse(raw);
+      return value && typeof value.id === "string" ? value.id : null;
+    } catch (e) { return null; }
+  }
+
   /** Who is signed in? One place, right beside the logo. */
   function accountControl(chrome) {
     // The identity is ALWAYS a visible name link owned by the chrome. Talk and Library
@@ -334,9 +341,9 @@
 
     function paint(name, email) {
       user = name ? { name: name, email: email || "" } : null;
-      a.textContent = name || "Sign in";
+      a.textContent = name || (sessionKnown ? "Sign in" : "");
       a.href = name ? "/buzzy/profile" : "/buzzy/landing";
-      a.title = email || name || "Sign in";
+      a.title = email || name || (sessionKnown ? "Sign in" : "Account");
       if (user) ensureMenu();
       else {
         var stale = chrome.querySelector(".account-menu");
@@ -349,37 +356,22 @@
     var logoutPending = false;
     var logoutMessage = "";
     var sessionRefresh = 0;
+    var confirmedOwner = null;
 
-    /**
-     * Last known identity, so the header never lies for a round trip.
-     *
-     * The page ships `Sign in` in its markup and the chrome only painted after
-     * /api/auth/get-session answered, so a signed-in reader watched "Sign in"
-     * flash on every page (loudest on Sketch, whose header is otherwise empty).
-     * `undefined` = never cached, `null` = known signed out, object = identity.
-     * The response always wins; this only covers the gap before it lands.
-     */
-    function readIdentityCache() {
+    // This key notifies other tabs. Neither it nor the old cached name proves
+    // which session is active, so don't show an old identity while checking.
+    function publishOwner(id) {
       try {
-        var raw = window.localStorage.getItem("bz_identity");
-        if (raw === null) return undefined;
-        if (raw === "null") return null;
-        var v = JSON.parse(raw);
-        return v && (v.name || v.email) ? v : null;
-      } catch (e) {
-        return undefined;
-      }
-    }
-    function writeIdentityCache(u) {
-      try {
-        window.localStorage.setItem(
-          "bz_identity",
-          u ? JSON.stringify({ name: u.name || "", email: u.email || "" }) : "null",
-        );
+        window.localStorage.setItem("bz_identity", id ? JSON.stringify({ id: id }) : "null");
       } catch (e) { /* private mode: fall back to the round trip */ }
     }
-    var cached = readIdentityCache();
-    if (cached !== undefined) paint(cached ? cached.name : null, cached ? cached.email : null);
+    function showUnknown() {
+      sessionKnown = false;
+      localWorkspace = false;
+      paint(null, null);
+      chrome.dispatchEvent(new Event("bz:session-unknown"));
+    }
+    showUnknown();
 
     function isSignedOutSession(res) {
       return res === null || (res && res.user === null && !res.session);
@@ -388,7 +380,8 @@
       sessionRefresh++;
       sessionKnown = true;
       localWorkspace = false;
-      writeIdentityCache(null);
+      confirmedOwner = null;
+      publishOwner(null);
       paint(null, null);
       chrome.dispatchEvent(new Event("bz:session-ended"));
     }
@@ -472,7 +465,6 @@
       chrome.appendChild(m);
       fillMenu(m);
     }
-    if (!a.textContent) a.textContent = "";
     function refreshSession() {
       var refresh = ++sessionRefresh;
       fetch("/api/auth/get-session", { credentials: "same-origin", cache: "no-store" })
@@ -481,11 +473,13 @@
           // An outage or an older request proves nothing about the current session.
           if (res === undefined || refresh !== sessionRefresh) return;
           var u = res && res.user;
-          if (u && (u.name || u.email)) {
+          if (u && typeof u.id === "string" && u.id && (u.name || u.email)) {
             sessionKnown = true;
+            confirmedOwner = u.id;
             localWorkspace = !!(u.id === "local_owner" && res.session &&
               res.session.id === "local-session" && res.session.userId === u.id);
-            writeIdentityCache({ name: u.name || u.email, email: u.email || "" });
+            publishOwner(u.id);
+            chrome.dispatchEvent(new CustomEvent("bz:session-owner", { detail: u.id }));
             paint(u.name || u.email, u.email);
           } else if (isSignedOutSession(res)) {
             clearSignedOut();
@@ -494,21 +488,26 @@
         .catch(function () { /* keep whatever we painted */ });
     }
     refreshSession();
-    // Another tab can end this cookie session, and a browser history restore
-    // can bring the old DOM back without running this script again. Revalidate
-    // against the server, never treat a storage write as auth on its own.
+    // Another tab can replace or end the session, and browser history can
+    // restore old DOM. Hide account details until the server confirms ownership.
     window.addEventListener("storage", function (event) {
-      if (event.key === "bz_identity" && event.newValue === "null") refreshSession();
+      if (event.key !== "bz_identity") return;
+      var nextOwner = storedOwner(event.newValue);
+      if (event.newValue !== "null" && (!nextOwner || nextOwner === confirmedOwner)) return;
+      showUnknown();
+      refreshSession();
     });
     window.addEventListener("pageshow", function (event) {
-      if (event.persisted) refreshSession();
+      if (!event.persisted) return;
+      showUnknown();
+      refreshSession();
     });
 
     // Adopt a page-built menu as the dropdown. clone the link once so a page's own
     // click handler (Talk binds a toggle to `.account-link`) cannot double-toggle ours.
     function adopt(menu) {
       if (!menu) return;
-      if (sessionKnown && !user) { menu.remove(); return; }
+      if (!user) { menu.remove(); return; }
       if (menu.getAttribute("data-bz-adopted") === "1") return;
       menu.setAttribute("data-bz-adopted", "1");
       menu.classList.add("bz-account-menu");
@@ -558,6 +557,71 @@
     }, 250);
   }
 
+  // Keep just the display data, bound to the user authorized to receive it.
+  // A late reply can belong to a different cookie session than the request's
+  // presumed owner, so also require the authenticated owner on the response.
+  function accountIndicator(chrome, key, url, paint, select) {
+    var owner = null;
+    var generation = 0;
+    function store(value) {
+      try {
+        window.localStorage.setItem(key, value === null ? "null" : JSON.stringify({ owner: owner, value: value }));
+      } catch (e) { /* storage is an optimization, not authority */ }
+    }
+    function read() {
+      try {
+        var cached = JSON.parse(window.localStorage.getItem(key));
+        if (cached !== null && (!cached || typeof cached.owner !== "string")) {
+          store(null); // scrub old values that cannot be attributed to an account
+          return null;
+        }
+        return cached;
+      } catch (e) { store(null); return null; }
+    }
+    read();
+    function reset() {
+      generation++;
+      owner = null;
+      paint(null);
+    }
+    chrome.addEventListener("bz:session-unknown", reset);
+    chrome.addEventListener("bz:session-ended", function () {
+      reset();
+      store(null);
+    });
+    chrome.addEventListener("bz:session-owner", function (event) {
+      if (event.detail === owner) return;
+      reset();
+      owner = event.detail;
+      var requestGeneration = generation;
+      var requestOwner = owner;
+      var cached = read();
+      if (cached && cached.owner === owner) paint(cached.value);
+      else if (cached !== null) store(null); // old account's data is not an outage fallback
+      fetch(url, { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) {
+          if (r.redirected) return undefined;
+          if (r.status === 401) return null;
+          if (!r.ok || r.headers.get("x-bz-account-owner") !== encodeURIComponent(requestOwner)) {
+            if (r.body) r.body.cancel().catch(function () {});
+            return undefined;
+          }
+          return r.json().then(select);
+        })
+        .then(function (value) {
+          if (value === undefined || requestGeneration !== generation || owner !== requestOwner) return;
+          try {
+            var signal = window.localStorage.getItem("bz_identity");
+            var latest = storedOwner(signal);
+            if (signal === "null" || (latest && latest !== requestOwner)) return;
+          } catch (e) { /* an unavailable cache does not veto a verified response */ }
+          paint(value);
+          store(value);
+        })
+        .catch(function () { /* keep only cache already verified for this owner */ });
+    });
+  }
+
   /** Honey Drops: the balance, in the chrome, on every page. */
   function honeyControl(chrome) {
     // pages that still ship wallet-chip.js inserted a chip beside the nav; one chip only
@@ -571,12 +635,6 @@
     chip.style.minWidth = "3.6rem";
     chrome.appendChild(chip);
 
-    // Same rule as the plan chip and the identity: paint the last known balance
-    // before the round trip, or a signed-in reader watches the header assemble
-    // itself chip by chip on every load (BZ-15 residual). The response wins; a
-    // failed call changes nothing; an authoritative answer with no balance clears
-    // the cache so a stale number cannot outlive the session.
-    var CACHE = "bz_honey";
     function paint(n) {
       if (typeof n === "number") {
         chip.textContent = "\u25c8 " + Number(n).toLocaleString();
@@ -586,38 +644,9 @@
         chip.title = "";
       }
     }
-    try {
-      var raw = window.localStorage.getItem(CACHE);
-      if (raw !== null) {
-        if (raw === "null") paint(null);
-        else paint(Number(raw));
-      }
-    } catch (e) { /* private mode: the round trip is still the truth */ }
-
-    function writeCache(n) {
-      try { window.localStorage.setItem(CACHE, n === null ? "null" : String(n)); } catch (e) {}
-    }
-    var sessionEnded = false;
-    chrome.addEventListener("bz:session-ended", function () {
-      sessionEnded = true;
-      paint(null);
-      writeCache(null);
+    accountIndicator(chrome, "bz_honey", "/api/wallet", paint, function (d) {
+      return d && typeof d.balance === "number" ? d.balance : null;
     });
-
-    fetch("/api/wallet", { credentials: "same-origin" })
-      // 401 is an answer (nobody is signed in), not an outage: clear the chip.
-      .then(function (r) { return r.status === 401 ? { balance: null } : r.ok ? r.json() : undefined; })
-      .then(function (d) {
-        if (sessionEnded || d === undefined) return; // do not repaint from a pre-logout request
-        if (d && typeof d.balance === "number") {
-          paint(d.balance);
-          writeCache(d.balance);
-        } else {
-          paint(null);
-          writeCache(null);
-        }
-      })
-      .catch(function () { /* keep whatever we painted */ });
   }
 
   /** Ask: the chat, on every page, in a panel anchored to the nav. */
@@ -827,15 +856,7 @@
     askControl(chrome);
   }
 
-  /**
-   * Which plan am I on? Visible everywhere, not just under the Talk composer.
-   *
-   * The chip only appeared once /api/buzzy/entitlement answered, so a signed-in
-   * reader saw the header snap from no chip to PRO a round trip after paint (loudest
-   * on Sketch, which ships an empty header). The last answer is cached and painted
-   * first; the response still wins, a failed round trip changes nothing, and an
-   * authoritative "no plan" clears the cache so a signed-out page cannot show PRO.
-   */
+  /** Which plan is the verified account on? */
   function planChip(chrome) {
     if (document.getElementById("bzPlanChip")) return;
     var a = document.createElement("a");
@@ -846,27 +867,8 @@
     a.style.display = "none";
     chrome.appendChild(a);
 
-    var CACHE = "bz_plan";
-    function readCache() {
-      try {
-        var raw = window.localStorage.getItem(CACHE);
-        if (!raw || raw === "null") return null;
-        var v = JSON.parse(raw);
-        return v && v.plan ? v : null;
-      } catch (e) {
-        return null;
-      }
-    }
-    function writeCache(d) {
-      try {
-        window.localStorage.setItem(
-          CACHE,
-          d && d.plan ? JSON.stringify({ plan: d.plan, remaining: d.remaining || null, planUntil: d.planUntil || null }) : "null",
-        );
-      } catch (e) { /* private mode: the round trip is still the truth */ }
-    }
     function paint(d) {
-      if (!d || !d.plan) {
+      if (!d || typeof d.plan !== "string" || !d.plan) {
         a.textContent = "";
         a.removeAttribute("title");
         a.className = "bz-plan";
@@ -883,30 +885,12 @@
       a.style.display = "";
     }
 
-    var cached = readCache();
-    if (cached) paint(cached);
-
-    var sessionEnded = false;
-    chrome.addEventListener("bz:session-ended", function () {
-      sessionEnded = true;
-      paint(null);
-      writeCache(null);
+    accountIndicator(chrome, "bz_plan", "/api/buzzy/entitlement", paint, function (d) {
+      if (!d || typeof d.ok === "undefined") return undefined;
+      return d.ok && typeof d.plan === "string" && d.plan
+        ? { plan: d.plan, remaining: d.remaining || null, planUntil: d.planUntil || null }
+        : null;
     });
-
-    fetch("/api/buzzy/entitlement", { credentials: "same-origin" })
-      // 401 is an answer (nobody is signed in), not an outage: clear the chip.
-      .then(function (r) { return r.status === 401 ? { ok: false } : r.ok ? r.json() : undefined; })
-      .then(function (d) {
-        if (sessionEnded || !d || typeof d.ok === "undefined") return;
-        if (d.ok && d.plan) {
-          writeCache(d);
-          paint(d);
-        } else {
-          writeCache(null); // signed out, or no plan: the chip must not outlive it
-          paint(null);
-        }
-      })
-      .catch(function () { /* a plan chip is not worth an error toast */ });
   }
 
   /**

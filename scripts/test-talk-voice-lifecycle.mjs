@@ -59,7 +59,7 @@ function speechHarness({ realSend = false, controller = true, wav = {} } = {}) {
     voice: { mic: true, rec: null, sending: false, speaking: false, replies: false,
       note: "", speechGeneration: 0, speechRequest: null, turnSeq: 0, cutTurn: -1 },
     chatState: { sessionVerified: true, jobId: "original/job", sessionId: "original-session", boundCompanyId: "original-company",
-      jobContext: { title: "Original Job" }, slots: {}, messages: [] },
+      jobContext: { title: "Original Job" }, slots: {}, messages: [], _signedOut: false },
     document: { getElementById: node, createElement: element, querySelector: () => null, querySelectorAll: () => [],
       addEventListener() {}, removeEventListener() {} },
     window: { location: { pathname: "/buzzy/talk" }, addEventListener(type, callback) {
@@ -846,7 +846,7 @@ for (const action of ["read this", "media"]) {
   });
 }
 
-// Auth is a separate asynchronous request. Its success/cache fallback cannot
+// Auth is a separate asynchronous request. Its answer cannot
 // take ownership of the composer from the active send or a newer selection.
 function authHarness(cached = true) {
   const h = speechHarness({ realSend: true }); h.c.voice.mic = false;
@@ -860,6 +860,41 @@ function answerAuth(request, outcome) {
   else if (outcome === "JSON error") request.resolve({ ok: true, status: 200, json: () => Promise.reject(new Error("synthetic JSON")) });
   else request.resolve(response({ user: { id: "synthetic-owner" } }));
 }
+for (const cached of [{ name: "Previous Account", email: "previous@example.invalid" }, { id: "previous-id" }, null]) {
+  test(`fresh Talk cannot enable from stored identity during auth outage (${cached ? Object.keys(cached).join(",") : "none"})`, async () => {
+    const h = authHarness(false);
+    h.c.chatState._signedOut = undefined;
+    h.c.window.localStorage = { getItem: () => JSON.stringify(cached) };
+    const nav = h.c.beginChatNavigation("fixture", "fresh");
+    h.c.finishChatNavigation(nav);
+    const checking = h.c.checkAuthAndEnableInput();
+    answerAuth(h.requests[0], "HTTP error");
+    await checking;
+    assert.equal(h.c.chatState._signedOut, undefined, "unavailable is neither signed in nor signed out");
+    assert.equal(h.node("chatInput").disabled, true);
+    assert.equal(h.node("chatSend").disabled, true);
+    assert.match(h.node("chatInput").title, /hasn't been verified/);
+  });
+}
+
+test("verified in-memory Talk survives an unexpected auth body and later gets an authoritative result", async () => {
+  const h = authHarness(false);
+  const unavailable = h.c.checkAuthAndEnableInput();
+  h.requests[0].resolve(response({ unrelated: true }));
+  await unavailable;
+  assert.equal(h.c.chatState._signedOut, false);
+  assert.equal(h.node("chatInput").disabled, false);
+  const signOut = h.c.checkAuthAndEnableInput();
+  h.requests[1].resolve(response(null));
+  await signOut;
+  assert.equal(h.c.chatState._signedOut, true);
+  assert.equal(h.node("chatInput").disabled, true);
+  const signIn = h.c.checkAuthAndEnableInput();
+  answerAuth(h.requests[2], "success");
+  await signIn;
+  assert.equal(h.c.chatState._signedOut, false);
+  assert.equal(h.node("chatSend").disabled, false);
+});
 for (const outcome of ["success", "HTTP error", "network error", "JSON error"]) {
   test(`auth ${outcome} during a live typed turn cannot unlock or duplicate Send`, async () => {
     const h = authHarness(); h.c.checkAuthAndEnableInput();

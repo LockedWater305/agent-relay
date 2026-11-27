@@ -2108,7 +2108,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       document.querySelectorAll("#thinkingIndicator, #chatMessages .streaming").forEach(function (node) { node.remove(); });
       if (window.__bzStageTimer) { clearInterval(window.__bzStageTimer); window.__bzStageTimer = null; }
       var input = document.getElementById("chatInput");
-      if (input) input.disabled = !!chatState._signedOut;
+      if (input) input.disabled = chatState._signedOut !== false;
       var send = document.getElementById("chatSend");
       if (send) send.disabled = true;
       var request = { kind: kind, key: key, context: chatContextSnapshot(), promise: null };
@@ -2124,7 +2124,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       if (chatNavigation.pending !== request) return;
       chatNavigation.pending = null;
       var send = document.getElementById("chatSend");
-      if (send) send.disabled = !!chatState._signedOut;
+      if (send) send.disabled = chatState._signedOut !== false;
     }
 
     function validChatSession(session) {
@@ -7084,10 +7084,17 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
     function paintChatInputAvailability() {
       var busy = !!chatNavigation.turn || !!chatNavigation.sendClaim;
-      var disabled = !!chatState._signedOut || !!busy;
+      var disabled = chatState._signedOut !== false || busy;
       const owner = arguments[0];
-      (owner ? owner.input : document.getElementById("chatInput")).disabled = disabled;
-      (owner ? owner.send : document.getElementById("chatSend")).disabled = disabled || !!chatNavigation.pending;
+      const input = owner ? owner.input : document.getElementById("chatInput");
+      const send = owner ? owner.send : document.getElementById("chatSend");
+      if (input) {
+        input.disabled = disabled;
+        const waiting = "Your account hasn't been verified yet.";
+        if (chatState._signedOut === undefined) input.title = waiting;
+        else if (input.title === waiting) input.title = "";
+      }
+      if (send) send.disabled = disabled || !!chatNavigation.pending;
     }
 
     function checkAuthAndEnableInput() {
@@ -7097,32 +7104,25 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       function current() {
         return request === chatNavigation.auth && generation === chatNavigation.generation && state === chatState;
       }
-      return fetch("/api/auth/get-session", { credentials: "same-origin" })
-        // An outage is not a logout here either: a 500 used to disable the composer
-        // and set _signedOut, so Talk looked signed out during an auth blip. Only a
-        // 200 with no user disables it; a non-2xx falls through to the catch.
+      if (chatState._signedOut === undefined) paintChatInputAvailability();
+      return fetch("/api/auth/get-session", { credentials: "same-origin", cache: "no-store" })
         .then(function (r) {
           if (!current()) return null;
-          if (!r.ok) throw new Error("get-session " + r.status);
+          if (!r.ok || r.redirected) throw new Error("get-session " + r.status);
           return r.json();
         })
         .then(function (session) {
           if (!current()) return;
           var user = session && session.user;
-          chatState._signedOut = !user;
+          if (user && typeof user.id === "string" && user.id) chatState._signedOut = false;
+          else if (session === null || (session && session.user === null && !session.session)) chatState._signedOut = true;
           paintChatInputAvailability();
         })
         .catch(function () {
           if (!current()) return;
-          // Outage, not logout. The chrome keeps the last known identity (fee2c5f);
-          // if there is one, do not strand a signed-in reader behind a dead composer.
-          // No cache means "never asked yet", so leave the shipped disabled state.
-          var cached = null;
-          try { cached = JSON.parse(window.localStorage.getItem("bz_identity") || "null"); } catch (e) {}
-          if (cached && (cached.name || cached.email)) {
-            chatState._signedOut = false;
-            paintChatInputAvailability();
-          }
+          // An outage preserves this document's verified status. Stored names
+          // and IDs can belong to a previous login, so never unlock fresh Talk.
+          paintChatInputAvailability();
         });
     }
 
