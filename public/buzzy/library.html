@@ -1414,9 +1414,16 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
             const bytes = window.beezillaSowPdf(doc.md);
             const blob = new Blob([bytes], { type: "application/pdf" });
             const a = document.createElement("a");
-            a.href = URL.createObjectURL(blob);
-            a.download = doc.name.replace(/\.md$/, "") + ".pdf";
-            a.click();
+            const href = URL.createObjectURL(blob);
+            try {
+              a.href = href;
+              a.download = doc.name.replace(/\.md$/, "") + ".pdf";
+              a.click();
+            } finally {
+              // Library pages can stay mounted. Release this download's URL
+              // after the browser handoff, not immediately after the click.
+              setTimeout(() => URL.revokeObjectURL(href), 2000);
+            }
           } catch (error) {
             alert(error && (error.code === "pdf_unsupported_text" || error.code === "pdf_invalid_text")
               ? error.message : "PDF export failed. No PDF was downloaded.");

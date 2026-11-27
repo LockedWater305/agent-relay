@@ -276,3 +276,43 @@ test('Poppler: actual Library download bytes render successfully without syntax/
     const png=readFileSync(join(dir,'render.png')); assert.ok(png.length>1000); assert.equal(png.subarray(1,4).toString(),'PNG');
   });
 });
+
+test('Library viewer gives each accepted PDF transfer time to start and then releases only its own URL', async () => {
+  const f = callerFixture(callers[0], business), cleanup = [];
+  f.context.setTimeout = (task, delay) => cleanup.push({ task, delay });
+  f.clickPdf();
+  f.setText(ascii);
+  f.clickPdf();
+  assert.deepEqual(f.alerts, []);
+  assert.equal(f.downloads.length, 2);
+  assert.deepEqual(f.downloads.map((d) => d.name), ['synthetic.pdf', 'synthetic.pdf']);
+  assert.deepEqual(decodedLines(new Uint8Array(await f.downloads[0].blob.arrayBuffer())), business.split('\n'));
+  assert.deepEqual(decodedLines(new Uint8Array(await f.downloads[1].blob.arrayBuffer())), ascii.split('\n'));
+  assert.equal(f.revoked.length, 0, 'handoff starts before cleanup');
+  assert.deepEqual(cleanup.map(({ delay }) => delay), [2000, 2000]);
+  cleanup[0].task();
+  assert.deepEqual(f.revoked, ['blob:synthetic/0'], 'old cleanup cannot release the next download');
+  cleanup[1].task();
+  assert.deepEqual(f.revoked, ['blob:synthetic/0', 'blob:synthetic/1']);
+});
+
+test('Library releases a PDF URL even if the browser handoff throws and permits an explicit retry', () => {
+  const f = callerFixture(callers[0], ascii), cleanup = [];
+  const create = f.context.document.createElement;
+  f.context.setTimeout = (task) => cleanup.push(task);
+  f.context.document.createElement = (tag) => {
+    const anchor = create(tag);
+    anchor.click = () => { throw Error('fixture download handoff unavailable'); };
+    return anchor;
+  };
+  f.clickPdf();
+  assert.deepEqual(f.alerts, ['PDF export failed. No PDF was downloaded.']);
+  assert.equal(f.downloads.length, 0);
+  assert.equal(cleanup.length, 1);
+  cleanup[0]();
+  assert.deepEqual(f.revoked, ['blob:synthetic/0']);
+  f.context.document.createElement = create;
+  f.clickPdf();
+  assert.equal(f.downloads.length, 1);
+  assert.equal(f.alerts.length, 1);
+});
