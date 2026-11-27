@@ -551,9 +551,9 @@ ok("an odd error answer from Meshy (an object for its message) is still a plain 
 
 ok("a .glb is read for its texture and size, without trusting it", () => {
   const json = JSON.stringify({
-    meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 2 }, indices: 3 }] }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 2 }, indices: 3, material: 0 }] }],
     materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } } }],
-    textures: [{ source: 0 }], images: [{ bufferView: 0 }],
+    textures: [{ source: 0 }], images: [{ uri: PIC }],
     accessors: [{ count: 100 }, { count: 100 }, { count: 100 }, { count: 300 }],
   });
   const pad = (n: number) => (4 - (n % 4)) % 4;
@@ -564,6 +564,84 @@ ok("a .glb is read for its texture and size, without trusting it", () => {
   const s = M.glbSummary(Buffer.concat([head, j]));
   eq([s.ok, s.triangles, s.texturedMaterials, s.images, s.hasUvs, s.hasNormals], [true, 100, 1, 1, true, true], "summary:");
   eq(M.glbSummary(Buffer.from("not a glb at all, really")).ok, false, "garbage:");
+});
+
+function smallGlb(document: Record<string, unknown>): Buffer {
+  // An aligned binary buffer with room for one triangle, its UVs and a tiny
+  // embedded PNG. For a metadata-only extension variant the source can be a URI.
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jSxQAAAAASUVORK5CYII=", "base64");
+  const bin = Buffer.alloc((60 + png.length + 3) & ~3);
+  bin.writeFloatLE(1, 12); bin.writeFloatLE(1, 28);
+  bin.writeFloatLE(1, 44); bin.writeFloatLE(1, 56);
+  png.copy(bin, 60);
+  const g = {
+    asset: { version: "2.0" }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }],
+    meshes: [{ primitives: [{ material: 0, attributes: { POSITION: 0, TEXCOORD_0: 1 } }] }],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 3, type: "VEC3", min: [0, 0, 0], max: [1, 1, 0] },
+      { bufferView: 1, componentType: 5126, count: 3, type: "VEC2" },
+    ],
+    buffers: [{ byteLength: 60 + png.length }],
+    bufferViews: [{ buffer: 0, byteLength: 36 }, { buffer: 0, byteOffset: 36, byteLength: 24 }, { buffer: 0, byteOffset: 60, byteLength: png.length }],
+    images: [{ bufferView: 2, mimeType: "image/png" }],
+    ...document,
+  };
+  const json = Buffer.from(JSON.stringify(g));
+  const chunk = Buffer.alloc((json.length + 3) & ~3, 0x20); json.copy(chunk);
+  const header = Buffer.alloc(20), binHeader = Buffer.alloc(8);
+  header.writeUInt32LE(0x46546c67, 0); header.writeUInt32LE(2, 4); header.writeUInt32LE(28 + chunk.length + bin.length, 8);
+  header.writeUInt32LE(chunk.length, 12); header.writeUInt32LE(0x4e4f534a, 16);
+  binHeader.writeUInt32LE(bin.length, 0); binHeader.writeUInt32LE(0x004e4942, 4);
+  return Buffer.concat([header, chunk, binHeader, bin]);
+}
+
+ok("the returned model needs a primitive, material, and image-linked texture, not just image bytes", async () => {
+  const assigned = { pbrMetallicRoughness: { baseColorTexture: { index: 0 } } };
+  const unusedMaterial = smallGlb({ materials: [{}, assigned], textures: [{ source: 0 }] });
+  const orphanImage = smallGlb({ materials: [{}], textures: [{ source: 0 }] });
+  const danglingImageIndex = smallGlb({ materials: [assigned], textures: [{ source: 1 }] });
+
+  // Run the exact download helper against a stand-in only. Evaluate the poll's
+  // actual classification expression on the loaded bytes (no HTTP job or POST).
+  const route = readFileSync("src/lib/buzzy/chat.nitro.ts", "utf8");
+  const expression = route.match(/const bareModel = ([^;]+);/)?.[1];
+  truthy(expression, "missing poll classification");
+  const isBare = new Function("look", "return " + expression) as (look: ReturnType<typeof M.glbSummary>) => boolean;
+  let body = unusedMaterial;
+  let downloads = 0;
+  M.__setMeshyFetchForTests(async (url, init) => {
+    eq(String(url), "https://asset.test/tiny.glb");
+    truthy(init.method === undefined, "only a fixture download is permitted");
+    downloads++;
+    return new Response(new Uint8Array(body));
+  });
+  try {
+    for (const [fixture, label] of [[orphanImage, "orphan image"], [unusedMaterial, "unused material"], [danglingImageIndex, "dangling link"]] as const) {
+      body = fixture;
+      const look = M.glbSummary(await M.fetchModel("https://asset.test/tiny.glb"));
+      eq([look.ok, look.images, look.texturedMaterials, isBare(look)], [true, 1, 0, true], label + ":");
+    }
+    eq(downloads, 3, "only the staged GLBs were fetched:");
+  } finally {
+    M.__setMeshyFetchForTests(null);
+  }
+});
+
+ok("embedded images, WebP/KTX2 texture sources, and assigned secondary maps are textures", () => {
+  const normalMap = { normalTexture: { index: 0 } };
+  const colorMap = { pbrMetallicRoughness: { baseColorTexture: { index: 0 } } };
+  const legacyMap = { extensions: { KHR_materials_pbrSpecularGlossiness: { diffuseTexture: { index: 0 } } } };
+  for (const material of [colorMap, normalMap, legacyMap]) {
+    const look = M.glbSummary(smallGlb({ materials: [material], textures: [{ source: 0 }] }));
+    eq([look.ok, look.texturedMaterials], [true, 1], "assigned embedded map:");
+  }
+  for (const [extension, uri] of [["EXT_texture_webp", "texture.webp"], ["KHR_texture_basisu", "texture.ktx2"]]) {
+    const look = M.glbSummary(smallGlb({
+      materials: [colorMap], extensionsUsed: [extension], extensionsRequired: [extension],
+      textures: [{ extensions: { [extension]: { source: 0 } } }], images: [{ uri }],
+    }));
+    eq([look.ok, look.texturedMaterials], [true, 1], extension + " source:");
+  }
 });
 
 ok("wired: the turn plans the model and starts it; the poll follows the steps; the pages follow `next`", () => {

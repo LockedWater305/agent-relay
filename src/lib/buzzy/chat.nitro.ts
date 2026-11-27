@@ -1232,7 +1232,7 @@ export default defineEventHandler(async (event) => {
           // A model with no texture is not finished: paint it again from the same picture or
           // words, once (testers: "kinda disappointing and textureless").
           const look = glbSummary(bytes);
-          const bareModel = look.ok && look.texturedMaterials === 0 && look.images === 0;
+          const bareModel = look.ok && look.texturedMaterials === 0;
           let warning = "";
           if (bareModel) {
             if (job.kind !== "rtx") {

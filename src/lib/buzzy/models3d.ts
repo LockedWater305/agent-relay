@@ -494,12 +494,18 @@ export interface GlbSummary {
   materials: number;
   textures: number;
   images: number;
-  /** Materials that point at a base colour texture. */
+  /** Materials assigned to a primitive with at least one image-linked texture. */
   texturedMaterials: number;
   /** Faces, counted from the index (or position) accessors. */
   triangles: number;
   hasUvs: boolean;
   hasNormals: boolean;
+}
+
+type TextureInfo = { index?: number };
+
+function isGlbIndex(index: unknown): index is number {
+  return typeof index === "number" && Number.isSafeInteger(index) && index >= 0;
 }
 
 export function glbSummary(bytes: Uint8Array | Buffer | null | undefined): GlbSummary {
@@ -511,17 +517,49 @@ export function glbSummary(bytes: Uint8Array | Buffer | null | undefined): GlbSu
     const jsonLen = b.readUInt32LE(12);
     if (b.readUInt32LE(16) !== 0x4e4f534a || 20 + jsonLen > b.byteLength) return none; // "JSON"
     const g = JSON.parse(b.subarray(20, 20 + jsonLen).toString("utf8")) as {
-      meshes?: Array<{ primitives?: Array<{ attributes?: Record<string, number>; indices?: number; mode?: number }> }>;
-      materials?: Array<{ pbrMetallicRoughness?: { baseColorTexture?: unknown } }>;
-      textures?: unknown[];
-      images?: unknown[];
+      meshes?: Array<{ primitives?: Array<{ attributes?: Record<string, number>; indices?: number; material?: number; mode?: number }> }>;
+      materials?: Array<{
+        pbrMetallicRoughness?: { baseColorTexture?: TextureInfo; metallicRoughnessTexture?: TextureInfo };
+        normalTexture?: TextureInfo;
+        occlusionTexture?: TextureInfo;
+        emissiveTexture?: TextureInfo;
+        extensions?: Record<string, Record<string, TextureInfo>>;
+      }>;
+      textures?: Array<{ source?: number; extensions?: { KHR_texture_basisu?: { source?: number }; EXT_texture_webp?: { source?: number } } }>;
+      images?: Array<{ uri?: string; bufferView?: number }>;
+      bufferViews?: Array<{ byteLength?: number }>;
       accessors?: Array<{ count?: number }>;
     };
+    const textureHasImage = (info: TextureInfo | undefined): boolean => {
+      if (!isGlbIndex(info?.index)) return false;
+      const texture = g.textures?.[info.index];
+      return [texture?.source, texture?.extensions?.KHR_texture_basisu?.source, texture?.extensions?.EXT_texture_webp?.source].some((source) => {
+        if (!isGlbIndex(source)) return false;
+        const image = g.images?.[source];
+        return Boolean(image && (typeof image.uri === "string" && image.uri.length > 0 ||
+          isGlbIndex(image.bufferView) && (g.bufferViews?.[image.bufferView]?.byteLength ?? 0) > 0));
+      });
+    };
+    let texturedMaterials = 0;
+    const checkedMaterials = new Set<number>();
     let triangles = 0;
     let hasUvs = false;
     let hasNormals = false;
     for (const m of g.meshes ?? []) {
       for (const p of m.primitives ?? []) {
+        if (isGlbIndex(p.material) && !checkedMaterials.has(p.material)) {
+          checkedMaterials.add(p.material);
+          const material = g.materials?.[p.material];
+          const fields = [
+            material?.pbrMetallicRoughness?.baseColorTexture, material?.pbrMetallicRoughness?.metallicRoughnessTexture,
+            material?.normalTexture, material?.occlusionTexture, material?.emissiveTexture,
+          ];
+          // Material extensions such as specular-glossiness bind additional
+          // TextureInfo slots. Don't count images or extras on their own.
+          const extensionFields = Object.values(material?.extensions ?? {}).flatMap((layer) =>
+            Object.entries(layer ?? {}).filter(([key]) => key.endsWith("Texture")).map(([, info]) => info));
+          if ([...fields, ...extensionFields].some(textureHasImage)) texturedMaterials++;
+        }
         if (p.mode !== undefined && p.mode !== 4) continue;
         const acc = p.indices !== undefined ? g.accessors?.[p.indices] : p.attributes?.POSITION !== undefined ? g.accessors?.[p.attributes.POSITION] : undefined;
         triangles += Math.floor(Number(acc?.count || 0) / 3);
@@ -535,7 +573,7 @@ export function glbSummary(bytes: Uint8Array | Buffer | null | undefined): GlbSu
       materials: (g.materials ?? []).length,
       textures: (g.textures ?? []).length,
       images: (g.images ?? []).length,
-      texturedMaterials: (g.materials ?? []).filter((m) => m?.pbrMetallicRoughness?.baseColorTexture).length,
+      texturedMaterials,
       triangles,
       hasUvs,
       hasNormals,
