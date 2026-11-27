@@ -348,6 +348,7 @@
     var localWorkspace = false;
     var logoutPending = false;
     var logoutMessage = "";
+    var sessionRefresh = 0;
 
     /**
      * Last known identity, so the header never lies for a round trip.
@@ -464,29 +465,37 @@
       fillMenu(m);
     }
     if (!a.textContent) a.textContent = "";
-    fetch("/api/auth/get-session", { credentials: "same-origin" })
-      // A non-2xx or a non-JSON body is an outage, not a logout: 200 with
-      // `{user: null}` is the only shape that proves nobody is signed in. Treating
-      // every failed round trip as signed-out repainted "Sign in" over a real name,
-      // which is the same lie this cache exists to prevent.
-      .then(function (r) { return r.ok ? r.json() : undefined; })
-      .then(function (res) {
-        if (res === undefined) return; // inconclusive: keep whatever we painted
-        sessionKnown = true;
-        var u = res && res.user;
-        localWorkspace = !!(u && u.id === "local_owner" && res.session &&
-          res.session.id === "local-session" && res.session.userId === u.id);
-        if (u && (u.name || u.email)) {
-          writeIdentityCache({ name: u.name || u.email, email: u.email || "" });
-          paint(u.name || u.email, u.email);
-        } else {
-          writeIdentityCache(null);
-          paint(null, null);
-        }
-      })
-      // A failed round trip proves nothing about who is signed in, so it must not
-      // overwrite the cached identity or repaint "Sign in" over a real name.
-      .catch(function () { /* keep whatever we painted */ });
+    function refreshSession() {
+      var refresh = ++sessionRefresh;
+      fetch("/api/auth/get-session", { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) { return r.ok && !r.redirected ? r.json() : undefined; })
+        .then(function (res) {
+          // An outage or an older request proves nothing about the current session.
+          if (res === undefined || refresh !== sessionRefresh) return;
+          sessionKnown = true;
+          var u = res && res.user;
+          localWorkspace = !!(u && u.id === "local_owner" && res.session &&
+            res.session.id === "local-session" && res.session.userId === u.id);
+          if (u && (u.name || u.email)) {
+            writeIdentityCache({ name: u.name || u.email, email: u.email || "" });
+            paint(u.name || u.email, u.email);
+          } else {
+            writeIdentityCache(null);
+            paint(null, null);
+          }
+        })
+        .catch(function () { /* keep whatever we painted */ });
+    }
+    refreshSession();
+    // Another tab can end this cookie session, and a browser history restore
+    // can bring the old DOM back without running this script again. Revalidate
+    // against the server, never treat a storage write as auth on its own.
+    window.addEventListener("storage", function (event) {
+      if (event.key === "bz_identity" && event.newValue === "null") refreshSession();
+    });
+    window.addEventListener("pageshow", function (event) {
+      if (event.persisted) refreshSession();
+    });
 
     // Adopt a page-built menu as the dropdown. clone the link once so a page's own
     // click handler (Talk binds a toggle to `.account-link`) cannot double-toggle ours.

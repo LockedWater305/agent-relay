@@ -34,7 +34,7 @@ const origin="http://127.0.0.1:"+api.address().port;
 let browser;
 try{
   browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH||undefined});
-  for(const mode of ["failure","offline","bad-body","delayed","expired","local"]){
+  for(const mode of ["failure","offline","bad-body","delayed","expired","local","another-tab","restored-page-event"]){
     scenario=mode;posts=0; const ctx=await browser.newContext();
     try {
       let attempts=0;
@@ -77,6 +77,28 @@ try{
         assert.match(await menu.innerText(),/local workspace/i);
         assert.equal(await menu.getByRole("button",{name:"Log out"}).count(),0);
         assert.equal(posts,0);
+      }else if(mode==="another-tab" || mode==="restored-page-event"){
+        const documentKey=await page.evaluate(()=>window.__sessionFixtureDoc=Math.random());
+        const reread=page.waitForResponse(r=>new URL(r.url()).pathname==="/api/auth/get-session");
+        if(mode==="another-tab"){
+          const other=await ctx.newPage();
+          await other.goto(origin+"/buzzy/profile");
+          await other.waitForFunction(n=>document.getElementById("accountLink")?.textContent===n,user.name);
+          await other.locator("#accountLink").click();
+          await Promise.all([other.waitForURL("**/buzzy/"),other.getByRole("button",{name:"Log out"}).click()]);
+          await other.close();
+          assert.equal(posts,1);
+        }else{
+          // Headless Chromium doesn't retain this document in BFCache. Test
+          // the browser's persisted pageshow event without requiring retention.
+          await ctx.clearCookies();
+          await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent("pageshow",{persisted:true})));
+          assert.equal(posts,0);
+        }
+        assert.equal(await (await reread).json(),null);
+        await page.waitForFunction(()=>document.getElementById("accountLink")?.textContent==="Sign in");
+        assert.equal(await menu.count(),0);
+        assert.equal(await page.evaluate(()=>window.__sessionFixtureDoc),documentKey,"old document updated without reload");
       }else{
         const before=await page.evaluate(()=>{localStorage.setItem("bz_plan",'"fixture-plan"');localStorage.setItem("bz_honey","5");return [localStorage.bz_identity,localStorage.bz_plan,localStorage.bz_honey];});
         await menu.getByRole("button",{name:"Log out"}).click();
