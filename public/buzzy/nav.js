@@ -539,6 +539,13 @@
       showUnknown();
       refreshSession();
     });
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState !== "visible") return;
+      // A background tab can miss an expiry or a cookie switch without a
+      // storage event. Verify the current session before showing its badges.
+      showUnknown();
+      refreshSession();
+    });
 
     // Adopt a page-built menu as the dropdown. clone the link once so a page's own
     // click handler (Talk binds a toggle to `.account-link`) cannot double-toggle ours.

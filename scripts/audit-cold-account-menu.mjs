@@ -91,7 +91,9 @@ for (const path of ["/api/wallet","/api/buzzy/entitlement"]) app.get(path,async 
   const checked=await auth.handler(new Request(origin+"/api/auth/get-session", {headers:event.req.headers}));
   const current=await checked.json();
   if(!current?.user)return Response.json({}, {status:401});
-  return Response.json(path==="/api/wallet"?{balance:4321}:{ok:true,plan:"pro",remaining:{inference:19},planUntil:"2027-01-02"},
+  const beta=current.user.email===hosted.B.email;
+  return Response.json(path==="/api/wallet"?{balance:beta?97:4321}:beta?{ok:true,plan:"starter",remaining:{inference:2},planUntil:"2027-04-06"}:
+    {ok:true,plan:"pro",remaining:{inference:19},planUntil:"2027-01-02"},
     {headers:{"x-bz-account-owner":encodeURIComponent(current.user.id),"cache-control":"private, no-store"}});
 });
 const h3Handler = h3.toNodeHandler(app);
@@ -163,6 +165,36 @@ try {
     honeyTitle:document.getElementById("bzHoneyChip").title,
     caches:[localStorage.bz_identity,localStorage.bz_plan,localStorage.bz_honey],
   }));
+  // This headless delegate keeps every page visible even on bringToFront.
+  // Drive the Document event explicitly while keeping real cookies and HTTP.
+  const visibility=async(page,state)=>page.evaluate(state=>{
+    window.__fixtureVisibility=state;
+    Object.defineProperty(document,"visibilityState",{configurable:true,get:()=>window.__fixtureVisibility});
+    document.dispatchEvent(new Event("visibilitychange"));
+  },state);
+  const expireAndReplace=async(ctx,priorId)=>{
+    const row=authData.session.find(item=>item.id===priorId);
+    assert.ok(row);
+    row.expiresAt=new Date(Date.now()-1000);
+    await ctx.clearCookies({name:/session_data/});
+    const ended=await ctx.request.get(origin+"/api/auth/get-session");
+    assert.equal(await ended.json(),null,"old real synthetic session expired");
+    // Issue a normal synthetic Beta login, without mounting a second header
+    // that would separately notify the old document through localStorage.
+    const signed=await ctx.request.post(origin+"/api/auth/sign-in/email",{
+      headers:{ origin },data:{ email:hosted.B.email,password },
+    });
+    assert.equal(signed.status(),200);
+    const checked=await ctx.request.get(origin+"/api/auth/get-session");
+    const beta=await checked.json();
+    assert.equal(beta.user.name,hosted.B.name);
+    return beta.user.id;
+  };
+  const waitAlphaBilling=page=>page.waitForFunction(()=>document.getElementById("bzPlanChip")?.textContent==="PRO"&&document.getElementById("bzHoneyChip")?.title.includes("4,321"));
+  const waitBetaBilling=page=>page.waitForFunction(()=>document.getElementById("bzPlanChip")?.textContent==="STARTER"&&document.getElementById("bzHoneyChip")?.title==="97 Honey Drops");
+  const betaVisible=(snapshot,betaId)=>snapshot.name===hosted.B.name&&snapshot.menu?.includes(hosted.B.name)&&
+    !snapshot.menu.includes(hosted.A.name)&&snapshot.plan==="STARTER"&&snapshot.honeyTitle==="97 Honey Drops"&&
+    snapshot.caches.every((raw,index)=>JSON.parse(raw)?.[index?"owner":"id"]===betaId);
   const ui=page=>page.evaluate(()=>({
     path:location.pathname, name:document.getElementById("accountLink")?.textContent,
     accountTitle:document.getElementById("accountLink")?.title,
@@ -367,6 +399,58 @@ try {
   observe("real browser reconnect after Better Auth expiry clears previous owner and billing indicators",
     ended,expiredOnline.body!==null||ended.name!=="Sign in"||ended.menu!==null||ended.plan!==""||ended.honeyTitle!==""||ended.caches.some(item=>item!=="null"));
   await expiring.close();
+
+  const resurfaced=await makeContext(null), profile=await resurfaced.newPage();
+  await enter(profile,hosted.A);await waitAlphaBilling(profile);
+  const profileSession=(await (await resurfaced.request.get(origin+"/api/auth/get-session")).json()).session.id;
+  let profileRechecks=0;
+  profile.on("request",req=>{if(new URL(req.url()).pathname==="/api/auth/get-session")profileRechecks++;});
+  await visibility(profile,"hidden");
+  assert.equal((await ui(profile)).name,hosted.A.name);
+  assert.equal(profileRechecks,0,"moving to the background should not trigger a session check");
+  const betaProfileId=await expireAndReplace(resurfaced,profileSession);
+  const profileResponse=profile.waitForResponse(r=>new URL(r.url()).pathname==="/api/auth/get-session",{timeout:1500}).catch(()=>null);
+  await visibility(profile,"visible");
+  const responded=await profileResponse;
+  if(responded){assert.equal((await responded.json()).user.id,betaProfileId);await waitBetaBilling(profile);}
+  const freshProfile={...await ui(profile),...await indicators(profile),rechecks:profileRechecks};
+  observe("returning to visible Profile with an expired Alpha session must not show Alpha under the verified Beta cookie",
+    freshProfile,!betaVisible(freshProfile,betaProfileId)||profileRechecks!==1);
+  await resurfaced.close();
+
+  const competing=await makeContext(null), talk=await competing.newPage();
+  await enter(talk,hosted.A);await talk.goto(origin+"/buzzy/talk");
+  await untilAccount(talk,hosted.A.name);await waitAlphaBilling(talk);
+  const talkSession=(await (await competing.request.get(origin+"/api/auth/get-session")).json()).session.id;
+  await visibility(talk,"hidden");
+  let releaseOld, alphaReply;
+  const older=new Promise(resolve=>{releaseOld=resolve;});
+  const capturedAlpha=new Promise(resolve=>{alphaReply=resolve;});
+  let reads=0;
+  await talk.route("**/api/auth/get-session",async route=>{
+    if(++reads!==1)return route.continue({headers:{...route.request().headers(),"x-forwarded-for":"127.0.0.1"}});
+    const result=await route.fetch({headers:{...route.request().headers(),"x-forwarded-for":"127.0.0.1"}});
+    const body=await result.body();
+    alphaReply(JSON.parse(body.toString("utf8")));
+    await older;
+    // Preserve the captured result without letting the delayed fixture write any cookie.
+    await route.fulfill({status:result.status(),contentType:"application/json",body});
+  });
+  try {
+    await talk.evaluate(()=>window.dispatchEvent(new PageTransitionEvent("pageshow",{persisted:true})));
+    assert.equal((await Promise.race([capturedAlpha,sleep(5000,undefined,{ref:false}).then(()=>{throw Error("no overlapping read");})])).session.id,talkSession);
+    const betaTalkId=await expireAndReplace(competing,talkSession);
+    const newcomer=talk.waitForResponse(r=>new URL(r.url()).pathname==="/api/auth/get-session",{timeout:1500}).catch(()=>null);
+    await visibility(talk,"visible");
+    const newer=await newcomer;
+    if(newer){assert.equal((await newer.json()).user.id,betaTalkId);await waitBetaBilling(talk);}
+    const delivered=expected(talk,"/api/auth/get-session");
+    releaseOld();
+    assert.equal((await (await delivered).json()).session.id,talkSession);await sleep(140);
+    const freshTalk={...await ui(talk),...await indicators(talk),reads};
+    observe("late authentic Alpha reply from before expiry must not repaint Talk after Beta visibility check",
+      freshTalk,!betaVisible(freshTalk,betaTalkId)||reads!==2);
+  } finally { releaseOld();await competing.close(); }
 
   if(findings)process.exitCode=1;
 } finally {
