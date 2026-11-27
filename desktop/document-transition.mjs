@@ -109,15 +109,25 @@ export function createDocumentTransition({ getContents, getBase, getRuntime, acq
         if (state.sketch && state.state.dirty) throw new Error("Sketch changed before the desktop transition finished. Retry saving.");
       }
     }
+    async function releaseWindow(item, skip, keepRetiredFrozen) {
+      if (skip.includes(item.wc) || !owns(item.wc) || item.wc.mainFrame !== item.frame || !trusted(item.wc, item.base) || (keepRetiredFrozen && getBase() !== item.base)) return;
+      let timer;
+      try {
+        // A hung renderer must not keep the main-process input guard or the
+        // transition queue locked. A late cleanup still matches only its nonce.
+        await Promise.race([
+          item.wc.executeJavaScript(releaseScript(lease.nonce)),
+          new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+        ]);
+      } catch { /* retired documents have no matching writer to resume */ }
+      finally { clearTimeout(timer); }
+    }
     async function release({ skip = [], keepRetiredFrozen = false } = {}) {
       if (released) return;
       released = true;
       try {
         await library?.release({ skip, keepRetiredFrozen });
-        for (const item of windows) {
-          if (skip.includes(item.wc) || !owns(item.wc) || item.wc.mainFrame !== item.frame || !trusted(item.wc, item.base) || (keepRetiredFrozen && getBase() !== item.base)) continue;
-          try { await item.wc.executeJavaScript(releaseScript(lease.nonce)); } catch { /* retired documents have no matching writer to resume */ }
-        }
+        await Promise.all(windows.map((item) => releaseWindow(item, skip, keepRetiredFrozen)));
       } finally {
         if (active === lease) active = null;
         unlock();

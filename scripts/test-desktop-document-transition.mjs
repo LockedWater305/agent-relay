@@ -172,3 +172,37 @@ test('fulfilled begin and pending owned drain do not trigger early release',asyn
  g.resolve();const h=await pending;assert.equal(p.state.lease,nonce);assert.equal(p.state.releases,0);
  await h.release();assert.equal(p.state.releases,1);
 });
+
+test('stalled renderer cleanup does not hold main input or block other windows', async t => {
+  const s = setup({ count: 2, timeoutMs: 50 }), p = s.pages[0], q = s.pages[1];
+  const cleanup = gate(), execute = p.wc.executeJavaScript.bind(p.wc);
+  let late;
+  p.wc.executeJavaScript = source => {
+    if (!late && source.includes('delete window.__bzDesktopDocumentLease')) {
+      const result = execute(source);
+      // Simulate the cleanup acknowledgement never returning to main yet.
+      late = result.then(() => cleanup.promise);
+      return late;
+    }
+    return execute(source);
+  };
+  t.after(() => cleanup.resolve());
+  const handle = await s.acquire();
+  let timer;
+  try {
+    await Promise.race([handle.release(), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Error('The main-process input hold never cleared')), 750);
+    })]);
+  } finally { clearTimeout(timer); }
+  assert.equal(s.acquire.held(), false);
+  assert.equal(q.state.lease, null);
+  assert.equal(prevented(q.wc, 'before-input-event'), false);
+  assert.equal(s.idle, 1);
+  const next = await s.acquire();
+  const nextNonce = p.state.lease;
+  cleanup.resolve();
+  await late;
+  await drain();
+  assert.equal(p.state.lease, nextNonce);
+  await next.release();
+});

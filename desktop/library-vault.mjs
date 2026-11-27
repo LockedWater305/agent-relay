@@ -77,7 +77,7 @@ function acknowledgeScript(nonce, pending) {
 }
 
 /** Serialize restart/close/quit so one transition cannot unfreeze another. */
-export function createLibraryTransition({ getContents, getBase, getRuntime, fetchImpl = fetch, testPageUrl = null }) {
+export function createLibraryTransition({ getContents, getBase, getRuntime, fetchImpl = fetch, testPageUrl = null, rendererCleanupTimeoutMs = 15_000 }) {
   let tail = Promise.resolve();
   return async function acquire({ allowDeferred = false } = {}) {
     let unlock;
@@ -90,19 +90,24 @@ export function createLibraryTransition({ getContents, getBase, getRuntime, fetc
     const verify = (item) => {
       if (!getContents().includes(item.wc) || item.wc.isDestroyed() || item.wc.mainFrame !== item.frame || item.wc.getURL() !== item.url || !trusted(item.wc, item.base)) throw new Error("The Library window changed during migration. Retry from the current window.");
     };
+    async function releaseWindow(item, skip, keepRetiredFrozen) {
+      // A successful port replacement retires the old origin. Unlock main
+      // coordination, but never let a late cleanup resume a newer freeze.
+      if (skip.includes(item.wc) || item.wc.isDestroyed() || !getContents().includes(item.wc) || item.wc.mainFrame !== item.frame || !trusted(item.wc, item.base) || (keepRetiredFrozen && getBase() !== item.base)) return;
+      let timer;
+      try {
+        await Promise.race([
+          item.wc.executeJavaScript(`(() => { if(window.__bzLibraryVaultBarrier === ${JSON.stringify(nonce)}) { delete window.__bzLibraryVaultBarrier; window.BeeZillaLibraryVault?.resume(); } })()`),
+          new Promise((resolve) => { timer = setTimeout(resolve, rendererCleanupTimeoutMs); }),
+        ]);
+      } catch { /* a destroyed/replaced document has no old freeze to release */ }
+      finally { clearTimeout(timer); }
+    }
     const release = async ({ skip = [], keepRetiredFrozen = false } = {}) => {
       if (released) return;
       released = true;
-      try {
-        for (const item of windows) {
-          // A successful port replacement notifies preload before it navigates.
-          // Unlock coordination, but never resume writes into that retired origin.
-          if (skip.includes(item.wc) || item.wc.isDestroyed() || (keepRetiredFrozen && getBase() !== item.base)) continue;
-          try {
-            await item.wc.executeJavaScript(`(() => { if(window.__bzLibraryVaultBarrier === ${JSON.stringify(nonce)}) { delete window.__bzLibraryVaultBarrier; window.BeeZillaLibraryVault?.resume(); } })()`);
-          } catch { /* a destroyed/replaced document has no old freeze to release */ }
-        }
-      } finally { unlock(); }
+      try { await Promise.all(windows.map((item) => releaseWindow(item, skip, keepRetiredFrozen))); }
+      finally { unlock(); }
     };
     async function request(rt, suffix, body) {
       const base = runtimeOrigin(rt), token = rt.token;

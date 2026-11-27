@@ -20,7 +20,7 @@ function renderer(id,values={}) {
   executeJavaScript:async source=>{scripts.push(source);return vm.runInContext(source,context);}};
  return {wc,state,window,data,reads,scripts};
 }
-function setup(values={}, count=1) {
+function setup(values={}, count=1, rendererCleanupTimeoutMs) {
  const ui=Array.from({length:count},(_,i)=>renderer(i+1,i===0?values:{}));
  const rows=new Map(),requests=[]; let generation='0',runtime={host:'127.0.0.1',port:7331,token:'syntheticToken'.repeat(4)},base='http://127.0.0.1:7331';
  let intercept=null;
@@ -41,7 +41,7 @@ function setup(values={}, count=1) {
   });
   return Response.json({...meta,stored});
  };
- const acquire=createLibraryTransition({getContents:()=>ui.map(x=>x.wc),getBase:()=>base,getRuntime:()=>runtime,fetchImpl});
+ const acquire=createLibraryTransition({getContents:()=>ui.map(x=>x.wc),getBase:()=>base,getRuntime:()=>runtime,fetchImpl,rendererCleanupTimeoutMs});
  return {ui,rows,requests,acquire,get runtime(){return runtime;},set runtime(value){runtime=value;},set base(value){base=value;},
   set generation(value){generation=value;},set intercept(value){intercept=value;}};
 }
@@ -226,4 +226,36 @@ test('Library cancels the outstanding response when the local binding is retired
  assert.equal(cancelled,true);
  assert.equal(s.ui[0].data.get(LEGACY_KEY),raw);
  assert.equal(s.ui[0].state.frozen,false);
+});
+
+test('a stalled Library thaw does not block other windows or acquire again', async t => {
+  const s = setup({}, 2, 50), [p, q] = s.ui;
+  const cleanup = Promise.withResolvers();
+  const execute = p.wc.executeJavaScript.bind(p.wc);
+  let late;
+  p.wc.executeJavaScript = source => {
+    if (!late && source.includes('delete window.__bzLibraryVaultBarrier')) {
+      late = cleanup.promise.then(() => execute(source));
+      return late;
+    }
+    return execute(source);
+  };
+  t.after(() => cleanup.resolve());
+  const hold = await s.acquire();
+  let timer;
+  try {
+    await Promise.race([hold.release(), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Error('The Library release queue never cleared')), 750);
+    })]);
+  } finally { clearTimeout(timer); }
+  assert.equal(q.state.frozen, false);
+  assert.equal(s.requests.length, 0);
+  const next = await s.acquire();
+  const nextNonce = p.window.__bzLibraryVaultBarrier;
+  cleanup.resolve();
+  await late;
+  assert.equal(p.window.__bzLibraryVaultBarrier, nextNonce);
+  assert.equal(p.state.frozen, true);
+  await next.release();
+  assert.ok(s.ui.every(x => !x.state.frozen));
 });
