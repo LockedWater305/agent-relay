@@ -1258,3 +1258,50 @@ test("thinking cleanup: voice Stop keeps an accepted turn pending until its stre
   await first.sending;
   assertTurnSettled(h);
 });
+
+test("desktop Talk keeps spoken words and provider errors out of diagnostics", async () => {
+  for (const kind of ["ok", "empty", "refusal"]) {
+    const h = speechHarness();
+    const logs = [];
+    h.c.window.beezilla = { app: { log: (line) => logs.push(line) } };
+    runInNewContext(fn("micLog"), h.c);
+    const heard = kind === "empty" ? "" : "Synthetic private speech about my garden";
+    const detail = "Synthetic provider detail about my garden";
+    h.start().resolve(response(kind === "refusal"
+      ? { ok: false, error: detail, context: heard }
+      : { ok: true, text: heard, ms: 43.2, model: "fixture-internal-model-name" }));
+    await settle();
+    assert.deepEqual(h.sent.map(x => x.text), kind === "ok" ? [heard] : []);
+    if (kind === "refusal") assert.deepEqual(h.notes, [detail]);
+    assert.deepEqual(logs, [kind === "refusal" ? "voice: transcribe refused"
+      : "voice: transcribe ok ms=43 hasText=" + (kind === "ok")]);
+  }
+});
+
+test("desktop Talk logs track settings and microphone failure type without device or error text", async () => {
+  for (const fail of [false, true]) {
+    const logs = [], notes = [];
+    const scope = {
+      window: { beezilla: { app: { log: line => logs.push(line) } } },
+      voice: { mic: true, micCtx: { state: "running", sampleRate: 48000,
+        createMediaStreamSource: () => ({ connect() {} }), createScriptProcessor: () => ({ connect() {} }) } },
+      navigator: { mediaDevices: { getUserMedia() {} } }, recState: null, recAcquiring: null,
+      ensureMic: () => fail
+        ? Promise.reject(Object.assign(new Error("Synthetic owner-named device detail"), { name: "NotAllowedError" }))
+        : Promise.resolve({ getAudioTracks: () => [{ label: "Synthetic personal headset name",
+            getSettings: () => ({ sampleRate: 48000, channelCount: 1 }) }] }),
+      preRollPending: () => null, setTimeout() {}, stageNote: note => notes.push(note),
+      setAvatarState() {}, paintVoice() {}, saveListenPref() {},
+    };
+    runInNewContext([fn("micLog"), fn("startRecording"), "startRecording();"].join("\n"), scope);
+    await settle();
+    assert.doesNotMatch(logs.join("\n"), /Synthetic/);
+    if (fail) {
+      assert.ok(logs.includes("voice: getUserMedia failed NotAllowedError"));
+      assert.ok(notes.some(note => note.includes("Microphone blocked")));
+    } else {
+      assert.ok(logs.includes("voice: stream ok rate=48000 ch=1"));
+      assert.ok(logs.includes("voice: recording at 48000 Hz"));
+    }
+  }
+});

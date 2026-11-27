@@ -185,7 +185,9 @@ if (exists) {
 }
 
 /* -- verify what the world will download ------------------------------------ */
-const remote = run("gh", ["release", "view", tag, "-R", REPO, "--json", "assets,isPrerelease,url"], { capture: true });
+// Query GitHub's REST asset metadata directly: some gh versions omit the
+// server-computed digest when exporting assets via "release view --json".
+const remote = run("gh", ["api", `repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`], { capture: true });
 const parsed = JSON.parse(remote);
 const wanted = `BeeZilla-Setup-${version}.exe`;
 const legacy = `BeeZilla.Setup.${version}.exe`; // GitHub turns spaces into dots
@@ -198,6 +200,14 @@ if (asset.size !== bytes) {
   console.error(`FAILED: uploaded size ${asset.size} != local ${bytes}`);
   process.exit(1);
 }
-log(`verified on GitHub: ${asset.name} ${asset.size} b · prerelease=${parsed.isPrerelease}`);
-log(`download page: ${parsed.url}`);
+if (typeof asset.digest !== "string" || !/^sha256:[0-9a-f]{64}$/i.test(asset.digest)) {
+  console.error(`FAILED: GitHub has not supplied a SHA-256 digest for ${asset.name}; uploaded bytes are unverified`);
+  process.exit(1);
+}
+if (asset.digest.toLowerCase() !== `sha256:${sha}`) {
+  console.error(`FAILED: uploaded digest ${asset.digest} != local sha256:${sha}`);
+  process.exit(1);
+}
+log(`verified on GitHub: ${asset.name} ${asset.size} b · prerelease=${parsed.prerelease}`);
+log(`download page: ${parsed.html_url}`);
 log(`sha256 ${sha} — compare it after downloading`);

@@ -34,8 +34,11 @@ import { readFileSync, readdirSync, statSync, existsSync, writeFileSync } from "
 import { execFileSync } from "node:child_process";
 import { join, basename, resolve, extname, relative } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 
-const HERE = resolve(new URL(".", import.meta.url).pathname, "..");
+// A file URL's pathname is not a platform path. Spaces stay escaped and
+// Windows drive roots gain a leading slash. Convert the URL before resolving.
+const HERE = fileURLToPath(new URL("../", import.meta.url));
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
 const opt = (name, fallback) => {
@@ -47,6 +50,34 @@ const WEB = resolve(opt("--web", join(homedir(), "agents/agent-relay-recipes")))
 const DESK = resolve(opt("--desktop", join(homedir(), "agents/agent-relay-local")));
 const BUNDLE = opt("--bundle", join(homedir(), ".wine-install/drive_c/users/gumbyender/AppData/Local/Programs/BeeZilla/resources/app"));
 const REGISTER = resolve(opt("--register", join(HERE, "docs/parity/functions.json")));
+
+// Supplying an explicit --bundle requests the installed inventory; a typo
+// must not silently downgrade that run into a successful source-only check.
+if (flag("--bundle")) {
+  if (flag("--inventory")) {
+    console.error("--inventory is source-only; run a separate check with --bundle");
+    process.exit(2);
+  }
+  const requested = opt("--bundle");
+  let valid = false;
+  if (requested) {
+    try {
+      // These are the directories this inventory actually compares. An arbitrary
+      // empty directory (or the Electron shell's ASAR) is not a runtime tree.
+      const hasMigrations = readdirSync(join(requested, "migrations"), { withFileTypes: true })
+        .some((entry) => entry.isFile() && entry.name.endsWith(".sql"));
+      const payloadFiles = ["public/buzzy/talk.html", ".output/server/index.mjs"];
+      valid = hasMigrations && payloadFiles.every((rel) => {
+        const info = statSync(join(requested, rel));
+        return info.isFile() && info.size > 0;
+      });
+    } catch { /* missing, not a directory, or unreadable */ }
+  }
+  if (!valid) {
+    console.error("--bundle requires a runtime directory with Talk, SQL migrations and an emitted server entry; no bundle inventory was performed");
+    process.exit(2);
+  }
+}
 
 const SKIP_DIRS = new Set(["node_modules", ".output", ".git", "dist", "dist-desktop", ".nitro", "cache", "stage"]);
 

@@ -4538,9 +4538,9 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
 
     // A mic that hears nothing and a mic that is broken are indistinguishable from
     // the outside: both are silence with no message. The desktop writes every step to
-    // main.log, so the failure names itself. The web build stays quiet: transcripts and
-    // device labels do not go to every visitor's console. A developer turns the trace on
-    // in one browser with localStorage.setItem("bz.debugVoice", "1").
+    // main.log, so the failure names itself. Keep words, device labels and provider
+    // payloads out of these diagnostics. The web build stays quiet by default; enable
+    // tracing in one browser with localStorage.setItem("bz.debugVoice", "1").
     function micLog(msg) {
       if (window.beezilla) {
         try {
@@ -4601,7 +4601,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           }
           var tr = stream.getAudioTracks()[0];
           var st = (tr && tr.getSettings && tr.getSettings()) || {};
-          micLog('stream ok label="' + ((tr && tr.label) || "") + '" rate=' + (st.sampleRate || "?") + " ch=" + (st.channelCount || "?"));
+          micLog("stream ok rate=" + (st.sampleRate || "?") + " ch=" + (st.channelCount || "?"));
           var AC = window.AudioContext || window.webkitAudioContext;
           // A closed context cannot be reused; a suspended one just needs nudging.
           if (!voice.micCtx || voice.micCtx.state === "closed") voice.micCtx = new AC();
@@ -4686,7 +4686,10 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           // must not tear down the session that replaced it.
           if (!current) return;
           var name = (e && e.name) || "";
-          micLog("getUserMedia failed " + name + ": " + ((e && e.message) || ""));
+          // Diagnostic files can be shared: keep a known category, never raw error text.
+          var category = ["NotAllowedError", "SecurityError", "NotFoundError", "NotReadableError",
+            "OverconstrainedError", "AbortError", "InvalidStateError", "TypeError"].includes(name) ? name : "other";
+          micLog("getUserMedia failed " + category);
           if (name === "NotAllowedError" || name === "SecurityError") {
             stageNote("Microphone blocked — allow the mic for this site, then tap it again.");
             voice.mic = false;
@@ -5010,7 +5013,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           voice.sending = false;
           if (!data || !data.ok) {
             voice.speechRequest = null;
-            micLog("transcribe refused: " + JSON.stringify(data || {}).slice(0, 200));
+            micLog("transcribe refused");
             stageNote((data && data.error) || "Couldn't transcribe that — try again.");
             rearmListening();
             return;
@@ -5019,7 +5022,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
           // adds the job the page is in, for the cold ?job= open the server
           // cannot see the title of.
           var text = jobNameFix(brandName(data.text)).trim();
-          micLog("transcribe ok ms=" + data.ms + " model=" + data.model + ' text="' + text.slice(0, 80) + '"');
+          micLog("transcribe ok ms=" + (Number.isFinite(data.ms) && data.ms >= 0 ? Math.round(data.ms) : "?") + " hasText=" + Boolean(text));
           if (!text) {
             voice.speechRequest = null;
             stageNote("Didn't catch that — try again.");

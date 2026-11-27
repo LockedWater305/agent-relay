@@ -338,8 +338,16 @@
       a.href = name ? "/buzzy/profile" : "/buzzy/landing";
       a.title = email || name || "Sign in";
       if (user) ensureMenu();
+      else {
+        var stale = chrome.querySelector(".account-menu");
+        if (stale) stale.remove();
+      }
     }
     var user = null;
+    var sessionKnown = false;
+    var localWorkspace = false;
+    var logoutPending = false;
+    var logoutMessage = "";
 
     /**
      * Last known identity, so the header never lies for a round trip.
@@ -373,22 +381,40 @@
     if (cached !== undefined) paint(cached ? cached.name : null, cached ? cached.email : null);
 
     function signOut(e) {
-      if (e) e.preventDefault();
-      writeIdentityCache(null); // next page must not paint the name we just dropped
-      // The plan and balance chips are cached for the same reason; a signed-out page
-      // that paints PRO and a Honey balance is the same lie in a different chip.
-      try {
-        window.localStorage.setItem("bz_plan", "null");
-        window.localStorage.setItem("bz_honey", "null");
-      } catch (err) { /* private mode: the next load's 401 clears them anyway */ }
+      // Repainting removes the clicked button. Do not let an outside-click
+      // handler mistake that detached node for a click outside the menu.
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      if (logoutPending || localWorkspace) return;
+      logoutPending = true;
+      logoutMessage = "";
+      ensureMenu();
       fetch("/api/auth/sign-out", {
         method: "POST", credentials: "same-origin",
         headers: { "content-type": "application/json" }, body: "{}",
-      }).then(function () {
-        // Sign-out is the one place a hard load is correct: the session is gone,
-        // so the engine in this document MUST die with it. Everything else in
-        // /buzzy/* navigates through the shell (BZ-16).
+      }).then(function (r) {
+        if (!r.ok || r.redirected) throw new Error("logout not confirmed");
+        // A successful HTTP response alone does not prove this browser's
+        // session ended (a proxy can return an HTML success page).
+        return fetch("/api/auth/get-session", { credentials: "same-origin", cache: "no-store" });
+      }).then(function (r) {
+        if (!r.ok || r.redirected) throw new Error("session not confirmed");
+        return r.json();
+      }).then(function (s) {
+        if (!(s === null || (s && s.user === null && !s.session))) throw new Error("session not confirmed");
+        writeIdentityCache(null);
+        try {
+          window.localStorage.setItem("bz_plan", "null");
+          window.localStorage.setItem("bz_honey", "null");
+        } catch (err) { /* storage unavailable */ }
+        // End the document (including its running voice engine) only after
+        // the server has confirmed no signed-in session remains.
         window.location.href = "/buzzy/";
+      }).catch(function () {
+        logoutPending = false;
+        logoutMessage = "Couldn't confirm you were logged out. Try again.";
+        ensureMenu();
+        var retry = chrome.querySelector(".account-menu .am-signout");
+        if (retry && retry.getClientRects().length) retry.focus();
       });
     }
 
@@ -401,10 +427,25 @@
         var em = document.createElement("div"); em.className = "am-email"; em.textContent = user.email;
         m.appendChild(em);
       }
+      // This is the app's token-gated, single-user desktop workspace, not
+      // a hosted account cookie. Posting a web logout cannot sign it out.
+      if (localWorkspace) {
+        var hint = document.createElement("div");
+        hint.className = "am-email"; hint.textContent = "Local workspace";
+        m.appendChild(hint);
+        return;
+      }
       var out = document.createElement("button");
-      out.type = "button"; out.className = "am-signout"; out.textContent = "Log out";
+      out.type = "button"; out.className = "am-signout";
+      out.disabled = logoutPending;
+      out.textContent = logoutPending ? "Logging out…" : "Log out";
       out.addEventListener("click", signOut);
       m.appendChild(out);
+      if (logoutMessage) {
+        var status = document.createElement("div");
+        status.setAttribute("role", "alert"); status.textContent = logoutMessage;
+        m.appendChild(status);
+      }
     }
 
     // One menu, owned by the chrome. Pages that build their own get adopted; pages
@@ -431,7 +472,10 @@
       .then(function (r) { return r.ok ? r.json() : undefined; })
       .then(function (res) {
         if (res === undefined) return; // inconclusive: keep whatever we painted
+        sessionKnown = true;
         var u = res && res.user;
+        localWorkspace = !!(u && u.id === "local_owner" && res.session &&
+          res.session.id === "local-session" && res.session.userId === u.id);
         if (u && (u.name || u.email)) {
           writeIdentityCache({ name: u.name || u.email, email: u.email || "" });
           paint(u.name || u.email, u.email);
@@ -448,6 +492,7 @@
     // click handler (Talk binds a toggle to `.account-link`) cannot double-toggle ours.
     function adopt(menu) {
       if (!menu) return;
+      if (sessionKnown && !user) { menu.remove(); return; }
       if (menu.getAttribute("data-bz-adopted") === "1") return;
       menu.setAttribute("data-bz-adopted", "1");
       menu.classList.add("bz-account-menu");
@@ -455,6 +500,7 @@
       menu.style.top = "100%";
       menu.style.right = "0";
       chrome.appendChild(menu);
+      if (user) fillMenu(menu);
       var fresh = a.cloneNode(true);
       if (a.parentNode) a.parentNode.replaceChild(fresh, a);
       else chrome.appendChild(fresh);
