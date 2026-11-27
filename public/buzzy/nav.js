@@ -973,6 +973,7 @@
 
     var mounted = false;
     var sending = false;
+    var earlierReportUnconfirmed = false;
     var recorder = null;
     var voiceGeneration = 0;
     var voiceAttempt = 0;
@@ -1344,9 +1345,19 @@
       if (!file) return;
       var readGeneration = ++shotGeneration;
       shotPending = false;
-      if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
-        if (h) h.textContent = "Pick a PNG, JPEG or WebP picture.";
+      function rejectReplacement(message) {
+        shotPending = false;
         input.value = "";
+        if (h) h.textContent = message + (shot ? " Your previous screenshot is still attached." : "");
+      }
+      if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
+        rejectReplacement("Pick a PNG, JPEG or WebP picture.");
+        return;
+      }
+      var tooBig = "That picture is too big. Pick one under about 1 MB.";
+      // Base64 alone cannot fit; avoid allocating the full data URL.
+      if (4 * Math.ceil(file.size / 3) > SHOT_MAX) {
+        rejectReplacement(tooBig);
         return;
       }
       var reader = new FileReader();
@@ -1357,10 +1368,7 @@
         shotPending = false;
         var data = String(reader.result || "");
         if (data.length > SHOT_MAX) {
-          shot = null;
-          if (row) row.hidden = true;
-          if (h) h.textContent = "That picture is too big \u2014 pick one under about 1 MB.";
-          input.value = "";
+          rejectReplacement(tooBig);
           return;
         }
         shot = data;
@@ -1370,9 +1378,7 @@
       };
       reader.onerror = reader.onabort = function () {
         if (!body.contains(input) || readGeneration !== shotGeneration) return;
-        shotPending = false;
-        input.value = "";
-        if (h) h.textContent = "Could not attach the new screenshot.";
+        rejectReplacement("Could not attach the new screenshot.");
       };
       reader.readAsDataURL(file);
     });
@@ -1389,6 +1395,11 @@
       return Number.isFinite(received) && new Date(received).toISOString() === receipt.received_at
         ? receipt.ref : null;
     }
+    function withEarlierFeedbackWarning(message) {
+      return earlierReportUnconfirmed
+        ? message + " An earlier attempt is still unconfirmed. Resending that report may create a duplicate."
+        : message;
+    }
     function restoreFeedbackDraft(message) {
       sending = false;
       send.disabled = false;
@@ -1396,6 +1407,7 @@
       status.textContent = message;
     }
     function unconfirmedFeedback() {
+      earlierReportUnconfirmed = true;
       restoreFeedbackDraft("We could not confirm that your report arrived. Your draft is still here. Retrying could send it twice.");
     }
 
@@ -1410,7 +1422,7 @@
       var submittedShot = shot;
       var words = submittedText.trim();
       if (!words) {
-        status.textContent = "Tell us what happened first.";
+        status.textContent = withEarlierFeedbackWarning("Tell us what happened first.");
         text.focus();
         return;
       }
@@ -1450,9 +1462,10 @@
               Boolean(diagCheckbox && diagCheckbox.checked) !== withDiag) {
             send.disabled = false;
             send.textContent = "Send current draft";
-            status.textContent = "Your earlier report was saved as " + ref + ". Your current draft has not been sent.";
+            status.textContent = withEarlierFeedbackWarning("Your earlier report was saved as " + ref + ". Your current draft has not been sent.");
             return;
           }
+          earlierReportUnconfirmed = false;
           invalidateVoiceDraft();
           body.innerHTML =
             '<div class="bz-fb-done"><p><strong>Thank you \u2014 that reached us.</strong></p>' +
@@ -1469,8 +1482,8 @@
             text.focus();
           });
         } else if (!out.res.ok && out.j && out.j.ok === false) {
-          restoreFeedbackDraft(typeof out.j.error === "string" && out.j.error
-            ? out.j.error : "Could not send \u2014 try again in a moment.");
+          restoreFeedbackDraft(withEarlierFeedbackWarning(typeof out.j.error === "string" && out.j.error
+            ? out.j.error : "Could not send \u2014 try again in a moment."));
         } else {
           unconfirmedFeedback();
         }

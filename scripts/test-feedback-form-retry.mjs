@@ -57,7 +57,7 @@ async function form(t, responses) {
       const n = window.calls.push({
         url, method: options.method, payload: JSON.parse(options.body),
       });
-      const receipt = { ok: true, ref: ["BZ-FB-ABCDEF", "BZ-FB-GHJKLM"][n - 1], received_at: "2026-11-27T00:00:00.000Z" };
+      const receipt = { ok: true, ref: ["BZ-FB-ABCDEF", "BZ-FB-GHJKLM", "BZ-FB-NPQRST"][n - 1], received_at: "2026-11-27T00:00:00.000Z" };
       const reply = (patch = {}, status = 201) => Promise.resolve({
         ok: status >= 200 && status < 300, status, json: async () => ({ ...receipt, ...patch }),
       });
@@ -368,4 +368,86 @@ test("Feedback minimize and restore expose the correct accessible state and keep
   assert.equal(await formText.evaluate((el) => document.activeElement === el), true);
   assert.equal(await formText.inputValue(), firstDraft);
   assert.equal((await calls()).length, 0);
+});
+
+test("an oversized screenshot replacement leaves the previous preview and payload intact", async (t) => {
+  const { page, calls } = await form(t, ["ok"]);
+  const hint = page.locator("#bzFbShotHint");
+  await page.locator("#bzFbShot").setInputFiles({
+    name: "oversized.png", mimeType: "image/png", buffer: Buffer.alloc(1_125_001),
+  });
+  await page.getByText(/too big/).waitFor();
+  assert.equal(await page.locator("#bzFbShotImg").isVisible(), true, "the accepted screenshot is still attached");
+  assert.match(await hint.textContent(), /previous screenshot is still attached/i);
+  assert.equal(await page.locator("#bzFbShotImg").getAttribute("src"), imageUrl);
+  assert.equal((await calls()).length, 0);
+  await page.getByRole("button", { name: "Send feedback", exact: true }).click();
+  await page.getByText("BZ-FB-ABCDEF").waitFor();
+  assert.equal((await calls())[0].payload.screenshot, imageUrl);
+});
+
+test("a clearly oversized screenshot is rejected without reading the file", async (t) => {
+  const { page, calls } = await form(t, []);
+  await queueReads(page);
+  await page.locator("#bzFbShot").setInputFiles({
+    name: "oversized.png", mimeType: "image/png", buffer: Buffer.alloc(1_125_001),
+  });
+  assert.equal(await page.evaluate(() => window.queuedReads.length), 0);
+  assert.match(await page.locator("#bzFbShotHint").textContent(), /too big/);
+  await page.locator("#bzFbShotDrop").click();
+  assert.equal(await page.locator("#bzFbShotImg").isVisible(), false);
+  assert.equal((await calls()).length, 0);
+});
+
+test("a failed replacement never hides the current preview or implies it was removed", async (t) => {
+  const { page, calls } = await form(t, []);
+  for (const outcome of ["type", "error", "encoded"]) {
+    await queueReads(page);
+    if (outcome === "type") {
+      await page.locator("#bzFbShot").setInputFiles({
+        name: "mistake.txt", mimeType: "text/plain", buffer: Buffer.from("synthetic"),
+      });
+    } else {
+      await pick(page, "replacement.png");
+      await page.evaluate((mode) => {
+        const r = window.queuedReads[0].reader;
+        if (mode === "error") r.onerror();
+        else { r.result = "data:image/png;base64," + "x".repeat(1_500_001); r.onload(); }
+      }, outcome);
+    }
+    assert.equal(await page.locator("#bzFbShotImg").isVisible(), true);
+    assert.equal(await page.locator("#bzFbShotImg").getAttribute("src"), imageUrl);
+    assert.match(await page.locator("#bzFbShotHint").textContent(), /previous screenshot is still attached/i);
+  }
+  assert.equal((await calls()).length, 0);
+});
+
+test("an unconfirmed report warning survives a later rejection, edit, and close until a receipt", async (t) => {
+  const { page, calls } = await form(t, ["missing-ref", "503", "ok"]);
+  const status = page.locator("#bzFbStatus");
+  const send = page.locator("#bzFbSend");
+  await send.click();
+  assert.match(await status.textContent(), /could not confirm.*retrying could send it twice/i);
+  await page.locator("#bzFbText").fill(secondDraft);
+  await send.click();
+  assert.match(await status.textContent(), /temporarily unavailable.*earlier attempt is still unconfirmed.*duplicate/i);
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Feedback", exact: true }).click();
+  assert.match(await status.textContent(), /earlier attempt is still unconfirmed/i);
+  assert.equal((await calls()).length, 2);
+  await send.click();
+  await page.getByRole("button", { name: "Send another" }).click();
+  assert.doesNotMatch(await status.textContent(), /unconfirmed/i);
+  assert.equal((await calls()).length, 3);
+});
+
+test("empty draft validation does not overwrite an unresolved prior send", async (t) => {
+  const { page, calls } = await form(t, ["missing-ref"]);
+  const status = page.locator("#bzFbStatus");
+  const send = page.locator("#bzFbSend");
+  await send.click();
+  await page.locator("#bzFbText").fill("");
+  await send.click();
+  assert.match(await status.textContent(), /tell us what happened first.*earlier attempt is still unconfirmed.*duplicate/i);
+  assert.equal((await calls()).length, 1);
 });
