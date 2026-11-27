@@ -494,7 +494,7 @@ export interface GlbSummary {
   materials: number;
   textures: number;
   images: number;
-  /** Materials assigned to a primitive with at least one image-linked texture. */
+  /** Materials with an image-linked texture on a primitive in the declared default scene, when available. */
   texturedMaterials: number;
   /** Faces, counted from the index (or position) accessors. */
   triangles: number;
@@ -508,6 +508,37 @@ function isGlbIndex(index: unknown): index is number {
   return typeof index === "number" && Number.isSafeInteger(index) && index >= 0;
 }
 
+type SceneGraph = {
+  scene?: number;
+  scenes?: Array<{ nodes?: number[] }>;
+  nodes?: Array<{ mesh?: number; children?: number[] }>;
+};
+
+function defaultSceneMeshes(g: SceneGraph, meshCount: number): Set<number> | null {
+  const roots = isGlbIndex(g.scene) ? g.scenes?.[g.scene]?.nodes : undefined;
+  // No declared/usable scene: retain file-level inspection rather than guessing
+  // which scene the downloader's viewer will pick.
+  if (!Array.isArray(roots) || !Array.isArray(g.nodes)) return null;
+  const pending = [...roots];
+  const visited = new Set<number>();
+  const meshes = new Set<number>();
+  while (pending.length) {
+    const index = pending.pop();
+    if (!isGlbIndex(index)) return null;
+    if (visited.has(index)) continue;
+    const node = g.nodes[index];
+    if (!node) return null;
+    visited.add(index);
+    if (node.mesh !== undefined) {
+      if (!isGlbIndex(node.mesh) || node.mesh >= meshCount) return null;
+      meshes.add(node.mesh);
+    }
+    if (node.children !== undefined && !Array.isArray(node.children)) return null;
+    for (const child of node.children ?? []) pending.push(child);
+  }
+  return meshes.size ? meshes : null;
+}
+
 export function glbSummary(bytes: Uint8Array | Buffer | null | undefined): GlbSummary {
   const none: GlbSummary = { ok: false, meshes: 0, materials: 0, textures: 0, images: 0, texturedMaterials: 0, triangles: 0, hasUvs: false, hasNormals: false };
   try {
@@ -516,7 +547,7 @@ export function glbSummary(bytes: Uint8Array | Buffer | null | undefined): GlbSu
     if (b.readUInt32LE(0) !== 0x46546c67) return none; // "glTF"
     const jsonLen = b.readUInt32LE(12);
     if (b.readUInt32LE(16) !== 0x4e4f534a || 20 + jsonLen > b.byteLength) return none; // "JSON"
-    const g = JSON.parse(b.subarray(20, 20 + jsonLen).toString("utf8")) as {
+    const g = JSON.parse(b.subarray(20, 20 + jsonLen).toString("utf8")) as SceneGraph & {
       meshes?: Array<{ primitives?: Array<{ attributes?: Record<string, number>; indices?: number; material?: number; mode?: number }> }>;
       materials?: Array<{
         pbrMetallicRoughness?: { baseColorTexture?: TextureInfo; metallicRoughnessTexture?: TextureInfo };
@@ -545,9 +576,11 @@ export function glbSummary(bytes: Uint8Array | Buffer | null | undefined): GlbSu
     let triangles = 0;
     let hasUvs = false;
     let hasNormals = false;
-    for (const m of g.meshes ?? []) {
+    const sceneMeshes = defaultSceneMeshes(g, g.meshes?.length ?? 0);
+    for (const [meshIndex, m] of (g.meshes ?? []).entries()) {
+      const countsForTexture = !sceneMeshes || sceneMeshes.has(meshIndex);
       for (const p of m.primitives ?? []) {
-        if (isGlbIndex(p.material) && !checkedMaterials.has(p.material)) {
+        if (countsForTexture && isGlbIndex(p.material) && !checkedMaterials.has(p.material)) {
           checkedMaterials.add(p.material);
           const material = g.materials?.[p.material];
           const fields = [

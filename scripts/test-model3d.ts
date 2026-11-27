@@ -569,7 +569,7 @@ ok("a .glb is read for its texture and size, without trusting it", () => {
 function smallGlb(document: Record<string, unknown>): Buffer {
   // An aligned binary buffer with room for one triangle, its UVs and a tiny
   // embedded PNG. For a metadata-only extension variant the source can be a URI.
-  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jSxQAAAAASUVORK5CYII=", "base64");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQ6vwHAAJKAZpf6V2uAAAAAElFTkSuQmCC", "base64");
   const bin = Buffer.alloc((60 + png.length + 3) & ~3);
   bin.writeFloatLE(1, 12); bin.writeFloatLE(1, 28);
   bin.writeFloatLE(1, 44); bin.writeFloatLE(1, 56);
@@ -642,6 +642,30 @@ ok("embedded images, WebP/KTX2 texture sources, and assigned secondary maps are 
     }));
     eq([look.ok, look.texturedMaterials], [true, 1], extension + " source:");
   }
+});
+
+ok("textures in other scenes and detached meshes do not count for the declared default scene", () => {
+  const fields = { pbrMetallicRoughness: { baseColorTexture: { index: 0 } } };
+  const mesh = (material: number) => ({ primitives: [{ material, attributes: { POSITION: 0, TEXCOORD_0: 1 } }] });
+  const asset = {
+    materials: [{}, fields, fields], textures: [{ source: 0 }],
+    meshes: [mesh(0), mesh(1), mesh(2)],
+    scenes: [{ nodes: [1] }, { nodes: [0] }],
+    nodes: [{ children: [2] }, { mesh: 1 }, { mesh: 0 }, { mesh: 2 }],
+  };
+  const route = readFileSync("src/lib/buzzy/chat.nitro.ts", "utf8");
+  const expression = route.match(/const bareModel = ([^;]+);/)?.[1];
+  truthy(expression, "missing poll classification");
+  const isBare = new Function("look", "return " + expression) as (look: ReturnType<typeof M.glbSummary>) => boolean;
+
+  const bare = M.glbSummary(smallGlb({ ...asset, scene: 1 }));
+  eq([bare.ok, bare.texturedMaterials, isBare(bare)], [true, 0, true], "bare non-first declared scene:");
+  const rendered = M.glbSummary(smallGlb({ ...asset, scene: 0 }));
+  eq([rendered.ok, rendered.texturedMaterials, isBare(rendered)], [true, 1, false], "selected first textured scene:");
+  const nested = M.glbSummary(smallGlb({ ...asset, scene: 1, nodes: [{ children: [2] }, { mesh: 1 }, { mesh: 2 }, { mesh: 0 }] }));
+  eq([nested.ok, nested.texturedMaterials, isBare(nested)], [true, 1, false], "a selected scene's descendants do render:");
+  const unspecific = M.glbSummary(smallGlb({ ...asset, scene: undefined }));
+  eq([unspecific.ok, unspecific.texturedMaterials, isBare(unspecific)], [true, 2, false], "no declared scene leaves file-level classification:");
 });
 
 ok("wired: the turn plans the model and starts it; the poll follows the steps; the pages follow `next`", () => {
