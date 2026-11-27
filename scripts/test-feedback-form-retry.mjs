@@ -28,7 +28,13 @@ before(async () => {
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
     headless: true,
     chromiumSandbox: true,
+    args: ["--enable-automation"], // Exposes CDP command line without bypassing sandbox.
   });
+  const cdp = await browser.newBrowserCDPSession();
+  const { arguments: argv } = await cdp.send("Browser.getBrowserCommandLine");
+  assert.equal(argv.includes("--no-sandbox"), false);
+  assert.equal(argv.includes("--disable-seccomp-filter-sandbox"), false);
+  await cdp.detach();
 });
 after(async () => browser?.close());
 
@@ -42,6 +48,7 @@ async function form(t, responses) {
   await page.clock.install();
   await page.evaluate((modes) => {
     window.calls = [];
+    window.pendingFeedback = [];
     const stall = (signal) => new Promise((_ok, reject) => {
       if (signal?.aborted) reject(signal.reason);
       else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -66,6 +73,9 @@ async function form(t, responses) {
         case "hung-body":
           return Promise.resolve({ ok: true, json: () => stall(options.signal) });
         case "ok": return reply();
+        case "deferred-ok": return new Promise(resolve => {
+          window.pendingFeedback.push(() => reply().then(resolve));
+        });
         case "missing-ref": return reply({ ref: undefined });
         case "numeric-ref": return reply({ ref: 123456 });
         case "bad-alphabet": return reply({ ref: "BZ-FB-ABCD01" });
@@ -238,3 +248,94 @@ for (const outcome of [
     assert.deepEqual(sent[1], sent[0]);
   });
 }
+
+const resolveEarlierReceipt = (page) => page.evaluate(() => window.pendingFeedback.shift()());
+async function hasReceipt(page) {
+  await page.getByText(/BZ-FB-ABCDEF/).first().waitFor();
+}
+async function retainedDraft(page) {
+  assert.equal(await page.locator("#bzFbText").count(),1,"the older receipt must not replace the live draft");
+}
+test("a valid receipt confirms only the original payload and keeps newer typed edits editable", async t => {
+  const {page,calls}=await form(t,["deferred-ok","ok"]);
+  await page.locator("#bzFbSend").click();
+  await page.locator("#bzFbText").fill(secondDraft);
+  await resolveEarlierReceipt(page); await hasReceipt(page);
+  const [earlier]=await calls();
+  assert.equal(earlier.payload.body,firstDraft);
+  await retainedDraft(page);
+  assert.equal(await page.locator("#bzFbText").inputValue(),secondDraft);
+  assert.match(await page.locator("#bzFbStatus").textContent(),/earlier.*BZ-FB-ABCDEF.*current draft has not been sent/i);
+  assert.equal((await calls()).length,1);
+  await page.getByRole("button",{name:"Send current draft"}).click();
+  await page.getByText("BZ-FB-GHJKLM",{exact:true}).waitFor();
+  assert.equal((await calls())[1].payload.body,secondDraft);
+});
+test("a valid older receipt preserves a replacement screenshot even when no text changed", async t => {
+  const {page,calls}=await form(t,["deferred-ok","ok"]);
+  await page.locator("#bzFbSend").click();
+  await queueReads(page);
+  await pick(page,"replacement.png");
+  await resolvePhoto(page,"replacement.png","NEW");
+  await resolveEarlierReceipt(page); await hasReceipt(page);
+  assert.equal((await calls())[0].payload.screenshot,imageUrl);
+  await retainedDraft(page);
+  assert.equal(await page.locator("#bzFbShotImg").getAttribute("src"),"data:image/png;base64,TkVX");
+  assert.equal((await calls()).length,1);
+  await page.getByRole("button",{name:"Send current draft"}).click();
+  await page.getByText("BZ-FB-GHJKLM",{exact:true}).waitFor();
+  assert.equal((await calls())[1].payload.screenshot,"data:image/png;base64,TkVX");
+});
+test("pending file selection survives receipt before its FileReader result", async t => {
+  const {page,calls}=await form(t,["deferred-ok"]);
+  await page.locator("#bzFbSend").click();
+  await queueReads(page);
+  await pick(page,"still-reading.png");
+  await resolveEarlierReceipt(page); await hasReceipt(page);
+  await retainedDraft(page);
+  await page.getByRole("button",{name:"Send current draft"}).click();
+  assert.match(await page.locator("#bzFbShotHint").textContent(),/wait for the screenshot/i);
+  assert.equal((await calls()).length,1,"do not send an older attachment while its replacement is being read");
+  await resolvePhoto(page,"still-reading.png","NEW");
+  assert.equal(await page.locator("#bzFbShotImg").getAttribute("src"),"data:image/png;base64,TkVX");
+  assert.equal((await calls()).length,1);
+});
+test("close and reopen retain newer edits when their original receipt arrived while hidden", async t => {
+  const {page,calls}=await form(t,["deferred-ok"]);
+  const errors=[];
+  page.on("pageerror",e=>errors.push(e.message));
+  await page.locator("#bzFbSend").click();
+  await page.locator("#bzFbText").fill(secondDraft);
+  await page.getByRole("button",{name:"Close",exact:true}).click();
+  await resolveEarlierReceipt(page);
+  await page.getByRole("button",{name:"Feedback",exact:true}).click();
+  await hasReceipt(page);
+  await retainedDraft(page);
+  assert.equal(await page.locator("#bzFbText").inputValue(),secondDraft);
+  assert.equal((await calls()).length,1);
+  assert.deepEqual(errors,[]);
+});
+test("a receipt with no intervening edits can reopen without focusing a removed textarea", async t => {
+  const {page}=await form(t,["deferred-ok"]);
+  const errors=[];
+  page.on("pageerror",e=>errors.push(e.message));
+  await page.locator("#bzFbSend").click();
+  await page.getByRole("button",{name:"Close",exact:true}).click();
+  await resolveEarlierReceipt(page);
+  await page.getByRole("button",{name:"Feedback",exact:true}).click();
+  await hasReceipt(page);
+  assert.equal(await page.locator("#bzFbText").count(),0);
+  assert.deepEqual(errors,[]);
+  assert.equal(await page.locator("#bzFbAgain").evaluate(el=>el===document.activeElement),true);
+});
+test("new diagnostic consent while a receipt is pending stays with the unsent draft", async t => {
+  const {page,calls}=await form(t,["deferred-ok"]);
+  await page.locator("#bzFbSend").click();
+  await page.locator("#bzFbDiag").check();
+  await resolveEarlierReceipt(page); await hasReceipt(page);
+  const [posted]=await calls();
+  assert.equal("diag" in posted.payload,false);
+  await retainedDraft(page);
+  assert.equal(await page.locator("#bzFbDiag").isChecked(),true);
+  assert.equal((await calls()).length,1);
+});

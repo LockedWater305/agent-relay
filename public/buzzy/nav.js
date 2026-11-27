@@ -1019,6 +1019,7 @@
     var text, diagBox, diagSee, mic, hint, send, status;
     var shot = null;
     var shotGeneration = 0;
+    var shotPending = false;
     function refs() {
       if (text && body.contains(text)) return;
       text = body.querySelector("#bzFbText");
@@ -1258,7 +1259,8 @@
       panel.classList.remove("min");
       min.textContent = "\u2013";
       btn.setAttribute("aria-expanded", "true");
-      text.focus();
+      var focus = text || body.querySelector("#bzFbAgain");
+      if (focus) focus.focus();
     }
     function shut() {
       invalidateVoiceDraft();
@@ -1306,6 +1308,7 @@
         submit();
       } else if (el.id === "bzFbShotDrop") {
         shotGeneration += 1;
+        shotPending = false;
         shot = null;
         var row = body.querySelector("#bzFbShotRow");
         var input = body.querySelector("#bzFbShot");
@@ -1330,14 +1333,18 @@
       var file = input.files && input.files[0];
       if (!file) return;
       var readGeneration = ++shotGeneration;
+      shotPending = false;
       if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
         if (h) h.textContent = "Pick a PNG, JPEG or WebP picture.";
         input.value = "";
         return;
       }
       var reader = new FileReader();
+      shotPending = true;
+      if (h) h.textContent = "Attaching screenshot\u2026";
       reader.onload = function () {
         if (!body.contains(input) || readGeneration !== shotGeneration) return;
+        shotPending = false;
         var data = String(reader.result || "");
         if (data.length > SHOT_MAX) {
           shot = null;
@@ -1350,6 +1357,12 @@
         if (img) img.src = data;
         if (row) row.hidden = false;
         if (h) h.textContent = "Attached. It is stored with your report.";
+      };
+      reader.onerror = reader.onabort = function () {
+        if (!body.contains(input) || readGeneration !== shotGeneration) return;
+        shotPending = false;
+        input.value = "";
+        if (h) h.textContent = "Could not attach the new screenshot.";
       };
       reader.readAsDataURL(file);
     });
@@ -1379,13 +1392,20 @@
     function submit() {
       if (sending) return;
       refs();
-      var words = (text.value || "").trim();
+      if (shotPending) {
+        body.querySelector("#bzFbShotHint").textContent = "Wait for the screenshot to finish attaching.";
+        return;
+      }
+      var submittedText = text.value || "";
+      var submittedShot = shot;
+      var words = submittedText.trim();
       if (!words) {
         status.textContent = "Tell us what happened first.";
         text.focus();
         return;
       }
-      var withDiag = Boolean(body.querySelector("#bzFbDiag") && body.querySelector("#bzFbDiag").checked);
+      var diagCheckbox = body.querySelector("#bzFbDiag");
+      var withDiag = Boolean(diagCheckbox && diagCheckbox.checked);
       var payload = {
         body: words,
         page_url: location.pathname,
@@ -1415,6 +1435,14 @@
         var ref = confirmedFeedbackRef(out);
         if (ref !== null) {
           sending = false;
+          // This receipt is for the immutable POST, not edits made while it was pending.
+          if (text.value !== submittedText || shot !== submittedShot || shotPending ||
+              Boolean(diagCheckbox && diagCheckbox.checked) !== withDiag) {
+            send.disabled = false;
+            send.textContent = "Send current draft";
+            status.textContent = "Your earlier report was saved as " + ref + ". Your current draft has not been sent.";
+            return;
+          }
           invalidateVoiceDraft();
           body.innerHTML =
             '<div class="bz-fb-done"><p><strong>Thank you \u2014 that reached us.</strong></p>' +
