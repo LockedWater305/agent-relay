@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Verify a built Windows installer — the checks that were being done by hand.
+ * Inspect Windows build output shape, not release channel or artifact lineage.
  *
  * Building an installer successfully says nothing about what is inside it. Every
  * failure below has actually shipped at some point in this project's history:
@@ -11,10 +11,10 @@
  *   - zero publisher pins → every fetched recipe is untrusted
  *
  * Run: node scripts/verify-installer.mjs [--allow-zero-pins]
- * Requires a previous `node desktop/dist.mjs all` (or `stage`).
+ * Requires a previous `node desktop/dist.mjs all`; stages and unpacked-only builds are not installers.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,14 +37,17 @@ if (!existsSync(OUT)) {
 }
 
 // ── the installer itself ────────────────────────────────────────────────────
-const exe = readdirSync(OUT).find((f) => f.toLowerCase().endsWith(".exe"));
-check("an installer was produced", Boolean(exe), exe ?? "none");
-if (exe) {
-  const size = statSync(join(OUT, exe)).size;
-  check("the installer is not a stub", size > 50 * 1024 * 1024, `${(size / 1024 / 1024).toFixed(0)} MB`);
-  const kind = execFileSync("file", ["-b", join(OUT, exe)], { encoding: "utf8" }).trim();
-  check("the installer is a PE executable", /PE32/.test(kind), kind.slice(0, 60));
-}
+const { version } = JSON.parse(readFileSync(join(ROOT, "desktop", "package.json"), "utf8"));
+const exe = `BeeZilla-Setup-${version}.exe`;
+const installer = join(OUT, exe);
+console.log("Windows output shape only — does not bind the installer to the unpacked tree or verify channel, source or signature");
+const metadata = lstatSync(installer, { throwIfNoEntry: false });
+check("canonical installer is a regular file", metadata?.isFile() === true, exe);
+if (!metadata?.isFile()) process.exit(1);
+const size = metadata.size;
+check("the installer exceeds the expected minimum size", size > 50 * 1024 * 1024, `${(size / 1024 / 1024).toFixed(0)} MB`);
+const kind = execFileSync("file", ["-b", installer], { encoding: "utf8" }).trim();
+check("the installer is a PE executable", /PE32/.test(kind), kind.slice(0, 60));
 
 // ── the app shell inside the asar ───────────────────────────────────────────
 if (!existsSync(ASAR)) {
@@ -91,7 +94,7 @@ if (!existsSync(APP)) {
 
   if (existsSync(server)) {
     const code = readFileSync(server, "utf8");
-    check("the server bundle is this build (not a stale .output)", code.length > 500_000, `${Math.round(code.length / 1024)} KB`);
+    check("the server bundle exceeds the expected minimum size", code.length > 500_000, `${Math.round(code.length / 1024)} KB`);
     // Feature markers: each one is a route the packaged app must actually contain.
     check("the recipe catalog client is present", code.includes("BZ_CATALOG_URL"));
     check("managed search routing is present", code.includes("BZ_SEARCH_GATEWAY_URL"));
@@ -128,7 +131,7 @@ if (!existsSync(APP)) {
   } catch {}
   check("the publisher pin file is staged", pins >= 0, pins >= 0 ? `${pins} pin(s)` : "missing/unreadable");
   if (allowZeroPins) {
-    console.log(`NOTE  ${pins} pins — allowed by --allow-zero-pins; a real release must refuse this`);
+    console.log(`NOTE  ${pins} pins — --allow-zero-pins is for local test only, not release eligibility`);
   } else {
     check("at least one publisher is pinned (or every recipe is untrusted)", pins > 0, `${pins} pin(s)`);
   }
@@ -157,5 +160,5 @@ if (!existsSync(APP)) {
   check("the runtime script closure is small", staged.length <= 12, `${staged.length} files`);
 }
 
-console.log(`\ninstaller verification: ${failures === 0 ? "passed" : `${failures} failed`}`);
+console.log(`\nWindows output shape check: ${failures === 0 ? "passed" : `${failures} failed`}`);
 process.exit(failures === 0 ? 0 : 1);
