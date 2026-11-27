@@ -63,7 +63,8 @@ class Element extends EventTarget {
   getClientRects() { return []; } // This fixture does not measure focus/visibility.
 }
 
-const signedIn = { user: { id: "fixture", name: "Fixture Account", email: "user@example.invalid" } };
+const signedIn = { session: { id: "verified-fixture-session", userId: "fixture" },
+  user: { id: "fixture", name: "Fixture Account", email: "user@example.invalid" } };
 const plan = { ok: true, plan: "pro", remaining: { inference: 19 }, planUntil: "2027-01-02" };
 const urls = { auth: "/api/auth/get-session", logout: "/api/auth/sign-out",
   plan: "/api/buzzy/entitlement", honey: "/api/wallet" };

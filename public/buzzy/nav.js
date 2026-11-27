@@ -355,6 +355,7 @@
     var localWorkspace = false;
     var logoutPending = false;
     var logoutMessage = "";
+    var logoutAttempt = 0;
     var sessionRefresh = 0;
     var confirmedOwner = null;
 
@@ -374,9 +375,16 @@
     showUnknown();
 
     function isSignedOutSession(res) {
-      return res === null || (res && res.user === null && !res.session);
+      return res === null || (res && res.user === null && (res.session === null || res.session === undefined));
+    }
+    function resetLogout() {
+      logoutAttempt++;
+      logoutPending = false;
+      logoutMessage = "";
     }
     function clearSignedOut() {
+      var leaveAfterLogout = logoutPending;
+      resetLogout();
       sessionRefresh++;
       sessionKnown = true;
       localWorkspace = false;
@@ -384,6 +392,9 @@
       publishOwner(null);
       paint(null, null);
       chrome.dispatchEvent(new Event("bz:session-ended"));
+      // End the document (and any running voice engine) only after a manual
+      // logout attempt and an authoritative no-session response.
+      if (leaveAfterLogout) window.location.href = "/buzzy/";
     }
 
     function signOut(e) {
@@ -391,6 +402,7 @@
       // handler mistake that detached node for a click outside the menu.
       if (e) { e.preventDefault(); e.stopPropagation(); }
       if (logoutPending || localWorkspace) return;
+      var attempt = ++logoutAttempt;
       logoutPending = true;
       logoutMessage = "";
       ensureMenu();
@@ -398,20 +410,21 @@
         method: "POST", credentials: "same-origin",
         headers: { "content-type": "application/json" }, body: "{}",
       }).then(function (r) {
+        if (attempt !== logoutAttempt) return;
         if (!r.ok || r.redirected) throw new Error("logout not confirmed");
         // A successful HTTP response alone does not prove this browser's
         // session ended (a proxy can return an HTML success page).
         return fetch("/api/auth/get-session", { credentials: "same-origin", cache: "no-store" });
       }).then(function (r) {
+        if (attempt !== logoutAttempt) return;
         if (!r.ok || r.redirected) throw new Error("session not confirmed");
         return r.json();
       }).then(function (s) {
+        if (attempt !== logoutAttempt) return;
         if (!isSignedOutSession(s)) throw new Error("session not confirmed");
         clearSignedOut();
-        // End the document (including its running voice engine) only after
-        // the server has confirmed no signed-in session remains.
-        window.location.href = "/buzzy/";
       }).catch(function () {
+        if (attempt !== logoutAttempt) return;
         logoutPending = false;
         logoutMessage = "Couldn't confirm you were logged out. Try again.";
         ensureMenu();
@@ -473,14 +486,19 @@
           // An outage or an older request proves nothing about the current session.
           if (res === undefined || refresh !== sessionRefresh) return;
           var u = res && res.user;
-          if (u && typeof u.id === "string" && u.id && (u.name || u.email)) {
+          var s = res && res.session;
+          var email = u && typeof u.email === "string" ? u.email : "";
+          var name = u && typeof u.name === "string" && u.name ? u.name : email;
+          if (u && typeof u.id === "string" && u.id && name &&
+              s && typeof s.id === "string" && s.id && s.userId === u.id) {
             sessionKnown = true;
+            // A failed or unfinished logout belongs only to its original owner.
+            if (confirmedOwner !== u.id) resetLogout();
             confirmedOwner = u.id;
-            localWorkspace = !!(u.id === "local_owner" && res.session &&
-              res.session.id === "local-session" && res.session.userId === u.id);
+            localWorkspace = u.id === "local_owner" && s.id === "local-session";
             publishOwner(u.id);
             chrome.dispatchEvent(new CustomEvent("bz:session-owner", { detail: u.id }));
-            paint(u.name || u.email, u.email);
+            paint(name, email);
           } else if (isSignedOutSession(res)) {
             clearSignedOut();
           }
