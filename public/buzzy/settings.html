@@ -46,7 +46,7 @@
       label.opt:has(input:checked) { border-color: var(--accent); background: #f3f8f5; }
       label.opt strong { display: block; font-weight: 600; }
       label.opt span { color: var(--muted); font-size: 13px; }
-      input[type="text"], input[type="password"], input[type="url"] {
+      input[type="text"], input[type="password"], input[type="url"], #feedback-draft {
         width: 100%;
         padding: 9px 11px;
         border: 1px solid var(--line);
@@ -54,7 +54,9 @@
         font: inherit;
         background: #fff;
       }
-      input:focus { outline: 2px solid #bcd8c9; outline-offset: 1px; }
+      input:focus, #feedback-draft:focus { outline: 2px solid #bcd8c9; outline-offset: 1px; }
+      #feedback-draft { resize: vertical; }
+      #feedback-panel .row { flex-wrap: wrap; }
       .field { margin-top: 10px; }
       .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
       details { margin-top: 12px; }
@@ -226,6 +228,8 @@
           <span class="status" id="mic-copy-status"></span>
         </div>
       </section>
+
+      <div id="feedback-mount" hidden></div>
 
       <!-- ── troubleshooting ───────────────────────────────────────── -->
       <!-- A packaged app that fails must not be a dead end: every launch writes
@@ -537,6 +541,60 @@
       // Diagnostics — desktop only. `window.beezilla.app` exists only under the
       // Electron shell, so a browser view of this page simply never shows it.
       const appBridge = window.beezilla?.app;
+      // The confined desktop main frame supplies the preload, not the hosted
+      // website. A browser has only an empty slot, not a live report field.
+      if (window.top === window && typeof appBridge?.version === "function" && location.protocol === "http:" &&
+          location.hostname === "127.0.0.1" && location.port &&
+          /^\/buzzy\/settings(?:\.html)?\/?$/.test(location.pathname)) {
+        const mount = $("feedback-mount");
+        // Fixed markup only. User input never becomes HTML.
+        mount.insertAdjacentHTML("afterend", `
+          <section id="feedback-panel" aria-labelledby="feedback-title" data-bz-before-remove>
+            <h2 id="feedback-title">Feedback</h2>
+            <p class="hint" id="feedback-hint">Draft a report to share yourself. Nothing is sent or attached automatically. This draft is not saved.</p>
+            <div class="field">
+              <label for="feedback-draft">What happened?</label>
+              <textarea id="feedback-draft" rows="5" aria-describedby="feedback-hint" autocomplete="off"
+                autocapitalize="off" spellcheck="false"></textarea>
+            </div>
+            <div class="row">
+              <button id="feedback-select" type="button" class="secondary">Select report text</button>
+              <button id="feedback-clear" type="button" class="secondary">Clear draft</button>
+              <span class="status" id="feedback-status" role="status"></span>
+            </div>
+          </section>`);
+        mount.remove();
+        const panel = $("feedback-panel"), draft = $("feedback-draft"), status = $("feedback-status");
+        const discardDraft = () => { draft.value = ""; status.textContent = ""; };
+        window.addEventListener("pagehide", discardDraft);
+        panel.addEventListener("bz:before-remove", () => {
+          discardDraft();
+          window.removeEventListener("pagehide", discardDraft);
+        }, { once: true });
+        $("feedback-clear").addEventListener("click", () => {
+          discardDraft();
+          draft.focus();
+          status.textContent = "Draft cleared. Nothing was sent.";
+        });
+        draft.addEventListener("input", () => { status.textContent = ""; });
+        $("feedback-select").addEventListener("click", () => {
+          draft.focus();
+          if (!draft.value.trim()) {
+            status.textContent = "Write something to include in your report first.";
+            return;
+          }
+          // Selection only; the native Edit > Copy (Ctrl/Cmd+C) is the user's action.
+          // Do not grant renderer clipboard access or claim that anything was copied.
+          try {
+            draft.select();
+            if (draft.selectionStart === 0 && draft.selectionEnd === draft.value.length) {
+              status.textContent = "Text selected. Use Edit → Copy or Ctrl/Cmd+C. Nothing was sent.";
+              return;
+            }
+          } catch { /* The typed report remains visible for manual selection. */ }
+          status.textContent = "Could not select the text. Select it manually, then use Copy. Nothing was sent.";
+        });
+      }
       if (appBridge?.logs) {
         $("diagnostics").hidden = false;
         const pathLabel = $("logs-path");
