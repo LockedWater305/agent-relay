@@ -149,6 +149,122 @@ async function until(check, message, timeoutMs = 3000) {
   assert.ok(check(), message);
 }
 
+// Real launcher and server processes, with a controllable interval between the
+// server exit notification and the launcher itself exiting.
+const launcherExitFixture = `
+import { fork } from 'node:child_process';
+import { writeFileSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { join } from 'node:path';
+const dir = process.env.BZ_DATA_DIR;
+const server = fork(join(import.meta.dirname, 'server-exit-fixture.mjs'));
+const runtimeFile = join(dir, 'runtime.json');
+let exited = false, stopping = false;
+process.on('message', ({type}) => {
+  if (type === 'fixture:exit-server') server.send('exit');
+  if (type === 'beezilla:stop') {
+    stopping = true;
+    if (exited) process.exit(0);
+    else server.send('exit');
+  }
+});
+process.send({type:'beezilla:launcher-ready'});
+process.send({type:'beezilla:runtime-spawned',pid:server.pid});
+server.on('message', ({port}) => writeFileSync(runtimeFile, JSON.stringify({
+  pid:server.pid, host:'127.0.0.1', port, dataDir:dir,
+  token:randomBytes(32).toString('base64url'), startedAt:new Date().toISOString()
+})));
+server.on('exit', () => {
+  exited = true;
+  rmSync(runtimeFile, {force:true});
+  process.send({type:'beezilla:runtime-exited',pid:server.pid}, () => {
+    if (stopping) process.exit(0);
+  });
+});
+`;
+
+function setupServerExit() {
+  const ctx = setup();
+  writeFileSync(join(ctx.root, 'scripts', 'beezilla-local.mjs'), launcherExitFixture);
+  writeFileSync(join(ctx.root, 'scripts', 'server-exit-fixture.mjs'), `
+    import { createServer } from 'node:http';
+    const server = createServer((_req, res) => res.end('ok'));
+    server.listen(0, '127.0.0.1', () => process.send({port:server.address().port}));
+    process.on('message', message => {
+      if (message !== 'exit') return;
+      server.closeAllConnections();
+      server.close(() => process.exit(0));
+    });
+    // Only fixture-owned processes; don't leave a server if its launcher is reaped.
+    process.on('disconnect', () => process.exit(0));
+  `);
+  return ctx;
+}
+
+test('confirmed server exit invalidates readiness before the launcher drains and permits a safe retry', async () => {
+  const ctx = setupServerExit(), { sup } = ctx;
+  try {
+    const first = await sup.start({ timeoutMs: 3000 });
+    const launcher = sup.child;
+    assert.equal(await sup.isHealthy(), true);
+    launcher.send({type:'fixture:exit-server'});
+    await until(() => sup.launch.serverExited, 'read the notification from the reaped server');
+    assert.equal(sup.child, launcher);
+    assert.equal(launcher.exitCode, null, 'the launcher is still draining');
+    assert.equal(await sup.isHealthy(first), false);
+    assert.equal(sup.runtime === null, true, 'do not retain a dead server as ready');
+    await assert.rejects(sup.start({ timeoutMs: 3000 }), /still stopping/);
+    assert.equal(sup.child, launcher, 'do not start a replacement before the launcher exits');
+    await sup.stop({ timeoutMs: 3000 });
+    const second = await sup.start({ timeoutMs: 3000 });
+    assert.notEqual(second.token, first.token);
+    assert.equal(await sup.isHealthy(), true);
+    await sup.stop({ timeoutMs: 3000 });
+  } finally { await cleanup(ctx); }
+});
+
+test('a successful in-flight readiness probe cannot publish a server whose exit is confirmed', async () => {
+  const ctx = setupServerExit(), { sup } = ctx;
+  const checked = Promise.withResolvers(), finish = Promise.withResolvers();
+  const realProbe = sup.probe;
+  sup.probe = async (rt) => {
+    const result = await realProbe.call(sup, rt);
+    if (result.ok) { checked.resolve(); await finish.promise; }
+    return result;
+  };
+  const pending = sup.start({ timeoutMs: 3000 });
+  void pending.catch(() => {});
+  try {
+    await Promise.race([checked.promise, pending]);
+    sup.child.send({type:'fixture:exit-server'});
+    await until(() => sup.launch.serverExited, 'confirmed exit while a prior healthy result is outstanding');
+    finish.resolve();
+    await assert.rejects(pending, /server exited during startup/);
+    assert.equal(sup.runtime === null, true);
+    assert.equal(sup.shutdownUncertain, false);
+    sup.probe = realProbe;
+    assert.ok((await sup.start({ timeoutMs: 3000 })).port);
+    await sup.stop({ timeoutMs: 3000 });
+  } finally { finish.resolve(); await cleanup(ctx); await pending.catch(() => {}); }
+});
+
+test("temporary health failure recovers without replacing a live server", async () => {
+  const ctx = await setupSeparate({ flushMs: 150 });
+  try {
+    const current = await ctx.sup.start({ timeoutMs: 3000 });
+    assert.equal(await ctx.sup.isHealthy(), true);
+    const unavailable = join(ctx.dir, "not-ready");
+    writeFileSync(unavailable, "1");
+    assert.equal(await ctx.sup.isHealthy(), false);
+    assert.equal(ctx.sup.runtime, current, "unhealthy listener does not prove the server exited");
+    rmSync(unavailable);
+    assert.equal(await ctx.sup.isHealthy(), true);
+    assert.equal(await ctx.sup.start({ timeoutMs: 3000 }), current);
+    assert.equal(readFileSync(join(ctx.dir, "server-pids"), "utf8").trim().split("\n").length, 1);
+    await ctx.sup.stop({ timeoutMs: 3000 });
+  } finally { await cleanup(ctx); }
+});
+
 for (const ready of [true, false]) {
   test(`separate server stays owned through cancellation ${ready ? "during a failed readiness probe" : "before runtime.json exists"}`, async () => {
     const ctx = await setupSeparate({ ready });

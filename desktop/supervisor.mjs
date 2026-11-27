@@ -156,6 +156,9 @@ export class RuntimeSupervisor {
       }
       if (message.type === "beezilla:runtime-exited" && launch.serverPid === message.pid) {
         launch.serverExited = true;
+        // IPC can report the runtime gone before the launcher exits. Keep the
+        // launcher lifetime checks, but do not keep offering its dead endpoint.
+        if (this.runtime?.pid === message.pid) this.runtime = null;
         if (this.exitingPid === message.pid) this.exitingPid = null;
       }
     });
@@ -182,10 +185,14 @@ export class RuntimeSupervisor {
     await spawnSettled;
     if (signal.aborted) throw new Error("Local runtime startup canceled.");
     if (spawnError) throw new Error(`Could not start the local runtime: ${spawnError.message}`);
+    const checkServerExit = () => {
+      if (launch.serverExited) throw new Error("The local runtime server exited during startup.");
+    };
     let lastProbe = { ok: false, error: "not attempted", code: null, ms: 0, rt: null };
     let sawRuntimeFile = false;
     while (Date.now() < deadline) {
       if (signal.aborted) throw new Error("Local runtime startup canceled.");
+      checkServerExit();
       if (this.shutdownUncertain) throw new Error("The runtime sent inconsistent process ownership. Startup was refused.");
       if (spawnError) throw new Error(`Could not start the local runtime: ${spawnError.message}`);
       if (!alive(child)) throw new Error(`The local runtime exited during startup (code ${child.exitCode}, signal ${child.signalCode ?? "none"}).`);
@@ -194,6 +201,7 @@ export class RuntimeSupervisor {
       if (rt && Date.parse(rt.startedAt) >= launchedAt - 1000) {
         const probe = await this.probe(rt);
         if (signal.aborted) throw new Error("Local runtime startup canceled.");
+        checkServerExit();
         if (probe.ok && this.child === child && alive(child)) {
           this.runtime = rt;
           return rt;
@@ -203,6 +211,7 @@ export class RuntimeSupervisor {
       await delay(100);
     }
 
+    checkServerExit();
     const running = alive(child);
     const where = lastProbe.rt ? `http://${lastProbe.rt.host}:${lastProbe.rt.port}` : "(no runtime.json written)";
     const hint = running
