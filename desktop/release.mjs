@@ -129,6 +129,27 @@ if (DRY) {
   process.exit(0);
 }
 
+// The upload path below uses --clobber; it inherits an existing release's
+// visibility rather than the requested --prerelease flag. Check before any tag
+// or release write, and distinguish a missing release from an unavailable API.
+const existing = (() => {
+  let json;
+  try {
+    json = run("gh", ["release", "view", tag, "-R", REPO, "--json", "isPrerelease"], { capture: true });
+  } catch (err) {
+    const stderr = String(err.stderr ?? "");
+    if (/^release not found\s*$/im.test(stderr) || /\bHTTP 404\b/i.test(stderr)) return null;
+    throw new Error("cannot determine existing release channel; nothing was changed", { cause: err });
+  }
+  const data = JSON.parse(json);
+  if (typeof data?.isPrerelease !== "boolean") throw new Error("existing release has no channel metadata; nothing was changed");
+  return data;
+})();
+if (existing && existing.isPrerelease !== prerelease) {
+  console.error(`refusing: release channel mismatch for ${tag} (existing prerelease=${existing.isPrerelease}, requested prerelease=${prerelease}); the existing download was not replaced`);
+  process.exit(1);
+}
+
 /* -- tag: idempotent -------------------------------------------------------- */
 const hasTag = run("git", ["-C", ROOT, "tag", "--list", tag], { capture: true }).trim() === tag;
 if (hasTag) {
@@ -157,17 +178,8 @@ if (!hasTag) {
 }
 
 /* -- release ---------------------------------------------------------------- */
-const exists = (() => {
-  try {
-    run("gh", ["release", "view", tag, "-R", REPO], { capture: true });
-    return true;
-  } catch {
-    return false;
-  }
-})();
-
 const assets = [installer, existsSync(blockmap) ? blockmap : null].filter(Boolean);
-if (exists) {
+if (existing) {
   log(`release ${tag} exists — uploading assets (clobber)`);
   run("gh", ["release", "upload", tag, ...assets, "--clobber", "-R", REPO]);
 } else {

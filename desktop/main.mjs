@@ -699,17 +699,28 @@ async function performConnect() {
   return { ...outcome, ...(restartFailure ? { ok: false, error: `Account credentials were saved, but BeeZilla did not restart. ${restartFailure} Retry from Settings without force-quitting.` } : {}), token: undefined, search: { ...outcome.search, ...(saved.searchError ? { ok: false, error: saved.searchError } : {}), token: undefined, saved: searchSaved }, savedTo: saved.saved?.key };
 }
 
-async function openSettings() {
-  if (acquireLibraryTransition.held()) return;
+let openingSettings = null;
+function openSettings() {
+  if (quitting || acquireLibraryTransition.held()) return;
   if (settingsWindow) {
+    if (settingsWindow.isMinimized()) settingsWindow.restore();
     settingsWindow.focus();
     return;
   }
-  // If the runtime is not up yet (first launch), bring it up rather than showing
-  // an error page: the user asked to configure the thing that starts it.
+  // The supervisor shares startup, but each awaiting menu click would still
+  // create its own window. Share the entire open, not just the child process.
+  if (!openingSettings) {
+    openingSettings = openSettingsWindow().catch((err) => {
+      if (!quitting) dialog.showErrorBox("BeeZilla could not open Settings", String(err?.message ?? err));
+    }).finally(() => { openingSettings = null; });
+  }
+  return openingSettings;
+}
+
+async function openSettingsWindow() {
   if (!supervisor.runtime) {
     const rt = await supervisor.start();
-    if (acquireLibraryTransition.held()) return;
+    if (quitting || acquireLibraryTransition.held()) return;
     bindRuntime(rt, true);
   }
   settingsWindowFor(`${runtimeBase}/buzzy/settings`);

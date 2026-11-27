@@ -35,10 +35,13 @@ function run(t, assets, prerelease = true, opts = {}) {
       if(cmd==="git" && args.includes("status")) return "";
       if(cmd==="git" && args.includes("--list")) return "desktop-v0.0.1";
       if(cmd==="gh" && args[0]==="release" && args[1]==="view"){
+        if (process.env.BZ_FIXTURE_LOOKUP === "forbidden") throw Object.assign(Error("lookup failed"),{stderr:"HTTP 403: forbidden"});
+        if (process.env.BZ_FIXTURE_LOOKUP === "missing") throw Object.assign(Error("lookup failed"),{stderr:"release not found"});
+        if (process.env.BZ_FIXTURE_LOOKUP === "invalid") return "{}";
         if(args.includes("--json")) return JSON.stringify({assets, isPrerelease:prerelease, url:"fixture://release"});
         return "";
       }
-      if(cmd==="gh" && args[0]==="release" && args[1]==="upload") return "";
+      if(cmd==="gh" && args[0]==="release" && ["create","upload"].includes(args[1])) return "";
       if(cmd==="gh" && args[0]==="api" && args[1].endsWith("/releases/tags/desktop-v0.0.1"))
         return JSON.stringify({assets, prerelease, html_url:"fixture://release"});
       throw Error("Unexpected fixture command: "+[cmd,...args].join(" "));
@@ -76,4 +79,25 @@ test("source release entry still rejects size mismatch",t=>{
 test("unrelated asset with the expected digest cannot stand in for the installer",t=>{
   const result=run(t,[{name:"another.exe",size:file.length,digest:"sha256:"+sha}]);
   assert.notEqual(result.code,0,result.text);assert.doesNotMatch(result.text,/verified on GitHub/i);
+});
+
+const expected = [{name,size:file.length,digest:"sha256:"+sha}];
+const changed = ([cmd,...args]) =>
+  cmd==="gh" && args[0]==="release" && ["create","upload","edit","delete"].includes(args[1]) ||
+  cmd==="git" && (args.includes("push") || (args.includes("tag") && !args.includes("--list")));
+test("a dev build cannot clobber a stable release even if its size and digest match", t=>{
+  const r=run(t,expected,false); assert.notEqual(r.code,0,r.text);
+  assert.match(r.text,/channel mismatch/i); assert.deepEqual(r.calls.filter(changed),[]);
+});
+for (const lookup of ["forbidden","invalid"]) {
+  test("an inconclusive channel lookup ("+lookup+") fails before git or release mutations",t=>{
+    const r=run(t,expected,true,{BZ_FIXTURE_LOOKUP:lookup});
+    assert.notEqual(r.code,0,r.text); assert.deepEqual(r.calls.filter(changed),[]);
+  });
+}
+test("a missing release is created as a prerelease rather than clobbered",t=>{
+  const r=run(t,expected,true,{BZ_FIXTURE_LOOKUP:"missing"});
+  assert.equal(r.code,0,r.text);
+  const writes=r.calls.filter(changed); assert.equal(writes.length,1);
+  assert.deepEqual(writes[0].slice(0,3),["gh","release","create"]); assert.ok(writes[0].includes("--prerelease"));
 });

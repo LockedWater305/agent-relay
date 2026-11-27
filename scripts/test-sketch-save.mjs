@@ -54,6 +54,8 @@ export async function fixture(t,board=savedBoard){
   if(id==='h3')return dependency({defineEventHandler:f=>f,getMethod:e=>e.req.method,setResponseStatus(){}});
   if(id==='@/lib/db')return dependency({getSql:async()=>sql});
   if(id==='@/lib/auth/verify.server')return dependency({getSessionUserFromHeaders:async()=>user?{id:user}:null});
+  // Board reads and saves must not enter the image-generation policy path.
+  if(id==='./modelPrefs')return dependency({readLocalOnlyPreference:provider});
   if(id==='./entitlements')return dependency({checkQuota:provider,recordUsage:provider});
   if(id==='./art')return dependency({artConfigured:()=>false,imageModel:()=> 'no-provider-audit',generateImage:provider,storeImage:provider});
   throw Error(id);

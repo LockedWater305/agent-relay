@@ -98,7 +98,7 @@ export async function desktop(t,fixtures,options={}) {
  }
  const state={inference:null,music:null,search:null};
  const runtimeLibraries={
-  'scripts/lib/inference.mjs':{loadInference:()=>state.inference,saveInference:(_d,cfg)=>state.inference={...cfg,encrypted:false},clearInference:()=>{state.inference=null;},resolveInference:()=>state.inference,isExpired:()=>false,redactKey:()=> '[synthetic redacted]',storePath:d=>d+'/inference.json'},
+  'scripts/lib/inference.mjs':{loadInference:()=>state.inference,hasRemovableInference:()=>state.inference!==null,saveInference:(_d,cfg)=>state.inference={...cfg,encrypted:false},clearInference:()=>{state.inference=null;},resolveInference:()=>state.inference,isExpired:()=>false,redactKey:()=> '[synthetic redacted]',storePath:d=>d+'/inference.json'},
   'scripts/lib/search-keys.mjs':{resolveSearch:()=>state.search,saveSearchKey:(_d,cfg)=>state.search={...cfg,encrypted:false},clearSearchKey:()=>{state.search=null;},saveManagedSearch:()=>{throw Error('Managed account forbidden');},loadManagedSearch:()=>null},
   'scripts/lib/music-keys.mjs':{loadMusicKey:()=>state.music,resolveMusicKey:()=>state.music,saveMusicKey:(_d,cfg)=>state.music={...cfg,encrypted:false},clearMusicKey:()=>{state.music=null;}},
  };
@@ -337,4 +337,63 @@ test('already hydrated replacement remains read-only throughout the post-acquire
  const quitting=d.quit();await entered.promise;d.main.useDocument(fresh);const wc=d.main.webContents;
  assert.equal(input(wc),true);assert.equal(input(wc,'before-input-event'),true);if(!input(wc))await page.draw();assert.doesNotMatch(page.el('savedFlag').textContent,/Unsaved/);
  finish.resolve();await quitting;assert.equal(d.didExit(),true);assert.equal(f.data().board.strokes.length,3);assert.equal(f.posts().length,1);
+});
+
+// Recovery from an exited runtime is reachable from the ordinary Settings menu.
+// Interleave actual menu invocations while the replacement runtime is starting.
+test('Settings menu coalesces concurrent opens and restores a minimized Settings window', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t), d = await desktop(t, [f, g]);
+  const command = d.menu.template.flatMap(x => x.submenu || []).find(x => x.accelerator === 'CmdOrCtrl+,');
+  const oldRuntime = d.runtime(), gate = f.defer();
+  d.replaceRuntime(null);
+  let starts = 0;
+  d.api.supervisor().start = async () => { starts++; await gate.promise; d.replaceRuntime(oldRuntime); return oldRuntime; };
+  command.click(); command.click(); command.click();
+  assert.equal(d.windows.length, 1, 'only the main window while starting');
+  gate.resolve(); await drain();
+  assert.equal(d.windows.length, 2, 'exactly one Settings window');
+  assert.equal(starts, 1);
+  const win = d.api.currentSettings();
+  assert.equal(new URL(win.url).pathname, '/buzzy/settings');
+  let minimized = true, focused = 0;
+  win.isMinimized = () => minimized;
+  win.restore = () => { minimized = false; };
+  win.focus = () => { focused++; };
+  command.click();
+  assert.equal(minimized, false); assert.equal(focused, 1);
+});
+
+test('failed Settings recovery is reported once and can be retried', async t => {
+  const f = await fixture(t); await f.mount();
+  const g = await fixture(t), d = await desktop(t, [f, g]);
+  const command = d.menu.template.flatMap(x => x.submenu || []).find(x => x.accelerator === 'CmdOrCtrl+,');
+  const oldRuntime = d.runtime(), gate = f.defer();
+  d.replaceRuntime(null);
+  d.api.supervisor().start = async () => { await gate.promise; throw Error('fixture: recovery unavailable'); };
+  command.click(); command.click();
+  gate.resolve(); await drain();
+  assert.equal(d.errors.length, 1); assert.match(d.errors[0].message, /recovery unavailable/);
+  assert.equal(d.windows.length, 1); assert.equal(d.didExit(), false);
+  d.api.supervisor().start = async () => { d.replaceRuntime(oldRuntime); return oldRuntime; };
+  command.click(); await drain();
+  assert.equal(d.windows.length, 2);
+});
+
+test('an in-flight Settings open cannot resurrect a window after quit', async t => {
+  const f = await fixture(t); await f.mount();
+  const d = await desktop(t, [f]);
+  const command = d.menu.template.flatMap(x => x.submenu || []).find(x => x.accelerator === 'CmdOrCtrl+,');
+  const oldRuntime = d.runtime(), gate = f.defer();
+  d.replaceRuntime(null);
+  d.api.supervisor().start = async () => { await gate.promise; return oldRuntime; };
+  command.click();
+  // The window request is waiting, but the runtime has now recovered, so the
+  // ordinary quit path can complete its save/stop barrier before we resume it.
+  d.replaceRuntime(oldRuntime); await d.quit();
+  assert.equal(d.didExit(), true);
+  gate.resolve(); await drain();
+  command.click(); await drain();
+  assert.equal(d.windows.length, 1);
+  assert.equal(d.api.currentSettings(), null);
 });
