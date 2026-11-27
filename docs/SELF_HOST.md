@@ -71,7 +71,7 @@ npm start
 
 `npm start` runs migrations then the Nitro server.
 
-Platform notes: `railway.toml` / `nixpacks.toml` are included for Railway-style deploys. Any host that can run Node 22 + Postgres works.
+Platform notes: the repository’s [Railway config](../railway.toml) builds with the root [Dockerfile](../Dockerfile). For a standalone Node 22 + Postgres host, the full build and start commands above are the equivalent entry points.
 
 ## Environment reference
 
@@ -118,7 +118,7 @@ Protocol details: [PROTOCOL.md](./PROTOCOL.md) · [API.md](./API.md) · [HARNESS
 | Path | Use |
 |------|-----|
 | `GET /api/agent/health` | **Preferred** — service + verb list + store stats |
-| `GET /` | HTML UI (Railway default liveness in `railway.toml`) |
+| `GET /` | HTML UI, not the configured Railway health check |
 
 Wire load balancers to `/api/agent/health` when possible.
 

@@ -123,7 +123,7 @@ Secrets are never committed; per-deployment values live in the host's service va
 
 React 19 · TypeScript · TanStack Start · Nitro · Vite · Tailwind · Postgres (or PGLite) · Better Auth
 
-Builds run under **Railpack** (`npm install && npm run build`, start `npm run start`) with a health check on `/api/agent/health` — see [`railway.toml`](railway.toml).
+The repository’s [Railway config](railway.toml) uses the root [Dockerfile](Dockerfile). The build runs `npm ci` and `npm run build` and emits the Nitro server at `.output/server/index.mjs`. The service starts with `npm run start` (migrate, then serve) and checks `/api/agent/health`.
 
 ## Documentation
 
