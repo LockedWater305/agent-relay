@@ -1,10 +1,22 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Inbox, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { agentApi } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 
 type FeedbackRow = Awaited<ReturnType<typeof agentApi.listFeedback>>["feedback"][number];
+
+function isRenderableFeedbackRow(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  // Validate the fields this UI renders, not unused pagination/row metadata.
+  return ["ref", "created_at", "body", "status"].every((key) => typeof row[key] === "string") &&
+    ["route", "page_url", "app_sha", "user_id", "ip_hash", "ua", "admin_note"].every(
+      (key) => row[key] === null || typeof row[key] === "string",
+    ) &&
+    typeof row.diag === "object" && !Array.isArray(row.diag) &&
+    typeof row.diag_redactions === "number";
+}
 
 const STATUSES = ["new", "triaged", "fixed", "wontfix", "duplicate"] as const;
 
@@ -32,28 +44,58 @@ export function FeedbackPanel() {
   const [rows, setRows] = useState<FeedbackRow[]>([]);
   const [status, setStatus] = useState<string>("");
   const [selected, setSelected] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [readError, setReadError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
 
+  const currentStatus = useRef("");
+  const requestVersion = useRef(0);
+  const mounted = useRef(false);
+
   const load = useCallback(async () => {
+    if (!mounted.current) return;
+    const version = ++requestVersion.current;
     setLoading(true);
-    setError(null);
+    setReadError(null);
     try {
-      const res = await agentApi.listFeedback({ status: status || undefined, limit: 100 });
-      setRows(res.feedback);
-      setSelected((cur) => (cur && res.feedback.some((r) => r.ref === cur) ? cur : res.feedback[0]?.ref ?? null));
+      const res = await agentApi.listFeedback({ status: currentStatus.current || undefined, limit: 100 });
+      if (version !== requestVersion.current) return;
+      // The HTTP client casts JSON; a successful transport is not a valid list.
+      const feedback = res?.feedback;
+      if (res?.ok !== true || !Array.isArray(feedback) || !feedback.every(isRenderableFeedbackRow)) {
+        throw new Error("Could not load feedback: invalid response.");
+      }
+      setRows(feedback);
+      setSelected((cur) => (cur && feedback.some((r) => r.ref === cur) ? cur : feedback[0]?.ref ?? null));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load feedback");
+      if (version !== requestVersion.current) return;
+      // When a read fails (including a permission loss), don't keep older rows actionable.
+      setRows([]);
+      setSelected(null);
+      setReadError(e instanceof Error ? e.message : "Could not load feedback");
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
-  }, [status]);
+  }, []);
 
   useEffect(() => {
+    mounted.current = true;
     void load();
+    return () => {
+      mounted.current = false;
+      requestVersion.current += 1;
+    };
   }, [load]);
+
+  const changeStatus = (next: string) => {
+    currentStatus.current = next;
+    setStatus(next);
+    setRows([]);
+    setSelected(null);
+    void load();
+  };
 
   const row = useMemo(() => rows.find((r) => r.ref === selected) ?? null, [rows, selected]);
 
@@ -64,13 +106,14 @@ export function FeedbackPanel() {
   const save = async (patch: { status?: string; admin_note?: string }) => {
     if (!row) return;
     setSaving(true);
+    setSaveError(null);
     try {
       await agentApi.updateFeedback(row.ref, patch);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not update");
+      if (mounted.current) setSaveError(e instanceof Error ? e.message : "Could not update feedback");
     } finally {
-      setSaving(false);
+      if (mounted.current) setSaving(false);
     }
   };
 
@@ -82,8 +125,9 @@ export function FeedbackPanel() {
           <span className="text-xs font-semibold text-fg">Feedback</span>
           <select
             className="h-7 rounded-[var(--radius-sm)] bg-bg-subtle px-2 text-[11px] text-fg"
+            aria-label="Filter feedback by status"
             value={status}
-            onChange={(e) => setStatus(e.target.value)}
+            onChange={(e) => changeStatus(e.target.value)}
           >
             <option value="">all statuses</option>
             {STATUSES.map((s) => (
@@ -96,10 +140,18 @@ export function FeedbackPanel() {
             <RefreshCw className={cn("mr-1 h-3 w-3", loading && "animate-spin")} /> Refresh
           </Button>
         </div>
-        {error ? <p className="px-3 py-2 text-[11px] text-status-human">{error}</p> : null}
+        {readError ? <p role="alert" className="px-3 py-2 text-[11px] text-status-human">{readError}</p> : null}
+        {saveError ? <p role="alert" className="px-3 py-2 text-[11px] text-status-human">{saveError}</p> : null}
         <div className="min-h-0 flex-1 overflow-auto">
-          {rows.length === 0 && !loading ? (
-            <p className="px-3 py-6 text-center text-[12px] text-fg-muted">No feedback yet.</p>
+          {loading ? (
+            <p role="status" className="px-3 py-2 text-[11px] text-fg-muted">
+              {rows.length ? "Refreshing feedback…" : "Loading feedback…"}
+            </p>
+          ) : null}
+          {rows.length === 0 && !loading && !readError ? (
+            <p className="px-3 py-6 text-center text-[12px] text-fg-muted">
+              {status ? "No feedback matches this status." : "No feedback yet."}
+            </p>
           ) : null}
           {rows.map((r) => (
             <button
@@ -133,7 +185,9 @@ export function FeedbackPanel() {
       </div>
       <div className="hidden w-[46%] min-w-[320px] flex-col overflow-auto px-4 py-3 sm:flex">
         {!row ? (
-          <p className="text-[12px] text-fg-muted">Select a report.</p>
+          !loading && !readError && rows.length > 0
+            ? <p className="text-[12px] text-fg-muted">Select a report.</p>
+            : null
         ) : (
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
