@@ -57,10 +57,13 @@ const installer = join(ROOT, "dist-desktop", `BeeZilla-Setup-${version}.exe`);
 const blockmap = `${installer}.blockmap`;
 
 /* -- trust anchor: never publish a dev pin as a normal release -------------- */
-const pinsPath = process.env.BZ_RECIPE_PUBLISHER_FILE ?? join(ROOT, "publishers.json");
-let pins = [];
+// Resolve once, using the caller cwd. dist.mjs runs with cwd=ROOT and must
+// not resolve a relative override against a different pins file there.
+const pinsPath = resolve(process.env.BZ_RECIPE_PUBLISHER_FILE ?? join(ROOT, "publishers.json"));
+let pins = [], pinsBytes;
 try {
-  pins = JSON.parse(readFileSync(pinsPath, "utf8")).publishers ?? [];
+  pinsBytes = readFileSync(pinsPath);
+  pins = JSON.parse(pinsBytes.toString("utf8")).publishers ?? [];
 } catch {
   pins = [];
 }
@@ -107,7 +110,9 @@ if (!prerelease && !DRY) {
 /* -- artifact --------------------------------------------------------------- */
 if (!SKIP_BUILD) {
   log(`building ${tag}`);
-  if (!DRY) run("node", [join(DESKTOP, "dist.mjs"), "all"]);
+  if (!DRY) run(process.execPath, [join(DESKTOP, "dist.mjs"), "all"], {
+    env: { ...process.env, BZ_RECIPE_PUBLISHER_FILE: pinsPath },
+  });
 }
 if (!existsSync(installer)) {
   console.error(`refusing: ${installer} does not exist — build it first (drop --skip-build)`);
@@ -116,6 +121,15 @@ if (!existsSync(installer)) {
 if (stableHead && run("git", ["-C", ROOT, "rev-parse", "--verify", "HEAD^{commit}"], { capture: true }).trim() !== stableHead) {
   console.error("refusing: HEAD changed during the stable build; no release was created");
   process.exit(1);
+}
+if (stableHead) {
+  const stagedPath = join(DESKTOP, "stage", "app", "publishers.json");
+  let matches = false;
+  try { matches = readFileSync(stagedPath).equals(pinsBytes); } catch {}
+  if (!matches) {
+    console.error("refusing: staged publisher pins are missing or changed from stable preflight; no release was created");
+    process.exit(1);
+  }
 }
 const bytes = statSync(installer).size;
 const sha = createHash("sha256").update(readFileSync(installer)).digest("hex");
@@ -135,11 +149,11 @@ const notes = `## BeeZilla Desktop ${version} — Windows x64
 Electron shell over the local runtime (Nitro + embedded PGlite). Ships beside it, not instead of it:
 the same pages, routes and migrations as the hosted app at https://app.devboards.ai.
 
-- Built from \`${head}\` on \`${branch}\`
+- ${SKIP_BUILD ? "Reported source (existing artifact linkage not verified)" : "Built from"} \`${head}\` on \`${branch}\`
 - Installer: \`BeeZilla Setup ${version}.exe\` — ${(bytes / 1024 / 1024).toFixed(1)} MB
 - SHA-256 \`${sha}\`
-- Publisher pins: ${pins.map((p) => `\`${p.keyId}\` (${p.label ?? "no label"})`).join(", ")}
-${devPin ? "- **Prerelease:** carries a DEV trust anchor — fetched recipes verify against a test key. Not for general distribution." : ""}
+- ${SKIP_BUILD ? "Configured publisher pins (not verified in the existing artifact)" : "Publisher pins"}: ${pins.map((p) => `\`${p.keyId}\` (${p.label ?? "no label"})`).join(", ")}
+${devPin ? "- **Prerelease:** build configuration contains a DEV trust anchor. Not for general distribution." : ""}
 - Authenticode status is not verified by this script. Check the installer signature independently.
 
 Install: double-click, pick a directory, then connect a BeeZilla account (menu → *Connect BeeZilla account…*)
