@@ -74,7 +74,7 @@ async function fixture(t){
  }
  const f={db,queries,requests,uiRequests,api,service:service.namespace,transport:null,mounts:[],hops:[],as:id=>{user=id;},failUpdate:v=>{failUpdate=v;}};
  f.defer=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});holds.push(resolve);return {promise,resolve,reject};};
- const intervals=new Map(),windowHandlers={};let intervalId=0,active=null;
+ const intervals=new Map(),timeouts=new Map(),windowHandlers={};let intervalId=0,active=null;
  class Element{
   constructor(id='',owner=active){this.id=id;this.owner=owner;this.children=[];this.handlers={};this.style={};this._value='';this.textContent='';this.disabled=false;this.clientWidth=700;this.classList={add(){},remove(){}};this.parent=null;}
   get isConnected(){return !!this.owner?.connected&&!this.detached;}
@@ -95,7 +95,8 @@ async function fixture(t){
  const ui=vm.createContext({document,location,URLSearchParams,fetch:(url,init={})=>{
   const req={url,init,method:init.method||'GET',body:init.body?JSON.parse(init.body):null};uiRequests.push(req);
   return Promise.resolve().then(()=>f.transport?f.transport(req,()=>api(url,init)):api(url,init));
- },setInterval:(fn,ms)=>{const id=++intervalId;intervals.set(id,{fn,ms});return id;},clearInterval:id=>intervals.delete(id),window});
+ },setInterval:(fn,ms)=>{const id=++intervalId;intervals.set(id,{fn,ms});return id;},clearInterval:id=>intervals.delete(id),
+ setTimeout:(fn,ms)=>{const id=++intervalId;timeouts.set(id,{fn,ms});return id;},clearTimeout:id=>timeouts.delete(id),AbortController,window});
  f.mount=async(job='job_track',options={})=>{
   if(active)active.connected=false;
   active={elements:new Map(),connected:true,hard:!!options.hard};
@@ -124,6 +125,8 @@ async function fixture(t){
  f.data=(id='job_track')=>JSON.parse(db.prepare('SELECT data FROM buzzy_jobs WHERE id=?').get(id).data);
  f.serverSave=plan=>service.namespace.savePlan('owner','job_track',plan);
  f.intervalCount=()=>intervals.size;
+ f.deadlines=()=>[...timeouts.values()].map(timer=>timer.ms);
+ f.expire=async()=>{for(const [id,{fn}]of [...timeouts]){timeouts.delete(id);fn();}await drain();};
  f.drain=drain;
  t.after(async()=>{holds.forEach(resolve=>resolve());await drain();assert.equal(providerCalls,0);assert.equal(protectedRows(),beforeProtected);assert.equal(f.data().unrelated.keep,'original');db.close();});
  return f;
@@ -377,4 +380,120 @@ for(const field of ['tempo','key'])for(const stage of ['initial','refresh','Save
 });
 test('a malformed nonboolean Save confirmation cannot certify its otherwise valid plan',async t=>{
  const f=await fixture(t),p=await f.mount();p.set(desired);f.transport=async(req,next)=>{const r=await next();const body=await r.json();body.ok='yes';return new Response(JSON.stringify(body),{status:200});};await p.save();assertDesired(p);assert.equal(p.el('status').className,'status bad');assert.equal(p.el('savePlan').disabled,false);f.transport=null;await p.save();assert.equal(f.data().music.prompt,desired.prompt);assert.equal(p.el('status').textContent,'Brief saved.');
+});
+
+for(const phase of ['headers','body'])test('Studio initial read deadline '+phase+' lets the current plan retry without painting a stale response',async t=>{
+ const f=await fixture(t),held=f.defer(),retryGate=f.defer();let attempts=0;
+ const originalFirst=plain(f.data().music);
+ f.transport=async(req,next)=>{
+  const n=++attempts,r=await next();
+  if(n===1){
+   if(phase==='headers'){await held.promise;return r;}
+   return {ok:r.ok,status:r.status,json:async()=>{await held.promise;return r.json();}};
+  }
+  if(n===2)await retryGate.promise;
+  return r;
+ };
+ const p=await f.mount('job_track',{wait:false});await f.drain();
+ assert.match(p.el('status').textContent,/loading saved track/i,'a slow identified route gives loading feedback instead of blank disabled inputs');
+ assert.equal(p.el('prompt').disabled,true);
+ assert.equal(p.el('retryLoad').hidden,true);
+ assert.deepEqual(f.deadlines(),[15_000],'one bounded first-read timeout');
+ assert.equal(attempts,1);
+ await f.expire();
+ assert.equal(f.uiRequests[0].init.signal.aborted,true);
+ assert.match(p.el('status').textContent,/too long to load/i);
+ assert.equal(p.el('retryLoad').hidden,false);
+ assert.equal(p.el('savePlan').disabled,true);
+ assert.equal(postCount(f),0);
+ assert.deepEqual(f.data().music,originalFirst);
+ await f.serverSave({prompt:'Actually saved after the first response was read',lyrics:'Retry reads the confirmed track'});
+ p.el('retryLoad').click();p.el('retryLoad').dispatch('click');await f.drain();
+ assert.equal(attempts,2,'even repeated Retry is single-flight');
+ assert.equal(p.el('retryLoad').hidden,true);
+ held.resolve();await f.drain();
+ assert.equal(p.el('prompt').value,'','the old matching-job response cannot hydrate during the newer attempt');
+ assert.equal(p.el('prompt').disabled,true);
+ assert.match(p.el('status').textContent,/loading saved track/i);
+ retryGate.resolve();await f.drain();
+ assert.equal(p.el('prompt').value,'Actually saved after the first response was read');
+ assert.equal(p.el('lyrics').value,'Retry reads the confirmed track');
+ assert.equal(p.el('prompt').disabled,false);
+ assert.equal(p.el('retryLoad').hidden,true);
+ assert.deepEqual(f.deadlines(),[]);
+ assert.equal(postCount(f),0);
+ assert.equal(f.hops.length,0);
+ assert.equal(f.mounts.length,1);
+});
+
+for(const mode of ['HTTP 503','wrong job','transport','malformed versions'])test('Studio initial '+mode+' offers an in-place retry for the same owned plan',async t=>{
+ const f=await fixture(t);let first=true;
+ f.transport=async(req,next)=>{
+  if(!first)return next();first=false;
+  if(mode==='HTTP 503')return new Response(JSON.stringify({error:'synthetic private backend error'}),{status:503});
+  if(mode==='transport')throw Error('synthetic private socket error');
+  const body=await(await next()).json();if(mode==='malformed versions')body.versions={};else body.jobId='job_other';return new Response(JSON.stringify(body),{status:200});
+ };
+ const p=await f.mount('job_track');
+ assert.match(p.el('status').textContent,/could not load this track/i);
+ assert.doesNotMatch(p.el('status').textContent,/synthetic private|reload/i);
+ assert.equal(p.el('retryLoad').hidden,false);
+ assert.equal(p.el('prompt').disabled,true);
+ assert.equal(p.el('prompt').value,'');
+ p.el('retryLoad').click();await f.drain();
+ assert.equal(p.el('prompt').value,original.prompt);
+ assert.deepEqual(f.uiRequests.map(r=>r.url),Array(2).fill('/api/buzzy/studio?job=job_track'));
+ assert.equal(postCount(f),0);
+});
+
+test('Studio initial timer stops on pagehide, resumes once, and is cleared after a good body',async t=>{
+ const f=await fixture(t),held=f.defer();
+ f.transport=async(req,next)=>{const r=await next();await held.promise;return r;};
+ const p=await f.mount('job_track',{wait:false});await f.drain();
+ assert.deepEqual(f.deadlines(),[15_000]);
+ f.pagehide();assert.deepEqual(f.deadlines(),[]);
+ assert.equal(f.uiRequests[0].init.signal.aborted,false);
+ f.pageshow();f.pageshow();await f.drain();
+ assert.deepEqual(f.deadlines(),[15_000]);
+ assert.equal(f.uiRequests.length,1,'restore should not duplicate a parked initial GET');
+ held.resolve();await f.drain();
+ assert.equal(p.el('prompt').value,original.prompt);
+ assert.deepEqual(f.deadlines(),[]);
+ assert.equal(postCount(f),0);
+});
+test('Studio initial deadline and request retire with their shell owner before another saved track mounts',async t=>{
+ const f=await fixture(t),held=f.defer();
+ f.transport=async(req,next)=>{const r=await next();if(req.url.endsWith('job_track'))await held.promise;return r;};
+ const a=await f.mount('job_track',{wait:false});await f.drain();
+ assert.deepEqual(f.deadlines(),[15_000]);
+ a.el('status').dispatch('bz:before-remove');
+ assert.equal(f.uiRequests[0].init.signal.aborted,true);
+ assert.deepEqual(f.deadlines(),[]);
+ const b=await f.mount('job_other');
+ assert.equal(b.el('prompt').value,'Other track brief');
+ b.set({prompt:'Untouched new owner edit'});
+ held.resolve();await f.drain();
+ assert.equal(a.el('prompt').value,'');
+ assert.equal(b.el('prompt').value,'Untouched new owner edit');
+ assert.equal(b.el('title').textContent,'job_other');
+ assert.equal(postCount(f),0);
+});
+
+for(const status of [401,403,404])test('Studio initial HTTP '+status+' is reflected before its error body completes',async t=>{
+ const f=await fixture(t),held=f.defer();let reads=0,initial=true;
+ f.transport=async(req,next)=>{
+  if(!initial)return next();initial=false;
+  return {ok:false,status,json:()=>{reads++;return held.promise;}};
+ };
+ const p=await f.mount('job_track');
+ assert.equal(reads,0,'HTTP status does not depend on parsing an error body');
+ assert.equal(f.uiRequests[0].init.signal.aborted,true,'abandon the unread error stream');
+ assert.equal(p.el('prompt').disabled,true);
+ assert.equal(p.el('retryLoad').hidden,false);
+ assert.deepEqual(f.deadlines(),[]);
+ assert.match(p.el('status').textContent,status===404?/could not find this track here/i:/could not verify access to this track/i);
+ assert.doesNotMatch(p.el('status').textContent,/too long|password|cookie|signed in|denied/i);
+ p.el('retryLoad').click();await f.drain();
+ assert.equal(p.el('prompt').value,original.prompt);
+ assert.equal(postCount(f),0);
 });

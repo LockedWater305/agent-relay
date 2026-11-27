@@ -85,7 +85,8 @@
       <input type="text" id="instruction" placeholder="Tell BeeZilla what to change in the selected passage — e.g. 'bring the cello forward, drop the synth bass'" />
       <button class="primary" id="editBtn" disabled>Change this passage</button>
     </div>
-    <div class="status" id="status"></div>
+    <div class="status" id="status" role="status" data-bz-before-remove></div>
+    <button id="retryLoad" type="button" hidden>Retry load</button>
 
     <h2 style="margin-top:1rem">Versions</h2>
     <div class="versions" id="versions"></div>
@@ -155,6 +156,7 @@
     var player = $("player");
     var wave = $("wave");
     var statusEl = $("status");
+    var retryLoad = $("retryLoad");
     var pageHidden = false;
     var formFields = ["prompt", "lyrics", "tempo", "key", "seconds"];
     var planFields = formFields.concat(["instruments"]);
@@ -163,18 +165,27 @@
     var pendingWrite = null;
     var writeEpoch = 0;
     var refreshing = false;
-    var loading = false;
+    var loading = null;
+    var STUDIO_LOAD_TIMEOUT_MS = 15000;
 
     function currentPage() {
       return !pageHidden && $("prompt").isConnected && document.getElementById("prompt") === $("prompt") &&
         /^\/buzzy\/studio(?:\.html)?\/?$/.test(location.pathname) &&
         new URLSearchParams(location.search).get("job") === jobId;
     }
-    window.addEventListener("pagehide", function () { pageHidden = true; });
+    window.addEventListener("pagehide", function () {
+      pageHidden = true;
+      if (loading) clearInitialDeadline(loading);
+    });
+    statusEl.addEventListener("bz:before-remove", function () {
+      if (loading) finishInitialRead(loading, true);
+    });
     function resumeLoad() {
       // Back can retain this DOM after the shell temporarily changed the URL.
       // Retry only its initial read; never replay cold-project creation POSTs.
-      if (jobId && !state && currentPage()) load();
+      if (!jobId || state || !currentPage()) return;
+      if (loading) armInitialDeadline(loading);
+      else load();
     }
     window.addEventListener("pageshow", function () { pageHidden = false; resumeLoad(); });
     window.addEventListener("popstate", resumeLoad);
@@ -251,13 +262,19 @@
       return Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
     }
 
-    function api(method, body) {
+    function api(method, body, signal) {
       return fetch("/api/buzzy/studio" + (method === "GET" ? "?job=" + encodeURIComponent(jobId) : ""), {
         method: method,
         credentials: "same-origin",
         headers: body ? { "content-type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,
-      }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); });
+        signal: signal,
+      }).then(function (r) {
+        // The initial read has its own signal and only needs the HTTP status
+        // on failure; a broken or slow error body must not obscure that status.
+        if (signal && !r.ok) return { ok: false, status: r.status };
+        return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+      });
     }
 
     // ── waveform ────────────────────────────────────────────────────────
@@ -456,6 +473,33 @@
       }
     }
 
+    function clearInitialDeadline(attempt) {
+      if (attempt.timer !== null) clearTimeout(attempt.timer);
+      attempt.timer = null;
+    }
+    function finishInitialRead(attempt, abort) {
+      if (loading !== attempt) return;
+      clearInitialDeadline(attempt);
+      loading = null;
+      if (abort) attempt.controller.abort();
+    }
+    function initialLoadFailed(message) {
+      if (!currentPage()) return;
+      setStatus(message, "bad");
+      retryLoad.hidden = false;
+    }
+    function armInitialDeadline(attempt) {
+      if (attempt.timer !== null) return;
+      attempt.timer = setTimeout(function () {
+        if (loading !== attempt) return;
+        finishInitialRead(attempt, true);
+        initialLoadFailed("This track is taking too long to load. Use Retry load to try again.");
+      }, STUDIO_LOAD_TIMEOUT_MS);
+    }
+    retryLoad.addEventListener("click", function () {
+      if (jobId) load();
+    });
+
     function load() {
       if (!currentPage() || state || loading) return;
       if (!jobId) {
@@ -476,17 +520,37 @@
         }).catch(function (e) { setStatus("Could not start a track: " + e.message, "bad"); });
         return;
       }
-      loading = true;
-      api("GET").then(function (res) {
-        if (!currentPage()) return;
-        if (!res.ok) { setStatus(res.body.error || "Could not load this track.", "bad"); return; }
-        adoptState(res.body);
+      var attempt = { jobId: jobId, controller: new AbortController(), timer: null };
+      loading = attempt;
+      retryLoad.hidden = true;
+      setStatus("Loading saved track…");
+      armInitialDeadline(attempt);
+      api("GET", undefined, attempt.controller.signal).then(function (res) {
+        // A timed-out or retired read can finish after Retry. Preserve the
+        // exact current attempt, mounted Studio and requested project.
+        if (loading !== attempt || !currentPage() || attempt.jobId !== jobId) return;
+        if (!res.ok) {
+          var message = res.status === 404 ? "Could not find this track here." :
+            (res.status === 401 || res.status === 403) ? "Studio could not verify access to this track." : "Could not load this track.";
+          finishInitialRead(attempt, true); // do not leave the unread error body flowing
+          initialLoadFailed(message + " Use Retry load to try again.");
+          return;
+        }
+        var next = res.body;
+        if (!next || next.ok !== true || !Array.isArray(next.versions) || !Array.isArray(next.edits) ||
+            next.versions.some(function (v) { return !v || typeof v.url !== "string"; }) ||
+            next.edits.some(function (e) { return !e || typeof e !== "object"; }) ||
+            (next.asset !== null && (!next.asset || typeof next.asset.url !== "string"))) {
+          throw new Error("Track load was not confirmed.");
+        }
+        adoptState(next);
+        if (state.asset) setStatus("Loaded " + state.versions.length + " version(s).", "good");
+        else setStatus("No track yet — fill in the brief and press Create track.");
         if (window.BeeZillaChat) mountAI();
         else { var s2 = document.createElement("script"); s2.src = "/buzzy/chat.js"; s2.onload = mountAI; document.head.appendChild(s2); }
-        if (state.asset) setStatus("Loaded " + (state.versions || []).length + " version(s).", "good");
-        else setStatus("No track yet — fill in the brief and press Create track.");
-      }).catch(function () { setStatus("Could not load this track. Reload to try again.", "bad"); })
-        .then(function () { loading = false; });
+      }).catch(function () {
+        if (loading === attempt && !state) initialLoadFailed("Could not load this track. Use Retry load to try again.");
+      }).then(function () { finishInitialRead(attempt, false); });
     }
 
     function planFromForm() {
