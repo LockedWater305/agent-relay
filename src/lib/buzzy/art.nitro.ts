@@ -98,7 +98,7 @@ export default defineEventHandler(async (event) => {
       url: `/buzzy/sketch?job=${jobId}`,
       updatedAt: new Date().toISOString(),
     };
-    await sql`
+    const updated = await sql<{ id: string }>`
       UPDATE buzzy_jobs SET
         data = jsonb_set(
           jsonb_set(COALESCE(data, '{}'::jsonb), '{board}', ${JSON.stringify(board)}::jsonb, true),
@@ -107,7 +107,12 @@ export default defineEventHandler(async (event) => {
                     WHERE x->>'kind' <> 'board'), '[]'::jsonb) || ${JSON.stringify([source])}::jsonb,
           true),
         updated_at = now()
-      WHERE id = ${jobId} AND user_id = ${user.id}`;
+      WHERE id = ${jobId} AND user_id = ${user.id}
+      RETURNING id`;
+    // An earlier ownership read alone cannot prove the write changed a row.
+    if (updated.length !== 1 || updated[0]?.id !== jobId) {
+      return json(409, { error: "Board save was not applied", code: "conflict" });
+    }
     return json(200, { ok: true, saved: true });
   }
 

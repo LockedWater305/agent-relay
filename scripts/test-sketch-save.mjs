@@ -930,3 +930,24 @@ test('first-save failure remains an error until an explicit successful retry',as
  assert.equal(f.requests.filter(r=>r.url==='/api/buzzy/jobs').length,1);
  assert.deepEqual(f.posts().map(r=>r.status),[500,200]);
 });
+
+test('a suppressed Art save cannot acknowledge an unchanged board and explicit retry still works', async t=>{
+ const f=await fixture(t),page=await f.mount();
+ const before=plain(f.data());
+ await page.draw();
+ f.db.exec(`CREATE TRIGGER suppress_sketch_save BEFORE UPDATE ON buzzy_jobs
+   WHEN old.id = 'job_board' BEGIN SELECT RAISE(IGNORE); END;`);
+ await page.save();
+ assert.deepEqual(f.data(),before);
+ assert.notEqual(f.posts()[0].response.saved,true,'an unchanged board must not be acknowledged as saved');
+ assert.equal(f.posts()[0].status,409);
+ assert.match(page.el('savedFlag').textContent,/Not saved/);
+ assert.doesNotMatch(page.el('status').textContent,/Board saved\./);
+ f.db.exec('DROP TRIGGER suppress_sketch_save');
+ await page.save();
+ assert.equal(f.posts()[1].status,200);
+ assert.deepEqual(f.posts()[1].response,{ok:true,saved:true});
+ assert.equal(f.data().board.strokes.length,before.board.strokes.length+1);
+ assert.equal(f.posts().length,2,'no automatic extra mutation');
+ assert.match(page.el('savedFlag').textContent,/Saved to project/);
+});
