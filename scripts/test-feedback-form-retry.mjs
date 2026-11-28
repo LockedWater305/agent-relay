@@ -73,6 +73,12 @@ async function form(t, responses) {
         case "hung-body":
           return Promise.resolve({ ok: true, json: () => stall(options.signal) });
         case "ok": return reply();
+        case "deferred-offline": return new Promise((_resolve, reject) => {
+          window.pendingFeedback.push(() => reject(new TypeError("Synthetic offline")));
+        });
+        case "deferred-503": return new Promise(resolve => {
+          window.pendingFeedback.push(() => reply({ok:false,error:"Synthetic inbox unavailable."}, 503).then(resolve));
+        });
         case "deferred-ok": return new Promise(resolve => {
           window.pendingFeedback.push(() => reply().then(resolve));
         });
@@ -449,5 +455,70 @@ test("empty draft validation does not overwrite an unresolved prior send", async
   await page.locator("#bzFbText").fill("");
   await send.click();
   assert.match(await status.textContent(), /tell us what happened first.*earlier attempt is still unconfirmed.*duplicate/i);
+  assert.equal((await calls()).length, 1);
+});
+
+test("keyboard retry returns focus to Try again and a confirmed retry focuses its single receipt", async (t) => {
+  const { page, calls } = await form(t, ["deferred-503", "deferred-ok"]);
+  const send = page.locator("#bzFbSend");
+  await send.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.activeElement === document.body);
+  await resolveEarlierReceipt(page);
+  assert.equal(await send.textContent(), "Try again");
+  assert.equal(await send.evaluate(el => document.activeElement === el), true, "retry focus must be restored after the disabled button lost it");
+  assert.equal(await page.locator("#bzFbText").inputValue(), firstDraft);
+  assert.equal(await page.locator("#bzFbShotImg").getAttribute("src"), imageUrl);
+  assert.equal((await calls()).length, 1);
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.activeElement === document.body);
+  await resolveEarlierReceipt(page);
+  assert.equal(await page.locator("#bzFbRef").count(), 1);
+  assert.equal(await page.locator("#bzFbRef").textContent(), "BZ-FB-GHJKLM");
+  assert.equal(await page.locator("#bzFbRef").evaluate(el => document.activeElement.contains(el) && document.activeElement !== document.body), true);
+  await page.keyboard.press("Tab");
+  assert.equal(await page.locator("#bzFbAgain").evaluate(el => document.activeElement === el), true);
+  const sent = await calls();
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[0], sent[1]);
+});
+
+test("a delayed failure never takes focus away from someone editing their draft", async (t) => {
+  const { page, calls } = await form(t, ["deferred-503"]);
+  const send = page.locator("#bzFbSend");
+  const draft = page.locator("#bzFbText");
+  await send.focus();
+  await page.keyboard.press("Enter");
+  await draft.fill(secondDraft);
+  await resolveEarlierReceipt(page);
+  assert.equal(await draft.evaluate(el => document.activeElement === el), true);
+  assert.equal(await draft.inputValue(), secondDraft);
+  assert.equal((await calls()).length, 1);
+});
+
+test("a delayed receipt leaves focus on the Feedback launcher when someone has closed it", async (t) => {
+  const { page, calls } = await form(t, ["deferred-ok"]);
+  const send = page.locator("#bzFbSend");
+  await send.focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await resolveEarlierReceipt(page);
+  assert.equal(await page.getByRole("button", { name: "Feedback", exact: true }).evaluate(el => document.activeElement === el), true);
+  assert.equal(await page.locator("#bzFbRef").count(), 1);
+  assert.equal((await calls()).length, 1);
+});
+
+test("an offline keyboard attempt restores focus without retrying or promising delivery", async (t) => {
+  const { page, calls } = await form(t, ["deferred-offline"]);
+  const send = page.locator("#bzFbSend");
+  await send.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.activeElement === document.body);
+  await resolveEarlierReceipt(page);
+  assert.equal(await send.evaluate(el => document.activeElement === el), true);
+  assert.match(await page.locator("#bzFbStatus").textContent(), /could not confirm.*retrying could send it twice/i);
+  assert.equal(await page.locator("#bzFbRef").count(), 0);
+  assert.equal(await page.locator("#bzFbText").inputValue(), firstDraft);
+  assert.equal(await page.locator("#bzFbShotImg").getAttribute("src"), imageUrl);
   assert.equal((await calls()).length, 1);
 });

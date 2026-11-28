@@ -1401,17 +1401,6 @@
         ? message + " An earlier attempt is still unconfirmed. Resending that report may create a duplicate."
         : message;
     }
-    function restoreFeedbackDraft(message) {
-      sending = false;
-      send.disabled = false;
-      send.textContent = "Try again";
-      status.textContent = message;
-    }
-    function unconfirmedFeedback() {
-      earlierReportUnconfirmed = true;
-      restoreFeedbackDraft("We could not confirm that your report arrived. Your draft is still here. Retrying could send it twice.");
-    }
-
     function submit() {
       if (sending) return;
       refs();
@@ -1440,6 +1429,25 @@
         payload.diag = d.value;
         payload.diag.redactions = { count: d.count, kinds: d.kinds };
       }
+      var sendHadFocus = document.activeElement === send;
+      function shouldRestoreSendFocus() {
+        // Disabling the focused button can leave focus on the document body.
+        // Do not take focus from another control or a closed/minimized panel.
+        return sendHadFocus && panel.classList.contains("open") && !panel.classList.contains("min") &&
+          (document.activeElement === document.body || document.activeElement === send);
+      }
+      function restoreFeedbackDraft(message) {
+        sending = false;
+        send.disabled = false;
+        send.textContent = "Try again";
+        status.textContent = message;
+        if (shouldRestoreSendFocus()) send.focus();
+      }
+      function unconfirmedFeedback() {
+        earlierReportUnconfirmed = true;
+        restoreFeedbackDraft("We could not confirm that your report arrived. Your draft is still here. Retrying could send it twice.");
+      }
+
       sending = true;
       send.disabled = true;
       status.textContent = "Sending\u2026";
@@ -1464,16 +1472,19 @@
             send.disabled = false;
             send.textContent = "Send current draft";
             status.textContent = withEarlierFeedbackWarning("Your earlier report was saved as " + ref + ". Your current draft has not been sent.");
+            if (shouldRestoreSendFocus()) send.focus();
             return;
           }
           earlierReportUnconfirmed = false;
           invalidateVoiceDraft();
+          var focusReceipt = shouldRestoreSendFocus();
           body.innerHTML =
             '<div class="bz-fb-done"><p><strong>Thank you \u2014 that reached us.</strong></p>' +
-            '<p>Your reference is <code id="bzFbRef"></code>.</p>' +
+            '<p id="bzFbReceipt" tabindex="-1">Your reference is <code id="bzFbRef"></code>.</p>' +
             '<p class="bz-fb-hint">Keep it if you follow up; it is how we find your report.</p>' +
             '<button type="button" class="bz-fb-link" id="bzFbAgain">Send another</button></div>';
           body.querySelector("#bzFbRef").textContent = ref;
+          if (focusReceipt) body.querySelector("#bzFbReceipt").focus();
           body.querySelector("#bzFbAgain").addEventListener("click", function () {
             mounted = false;
             shot = null;
