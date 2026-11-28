@@ -525,3 +525,23 @@ test("a failed manual-key save does not rewrite the last confirmed Connect statu
   assert.equal(page.nodes.get("connect-hint").textContent, "Connected.");
   assert.match(page.nodes.get("inference-current").innerHTML, /BeeZilla inference/);
 });
+
+for (const failedRead of ["refused", "thrown"]) {
+  test(`completed sign-in distinguishes an unavailable post-connect Settings refresh (${failedRead})`, async () => {
+    let reads = 0, attempts = 0;
+    const page = rendererFixture({
+      get: async () => {
+        if (++reads === 1) return { ok: true, data: state() };
+        if (failedRead === "thrown") throw new Error("synthetic bridge disconnect");
+        return { ok: false, error: "synthetic bridge unavailable" };
+      },
+      connect: async () => { attempts++; return { ok: true, data: { ok: true } }; },
+    });
+    await page.idle();
+    await page.click();
+    assert.match(page.nodes.get("connect-hint").textContent, /Account connected.*couldn’t refresh Settings.*Reopen Settings/i);
+    assert.equal(page.nodes.get("connect-account").disabled, true);
+    await page.click();
+    assert.equal(attempts, 1, "do not re-run sign-in using an unverified stale capability");
+  });
+}

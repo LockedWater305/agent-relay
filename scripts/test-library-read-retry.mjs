@@ -313,3 +313,53 @@ test("freezing a pending read-only retry leaves its returned history uncommitted
   assert.match(await page.locator(".doclist").textContent(),/paused during the runtime transition/);
   assert.equal(calls.length,4);
 });
+
+test("a warm vault refresh preserves an open version's selection, scroll, and keyboard focus",{timeout:12000},async t=>{
+  const longText=Array.from({length:120},(_,i)=>"Fixture draft line "+i).join("\n");
+  const selected={jobId:"fixture_a",document:{name:"same.md",md:longText,createdAt:3}};
+  const {page,calls}=await fixture(t,(r,i)=>pageRows(r,i===1?[reports[0],selected]:[
+    reports[0],selected,{jobId:"fixture_a",document:{name:"same.md",md:"New version",createdAt:4}}
+  ]));
+  await page.goto(origin+"/buzzy/library?job=fixture_a");
+  await page.getByRole("button",{name:"Open",exact:true}).nth(1).click();
+  const anchor=await page.locator(".docviewer").elementHandle();
+  await page.evaluate(()=>{
+    const viewer=document.querySelector(".docviewer"), text=viewer.firstChild, range=document.createRange();
+    viewer.style.maxHeight="160px"; viewer.style.overflow="auto";
+    document.querySelector("#docCopy").focus();
+    range.setStart(text,0);range.setEnd(text,12);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    viewer.scrollTop=300;
+  });
+  const before=await page.evaluate(()=>({
+    selected:window.getSelection().toString(), y:document.querySelector(".docviewer").scrollTop,
+    focused:document.activeElement.id
+  }));
+  assert.deepEqual(before,{selected:"Fixture draf",y:300,focused:"docCopy"});
+  await page.evaluate(()=>window.BeeZillaLibraryVault.refresh());
+  assert.equal(await page.locator(".docviewer").textContent(),longText);
+  assert.equal(await anchor.evaluate(viewer=>viewer===document.querySelector(".docviewer")),true,"warm sync must not replace the current version's viewer");
+  assert.deepEqual(await page.evaluate(()=>({
+    selected:window.getSelection().toString(), y:document.querySelector(".docviewer").scrollTop,
+    focused:document.activeElement.id
+  })),before);
+  await page.locator("#docsBackList").click();
+  await page.getByRole("button",{name:"Open",exact:true}).nth(2).click();
+  assert.equal(await page.locator(".docviewer").textContent(),"New version");
+  assert.equal(calls.length,4);
+});
+
+test("a refreshed snapshot without the open version drops that viewer",{timeout:12000},async t=>{
+  const {page,calls}=await fixture(t,(r,i)=>pageRows(r,i===1?reports:[reports[0],reports[2]]));
+  await page.goto(origin+"/buzzy/library?job=fixture_a");
+  await page.getByRole("button",{name:"Open",exact:true}).nth(1).click();
+  const anchor=await page.locator(".docviewer").elementHandle();
+  assert.equal(await anchor.textContent(),"Second version in folder A");
+  await page.evaluate(()=>window.BeeZillaLibraryVault.refresh());
+  assert.equal(await anchor.evaluate(viewer=>viewer.isConnected),false);
+  assert.equal(await page.locator(".docviewer").count(),0);
+  await page.getByRole("button",{name:"Open",exact:true}).click();
+  assert.equal(await page.locator(".docviewer").textContent(),"First version in folder A");
+  assert.equal(calls.length,4);
+});

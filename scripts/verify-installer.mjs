@@ -26,6 +26,7 @@ const APP = join(UNPACKED, "app");
 
 const allowZeroPins = process.argv.includes("--allow-zero-pins");
 let failures = 0;
+const isFile = (path) => lstatSync(path, { throwIfNoEntry: false })?.isFile() === true;
 const check = (name, ok, detail = "") => {
   if (!ok) failures++;
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
@@ -102,7 +103,7 @@ if (!existsSync(APP)) {
   }
 
   const migrations = join(APP, "migrations");
-  const sql = existsSync(migrations) ? readdirSync(migrations).filter((f) => f.endsWith(".sql")).length : 0;
+  const sql = existsSync(migrations) ? readdirSync(migrations, { withFileTypes: true }).filter((f) => f.isFile() && f.name.endsWith(".sql")).length : 0;
   check("migrations are staged", sql > 0, `${sql} .sql file(s)`);
 
   // PGLite's data/wasm files are restored into .output/server/_libs by the launcher
@@ -111,7 +112,7 @@ if (!existsSync(APP)) {
   const libs = join(APP, ".output", "server", "_libs");
   const pkgDist = join(APP, "node_modules", "@electric-sql", "pglite", "dist");
   const assets = ["pglite.data", "pglite.wasm", "initdb.wasm"].filter(
-    (f) => existsSync(join(libs, f)) || existsSync(join(pkgDist, f)),
+    (f) => isFile(join(libs, f)) || isFile(join(pkgDist, f)),
   );
   check("PGLite assets are available to the launcher", assets.length === 3, `${assets.length}/3`);
   check(

@@ -1187,6 +1187,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
     }
     function docRef(doc) { return doc._vaultRef || doc.name; }
     var showRecoveredFolders = false, archiveCheckNotice = "";
+    var renderedVaultViewer = null;
     var libraryArchiveRoot = document.getElementById("app"), libraryReadRetry = null;
     var libraryReadEntry = window.location.pathname + window.location.search;
     function ownsLibraryDocs() {
@@ -1233,7 +1234,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       // The shell restores real cached DOM nodes and their closures. Resolve
       // the currently mounted page, not the last Library URL that ran a script.
       document.getElementById("app").__bzLibraryVaultUpdate = function (changed, readOnly) {
-        if (changed && state.screen === "docs") goDocs(readOnly);
+        if (changed && state.screen === "docs") goDocs(readOnly, true);
         else paintLibrarySync();
       };
       window.BeeZillaLibraryVault.onChange(function (changed, readOnly) {
@@ -1418,7 +1419,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       return "<p class='muted' id='libraryDocsEmpty' data-library-empty='" + escAttr(message) + "'>" + escHtml(message) + "</p>";
     }
 
-    function goDocs(readOnly) {
+    function goDocs(readOnly, fromVaultUpdate) {
       setPhase("Library");
       var syncMarkup = window.BeeZillaLibraryVault
         ? "<p id='librarySyncStatus' class='muted' role='status'></p>" +
@@ -1444,12 +1445,27 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
         const doc = docs.find((d) => docRef(d) === docsOpenDoc);
         const job = catalog.jobs.find((x) => x.id === docsOpenFolder);
         if (!doc) { docsOpenDoc = null; return goDocs(readOnly); }
+        const folderTitle = job ? jobTitle(job) : docsOpenFolder;
+        const vaultScope = window.BeeZillaLibraryVault && window.BeeZillaLibraryVault.status();
+        const viewerKey = vaultScope && JSON.stringify([
+          vaultScope.storeId, vaultScope.generation, docsOpenFolder, docRef(doc), folderTitle
+        ]);
+        // The vault keeps a stable reference for each exact record in this
+        // renderer. A status/snapshot update must not replace an unchanged
+        // open viewer and interrupt reading, selection or keyboard focus.
+        if (fromVaultUpdate && viewerKey && renderedVaultViewer &&
+            renderedVaultViewer.key === viewerKey &&
+            renderedVaultViewer.node === app.querySelector(".docviewer")) {
+          paintLibrarySync();
+          return;
+        }
         app.innerHTML =
-          "<div class='docs-back'><button id='docsBackList' class='secondary'>← " + escHtml(job ? jobTitle(job) : docsOpenFolder) + "</button></div>" +
+          "<div class='docs-back'><button id='docsBackList' class='secondary'>← " + escHtml(folderTitle) + "</button></div>" +
           "<h1>" + escHtml(doc.name) + "</h1>" +
           "<p class='muted'>Updated " + new Date(doc.updatedAt || doc.createdAt).toLocaleString() + "</p>" +
           "<div class='row'><button id='docDl'>Download .md</button><button id='docDlWord' class='secondary'>Download Word</button><button id='docDlPdf' class='secondary'>Download PDF</button><button id='docCopy' class='secondary'>Copy text</button></div>" +
           "<div class='docviewer'>" + escHtml(doc.md) + "</div>" + syncMarkup;
+        renderedVaultViewer = viewerKey ? { key: viewerKey, node: app.querySelector(".docviewer") } : null;
         paintLibrarySync();
         document.getElementById("docsBackList").onclick = () => { docsOpenDoc = null; goDocs(); };
         document.getElementById("docDl").onclick = () => downloadText(doc.name, doc.md, "text/markdown");
@@ -1483,6 +1499,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       }
 
       if (docsOpenFolder) {
+        renderedVaultViewer = null;
         // ── File list for one folder ──
         const docs = all[docsOpenFolder] || [];
         const job = catalog.jobs.find((x) => x.id === docsOpenFolder);
@@ -1514,6 +1531,7 @@ This is paperwork you can hand to contractors. BeeZilla is not hiring anyone or 
       }
 
       // ── Folder grid — this company's library only ──
+      renderedVaultViewer = null;
       const folders = Object.keys(all)
         .map((id) => ({ id: id, docs: all[id], job: catalog.jobs.find((x) => x.id === id) }))
         .filter((f) => {

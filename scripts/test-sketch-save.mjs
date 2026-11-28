@@ -878,3 +878,55 @@ test('the SVG Brush dot keeps benign attribute text literal and skips an invalid
  assert.deepEqual(f.data().board,board);
  assert.equal(f.posts().length,0);
 });
+
+test('first-save status persists without changing save or navigation behavior',async t=>{
+ const f=await fixture(t),p=await f.mount(null),job=f.defer(),art=f.defer();
+ f.transport=async(req,next)=>{
+   if(req.url==='/api/buzzy/jobs')await job.promise;
+   if(req.url==='/api/buzzy/art'&&req.method==='POST')await art.promise;
+   return next();
+ };
+ assert.equal(p.el('savedFlag').textContent,'');
+ await p.draw();
+ assert.equal(p.el('savedFlag').textContent,'First save pending. Keep this board open.');
+ await p.save();
+ assert.equal(p.el('savedFlag').textContent,'First save pending. Keep this board open.');
+ job.resolve();await drain();
+ assert.match(f.h.location.search,/^\?job=job_art_/);
+ assert.equal(p.el('savedFlag').textContent,'First save pending. Keep this board open.');
+ await p.draw();
+ assert.equal(p.el('savedFlag').textContent,'First save pending. Keep this board open.');
+ art.resolve();await drain();
+ assert.equal(p.el('savedFlag').textContent,'Saved to project');
+ const id=f.uiRequests.find(r=>r.url==='/api/buzzy/jobs').body.id;
+ assert.deepEqual(f.posts().map(r=>r.body.board.strokes.length),[1,2]);
+ assert.equal(f.data(id).board.strokes.length,2);
+ await f.h.shell.go('/buzzy/memory');
+ f.h.history.back();await f.h.idle();
+ assert.equal(f.h.location.search,'?job='+id);
+ f.h.history.forward();await f.h.idle();
+ assert.equal(f.h.location.pathname,'/buzzy/memory');
+});
+
+test('first-save warning is a polite live region; existing boards keep normal save copy',async t=>{
+ assert.match(html,/<span id="savedFlag" role="status"/);
+ const f=await fixture(t),p=await f.mount(),art=f.defer();
+ f.transport=async(req,next)=>{if(req.method==='POST')await art.promise;return next();};
+ await p.draw();assert.equal(p.el('savedFlag').textContent,'Unsaved changes');
+ await p.save();assert.equal(p.el('savedFlag').textContent,'Saving…');
+ art.resolve();await drain();assert.equal(p.el('savedFlag').textContent,'Saved to project');
+});
+
+test('first-save failure remains an error until an explicit successful retry',async t=>{
+ const f=await fixture(t),p=await f.mount(null);
+ await p.draw();
+ f.failSave(true);
+ await p.save();
+ assert.match(p.el('savedFlag').textContent,/Not saved.*keep this board open/);
+ assert.equal(p.stage.isConnected,true);
+ f.failSave(false);
+ await p.save();
+ assert.equal(p.el('savedFlag').textContent,'Saved to project');
+ assert.equal(f.requests.filter(r=>r.url==='/api/buzzy/jobs').length,1);
+ assert.deepEqual(f.posts().map(r=>r.status),[500,200]);
+});

@@ -450,7 +450,16 @@
             $("connect-hint").textContent = error;
             return;
           }
-          await refresh();
+          // Sign-in succeeded; reading Settings afterward is a separate operation.
+          const refreshed = await refresh().catch(() => null);
+          if (!refreshed?.ok) {
+            lastState = {
+              ...lastState,
+              capabilities: { ...lastState?.capabilities, managedAccountConnect: undefined },
+            };
+            $("connect-hint").textContent = "Account connected, but couldn’t refresh Settings. Reopen Settings to see the current status.";
+            return;
+          }
           $("connect-hint").textContent = "Connected.";
         } catch {
           $("connect-hint").textContent = "Could not connect. Reopen Settings to try again.";

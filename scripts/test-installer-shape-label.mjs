@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
-function run(t, exe, args = []) {
+function run(t, exe, args = [], transformStage = () => {}) {
   const dir=mkdtempSync(join(tmpdir(),"bee-shape-"));
   t.after(()=>rmSync(dir,{recursive:true,force:true}));
   function out(path, bytes) {
@@ -30,6 +30,7 @@ function run(t, exe, args = []) {
   out(app+"scripts/beezilla-local.mjs","ensurePgliteAssets BZ_SEARCH_EXPIRED");
   out(app+"scripts/lib/parent-watchdog.cjs","fixture watchdog");
   out(app+"bin/beezilla.mjs","fixture cli");
+  transformStage(join(dir,app));
   out("mock.cjs",`
     const cp=require("node:child_process"),fs=require("node:fs");
     cp.execFileSync=(cmd,args)=>{
@@ -66,4 +67,34 @@ test("zero pin fixture still fails without explicit local test allowance",t=>{
   const r=run(t,"BeeZilla-Setup-0.0.1.exe");
   assert.notEqual(r.code,0,r.text);
   assert.match(r.text,/at least one publisher is pinned/i);
+});
+
+test("directories with SQL migration names do not count as staged migrations",t=>{
+  const r=run(t,"BeeZilla-Setup-0.0.1.exe",["--allow-zero-pins"],app=>{
+    const path=join(app,"migrations","stub.sql");
+    rmSync(path);
+    mkdirSync(path);
+  });
+  assert.notEqual(r.code,0,r.text);
+  assert.match(r.text,/FAIL  migrations are staged .*0 \.sql file/);
+});
+test("directories with PGLite payload names do not satisfy the staged runtime check",t=>{
+  const r=run(t,"BeeZilla-Setup-0.0.1.exe",["--allow-zero-pins"],app=>{
+    const path=join(app,".output","server","_libs","pglite.wasm");
+    rmSync(path);
+    mkdirSync(path);
+  });
+  assert.notEqual(r.code,0,r.text);
+  assert.match(r.text,/FAIL  PGLite assets are available to the launcher .*2\/3/);
+});
+test("PGLite regular files in the package fallback remain sufficient",t=>{
+  const r=run(t,"BeeZilla-Setup-0.0.1.exe",["--allow-zero-pins"],app=>{
+    const path=join(app,".output","server","_libs","pglite.wasm");
+    rmSync(path);
+    const fallback=join(app,"node_modules","@electric-sql","pglite","dist");
+    mkdirSync(fallback,{recursive:true});
+    writeFileSync(join(fallback,"pglite.wasm"),"test");
+  });
+  assert.equal(r.code,0,r.text);
+  assert.match(r.text,/PASS  PGLite assets are available to the launcher .*3\/3/);
 });

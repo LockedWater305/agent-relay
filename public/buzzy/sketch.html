@@ -85,7 +85,7 @@
     <button id="redo" title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
     <button id="clear">Clear drawing</button>
     <button id="save">Save</button>
-    <span id="savedFlag" style="font-size:.76rem;align-self:center"></span>
+    <span id="savedFlag" role="status" style="font-size:.76rem;align-self:center"></span>
     <button id="shot" title="Download a PNG of the board">Export PNG</button>
     <button id="svg" title="Download the drawing as vector SVG (images are not included)">Export SVG</button>
   </div>
@@ -189,9 +189,17 @@
       if (undoStack.length > 50) undoStack.shift();
       redoStack.length = 0;
     }
+    function setPendingSaveStatus(text) {
+      if (!initialJobId && savedRevision === 0) {
+        // Until the first board write is confirmed, recommend remaining on the
+        // board. This is guidance only: do not intercept navigation or writes.
+        var firstSaveHint = "First save pending. Keep this board open.";
+        if ($("savedFlag").textContent !== firstSaveHint) setSaved(firstSaveHint, false);
+      } else setSaved(text, false);
+    }
     function changed() {
       revision++;
-      setSaved("Unsaved changes", false);
+      setPendingSaveStatus("Unsaved changes");
       autoSave();
     }
     function autoSave() {
@@ -207,7 +215,7 @@
       if (pendingSave) return pendingSave.then(function (ok) { return ok ? flushSave() : false; });
       if (savedRevision === revision) return Promise.resolve(true);
       var submittedRevision = revision, board = JSON.stringify(boardJson());
-      setSaved("Saving…", false);
+      setPendingSaveStatus("Saving…");
       pendingSave = ensureJob().then(function (id) {
         if (!ownsPage()) throw new Error("Board is no longer open.");
         return fetch("/api/buzzy/art", {

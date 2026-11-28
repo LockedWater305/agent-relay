@@ -541,6 +541,7 @@ function registerSettingsIpc() {
 
 let canReopenMainWindow = false;
 let openingMainWindow = null;
+const mainWindowsAwaitingFirstPaint = new WeakSet();
 const mainPagesLoaded = new WeakSet();
 const mainPagesToRetry = new WeakMap();
 // One install, one runtime: a second launch must focus or reopen the window,
@@ -555,9 +556,13 @@ function focusOrReopenMainWindow() {
   if (quitting) return;
   const win = mainWindow;
   if (win) {
-    if (win.isMinimized()) win.restore();
-    if (win.isVisible()) win.focus();
-    else win.show(); // Showing also focuses a window hidden without minimization.
+    // An activation while this new window is still painting should not
+    // reveal its blank frame. The ready-to-show listener will present it.
+    if (!mainWindowsAwaitingFirstPaint.has(win)) {
+      if (win.isMinimized()) win.restore();
+      if (win.isVisible()) win.focus();
+      else win.show(); // Showing also focuses a window hidden without minimization.
+    }
     if (!mainPagesToRetry.has(win) && currentRuntimeBinding(supervisor.runtime)) return;
   }
   // The first window is created by startup after Electron and the local
@@ -997,7 +1002,11 @@ async function createWindow() {
   });
 
   const win = mainWindow;
-  win.once("ready-to-show", () => { if (mainWindow === win) win.show(); });
+  if (!process.env.BZ_SMOKE) mainWindowsAwaitingFirstPaint.add(win);
+  win.once("ready-to-show", () => {
+    mainWindowsAwaitingFirstPaint.delete(win);
+    if (mainWindow === win) win.show();
+  });
   win.on("closed", () => {
     if (mainWindow === win) mainWindow = null;
   });

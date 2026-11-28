@@ -51,7 +51,14 @@ export async function desktop(t,fixtures,options={}) {
     if(policy.cancel){wc.emit('did-fail-load',{},-3,'ERR_ABORTED',url,true);throw Error('Navigation cancelled by actual main request policy');}
     if(options.beforeLoad)await options.beforeLoad(url);
     this.fixture.h.location.href=url;wc.mainFrame=frame(this);
-    wc.emit('did-navigate',{},url,200,'OK');wc.emit('did-finish-load');return undefined;
+    wc.emit('did-navigate',{},url,200,'OK');wc.emit('did-finish-load');
+    // Electron emits one ready-to-show per host; allow targeted tests to
+    // release first paint explicitly after navigation completes.
+    if (!this.firstPaintModeled) {
+      this.firstPaintModeled = true;
+      if (!options.deferMainFirstPaint?.(this)) this.emit('ready-to-show');
+    }
+    return undefined;
    };
    wc.reload=()=>wc.loadURL(wc.getURL());
    this.scripts=[];windows.push(this);
@@ -464,6 +471,32 @@ for (const [platform, signal] of [['darwin', 'activate'], ['win32', 'second-inst
       assert.equal(d.starts, 1);
     });
   }
+}
+
+for (const signal of ['activate', 'second-instance']) {
+  test('unpainted main: ' + signal + ' does not reveal the white startup surface', async t => {
+    const f = await fixture(t);
+    const d = await desktop(t, [f], { deferMainFirstPaint: w => w.config.title === 'BeeZilla' });
+    const calls = [];
+    let visible = false;
+    d.main.isVisible = () => visible;
+    d.main.show = () => { visible = true; calls.push('show'); };
+    d.main.focus = () => { calls.push('focus'); };
+    assert.equal(d.main.config.show, false, 'ordinary startup waits for Electron first paint');
+
+    // Observe the post-paint foreground request as a negative control even
+    // if the pre-paint snapshot disagrees: the intended order is observable.
+    d.app.emit(signal, {}, false);
+    await drain();
+    const beforePaint = [...calls];
+    d.main.emit('ready-to-show');
+    d.app.emit('second-instance');
+    await drain();
+    assert.deepEqual(beforePaint, [], 'never show/focus a not-yet-painted main window');
+    assert.deepEqual(calls, ['show', 'focus']);
+    assert.equal(d.starts, 1);
+    assert.equal(d.windows.length, 1);
+  });
 }
 
 test('main visibility: activate preserves another visible window without surfacing the hidden main', async t => {
