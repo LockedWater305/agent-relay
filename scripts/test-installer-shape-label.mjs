@@ -98,3 +98,29 @@ test("PGLite regular files in the package fallback remain sufficient",t=>{
   assert.equal(r.code,0,r.text);
   assert.match(r.text,/PASS  PGLite assets are available to the launcher .*3\/3/);
 });
+
+for (const primary of ["empty", "directory"]) {
+  test(`${primary === "empty" ? "an empty" : "a directory"} staged PGLite target cannot hide behind a valid fallback`, t => {
+    const r = run(t, "BeeZilla-Setup-0.0.1.exe", ["--allow-zero-pins"], app => {
+      const path = join(app, ".output", "server", "_libs", "pglite.wasm");
+      if (primary === "empty") writeFileSync(path, "");
+      else { rmSync(path); mkdirSync(path); }
+      const fallback = join(app, "node_modules", "@electric-sql", "pglite", "dist");
+      mkdirSync(fallback, { recursive: true });
+      writeFileSync(join(fallback, "pglite.wasm"), "test");
+    });
+    assert.notEqual(r.code, 0, r.text);
+    assert.match(r.text, /FAIL  PGLite assets are available to the launcher .*2\/3/);
+  });
+}
+
+test("an empty PGLite fallback cannot supply a missing staged target", t => {
+  const r = run(t, "BeeZilla-Setup-0.0.1.exe", ["--allow-zero-pins"], app => {
+    rmSync(join(app, ".output", "server", "_libs", "pglite.wasm"));
+    const fallback = join(app, "node_modules", "@electric-sql", "pglite", "dist");
+    mkdirSync(fallback, { recursive: true });
+    writeFileSync(join(fallback, "pglite.wasm"), "");
+  });
+  assert.notEqual(r.code, 0, r.text);
+  assert.match(r.text, /FAIL  PGLite assets are available to the launcher .*2\/3/);
+});

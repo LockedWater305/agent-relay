@@ -26,7 +26,7 @@ const APP = join(UNPACKED, "app");
 
 const allowZeroPins = process.argv.includes("--allow-zero-pins");
 let failures = 0;
-const isFile = (path) => lstatSync(path, { throwIfNoEntry: false })?.isFile() === true;
+const isNonemptyFile = (stat) => stat?.isFile() === true && stat.size > 0;
 const check = (name, ok, detail = "") => {
   if (!ok) failures++;
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
@@ -111,9 +111,12 @@ if (!existsSync(APP)) {
   // matters is that the bytes are present somewhere the launcher can find them.
   const libs = join(APP, ".output", "server", "_libs");
   const pkgDist = join(APP, "node_modules", "@electric-sql", "pglite", "dist");
-  const assets = ["pglite.data", "pglite.wasm", "initdb.wasm"].filter(
-    (f) => isFile(join(libs, f)) || isFile(join(pkgDist, f)),
-  );
+  const assets = ["pglite.data", "pglite.wasm", "initdb.wasm"].filter((f) => {
+    // The launcher copies the fallback only when the staged target is absent.
+    // An existing empty, linked, or non-file target is not repaired at startup.
+    const staged = lstatSync(join(libs, f), { throwIfNoEntry: false });
+    return isNonemptyFile(staged ?? lstatSync(join(pkgDist, f), { throwIfNoEntry: false }));
+  });
   check("PGLite assets are available to the launcher", assets.length === 3, `${assets.length}/3`);
   check(
     "the launcher restores them at boot",
